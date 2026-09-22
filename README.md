@@ -28,6 +28,39 @@ JSON-LD is the source notation, not the query engine, reasoner, SHACL engine or
 runtime. Those responsibilities remain explicit: `org-w3-json-ld-api`,
 `org-w3-rdf-canon`, OaK's OWL/SPARQL/SHACL adapters, and Kotoba/Amu.
 
+## Published Mithril code and libraries
+
+The repository now contains source authored in Mithril itself:
+
+- [`lib/web/v1.mith`](lib/web/v1.mith) is the first reusable Mithril library.
+  It exports a closed exact router, static-response handler, text view and HTTP
+  response effect as typed ontology symbols.
+- [`examples/hello-web.mith`](examples/hello-web.mith) is a Mithril web
+  application. It imports the library by its canonical RDF Dataset digest and
+  defines `GET` and `HEAD` routes without generated source text.
+
+The v1 web slice is deliberately small but executable. The compiler rejects a
+changed library digest, a route that names anything except an imported handler,
+unknown source keys, unsupported methods, malformed paths and duplicate route
+identities. `mithril.web/dispatch` then executes the admitted Web IR without
+ambient network authority. An HTTP host can map a typed request to this pure
+boundary and write the returned response; network ingress remains a host
+capability rather than hidden authority in the `.mith` program.
+
+```text
+lib/web/v1.mith (Library, JSON-LD)
+  -> canonical RDF digest + typed export catalog
+examples/hello-web.mith (WebApplication, JSON-LD)
+  -> digest-pinned link + route admission
+  -> :mithril.web/v1 IR
+  -> deterministic request dispatch
+```
+
+This proves that a web framework can be expressed as ontology-linked Mithril
+modules. It does not yet claim dynamic path parameters, middleware, streaming,
+cookies, templates or a production HTTP listener; those require additional
+typed library symbols and the Kotoba HTTP ingress capability qualification.
+
 ## Source contract
 
 - `.mith` and `.mithril` are aliases. The suffix never enters semantic identity.
@@ -42,8 +75,12 @@ runtime. Those responsibilities remain explicit: `org-w3-json-ld-api`,
 ## Run
 
 ```sh
-kbb --backend sci --classpath src:../org-w3-json-ld-api/src:../org-w3-rdf-canon/src:../org-w3-nquads/src:../io-multiformats/src bin/mithril.cljk compile examples/tender.mith
-kbb --backend sci --classpath src:test:../org-w3-json-ld-api/src:../org-w3-rdf-canon/src:../org-w3-nquads/src:../io-multiformats/src test/run.cljk
+CP=src:../org-w3-json-ld-api/src:../org-w3-rdf-canon/src:../org-w3-nquads/src:../io-multiformats/src:../text/src:../org-nist-sha2/src
+kbb --backend sci --classpath "$CP" bin/mithril.cljk compile examples/tender.mith
+kbb --backend sci --classpath "$CP" bin/mithril.cljk compile-library lib/web/v1.mith
+kbb --backend sci --classpath "$CP" bin/mithril.cljk compile-web examples/hello-web.mith lib/web/v1.mith
+kbb --backend sci --classpath "$CP" bin/mithril.cljk request examples/hello-web.mith lib/web/v1.mith GET /hello
+kbb --backend sci --classpath "$CP":test test/run.cljk
 amu check src/mithril/runtime.kotoba --jvm-free
 ```
 

@@ -2,12 +2,27 @@
   "@context": {
     "mith": "https://mithril.fund/ns/v1#",
     "Program": "mith:Program",
+    "Library": "mith:Library",
+    "WebApplication": "mith:WebApplication",
     "goal": {"@id": "mith:goal", "@type": "@id"},
     "ontology": "mith:ontologyDigest",
     "choices": {"@id": "mith:choice", "@container": "@set"},
     "role": {"@id": "mith:role", "@type": "@vocab"},
     "candidate": {"@id": "mith:candidate", "@type": "@id"},
-    "confidence": {"@id": "mith:confidence", "@type": "http://www.w3.org/2001/XMLSchema#integer"}
+    "confidence": {"@id": "mith:confidence", "@type": "http://www.w3.org/2001/XMLSchema#integer"},
+    "version": {"@id": "mith:version", "@type": "http://www.w3.org/2001/XMLSchema#integer"},
+    "exports": {"@id": "mith:export", "@container": "@set"},
+    "symbol": {"@id": "mith:symbol", "@type": "@id"},
+    "kind": {"@id": "mith:kind", "@type": "@vocab"},
+    "imports": {"@id": "mith:import", "@container": "@set"},
+    "library": {"@id": "mith:library", "@type": "@id"},
+    "digest": "mith:digest",
+    "routes": {"@id": "mith:route", "@container": "@set"},
+    "method": "mith:method",
+    "path": "mith:path",
+    "operation": {"@id": "mith:operation", "@type": "@id"},
+    "status": {"@id": "mith:status", "@type": "http://www.w3.org/2001/XMLSchema#integer"},
+    "contentType": "mith:contentType",
+    "body": "mith:body"
   }
 }
-
