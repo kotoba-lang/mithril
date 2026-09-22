@@ -97,7 +97,9 @@ typed `.mith` manifest. It binds `config.yaml`, `SOUL.md`, the complete cron
 registry, every prompt, schedule, resolved script and absolute coding workdir
 by SHA-256 identity. Prompt prose is evidence only: executable authority is
 derived into the closed `scheduler/tick`, `host/script-run`,
-`llm/agent-turn`, or `agent/coding-turn` effect catalog.
+`llm/agent-turn`, or `agent/workspace-turn` effect catalog. A workdir is
+context, not write authority: it becomes a coding-capable turn only when the
+same absolute workspace has a valid digest-bound coding tool profile.
 
 ```sh
 kbb --backend sci bin/mithril-hermes-fleet.cljk sync \
@@ -112,6 +114,12 @@ reported as an empty successful profile. These manifests establish the
 governed migration and drift boundary. They do not by themselves intercept a
 legacy Hermes cron execution; execution migration additionally requires the
 Mithril scheduler adapter and a receipt for each effect.
+
+`admit-coding` is the fail-closed migration gate. It measures every enabled
+workspace turn against the live filesystem and coding registry and reports
+`missing-workspace`, `not-git`, `dirty-workspace`,
+`unregistered-workspace`, or `ready`. It exits non-zero until every candidate
+is explicitly ready; a workdir alone never grants write or tool authority.
 
 ## Published Mithril code and libraries
 

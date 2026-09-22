@@ -2,14 +2,18 @@
 (ns mithril.hermes-fleet-cli
   (:require [clojure.string :as str]
             [mithril.execution :as execution]
-            [mithril.hermes-fleet :as fleet]))
+            [mithril.hermes :as hermes]
+            [mithril.hermes-fleet :as fleet]
+            [mithril.kanban-worker :as worker]))
 
 (def fs (js/require "node:fs"))
 (def path (js/require "node:path"))
 (def crypto (js/require "node:crypto"))
+(def cp (js/require "node:child_process"))
 
 (defn- usage! []
   (println "usage: mithril-hermes-fleet <sync|verify> <Hermes profiles root> <output directory>")
+  (println "       mithril-hermes-fleet admit-coding <Hermes profiles root> <output directory> <coding registry>")
   (js/process.exit 2))
 
 (defn- read-text [file] (.readFileSync fs file "utf8"))
@@ -99,7 +103,7 @@
                 (let [source (profile-source profiles-root name)
                       filename (str name ".mith")
                       artifact (fleet/compile-text filename source)]
-                  {:profile name :file filename :source source
+                  {:profile name :file filename :source source :artifact artifact
                    :graph-digest (:graph-digest artifact)
                    :jobs (count (get-in artifact [:profile-ir :jobs]))
                    :enabled-jobs (count (filter :enabled (get-in artifact [:profile-ir :jobs])))
@@ -109,7 +113,7 @@
               (profile-names profiles-root))
         index {:format "https://mithril.fund/registry/hermes-profile-fleet-v1"
                :ontology fleet/ontology-digest
-               :profiles (mapv #(dissoc % :source) entries)}]
+               :profiles (mapv #(dissoc % :source :artifact) entries)}]
     {:entries entries :index index :index-text (str (json index) "\n")}))
 
 (defn- write-fleet! [output {:keys [entries index-text]}]
@@ -147,17 +151,87 @@
    :missingScripts (reduce + (map :missing-scripts entries))
    :indexDigest (sha256-text (json index))})
 
-(let [[command profiles-root output & extra] *command-line-args*]
-  (if-not (and (contains? #{"sync" "verify"} command)
-               profiles-root output (empty? extra) (.isAbsolute path profiles-root)
+(defn- git-output [workspace & args]
+  (try
+    (.execFileSync cp "/usr/bin/git" (clj->js (into ["-C" workspace] args))
+                   #js {:encoding "utf8" :stdio #js ["ignore" "pipe" "ignore"]
+                        :timeout 30000})
+    (catch :default _ nil)))
+
+(defn- workspace-facts [workspace]
+  (let [exists (and (string? workspace) (exists? workspace))
+        inside (when exists (git-output workspace "rev-parse" "--is-inside-work-tree"))
+        status (when inside (git-output workspace "status" "--porcelain=v1" "--untracked-files=all"))]
+    {:exists? (boolean exists)
+     :git? (= "true" (some-> inside str/trim))
+     :clean? (and (some? status) (str/blank? status))}))
+
+(defn- admitted-tool-profiles [registry]
+  (let [registry (worker/validate-coding-tool-registry registry)]
+    (into {}
+          (map (fn [{:keys [workspace tool-profile]}]
+                 (let [profile (parse-json (read-text tool-profile))]
+                   (hermes/validate-tool-profile profile)
+                   (when-not (= workspace (:workspace profile))
+                     (throw (ex-info "coding registry workspace differs from tool profile"
+                                     {:mithril/error :mithril.fleet/profile-workspace-mismatch
+                                      :workspace workspace})))
+                   [workspace {:path tool-profile
+                               :digest (hermes/tool-profile-digest profile)}])))
+          (:profiles registry))))
+
+(defn- coding-admission [fleet registry-path]
+  (let [registered (admitted-tool-profiles (parse-json (read-text registry-path)))
+        coding-jobs (for [{:keys [artifact]} (:entries fleet)
+                          job (get-in artifact [:profile-ir :jobs])
+                          :when (and (:enabled job) (fleet/coding-candidate? job))]
+                      job)
+        facts-by-workspace (into {}
+                                 (map (fn [workspace]
+                                        [workspace (workspace-facts workspace)]))
+                                 (distinct (map :workdir coding-jobs)))
+        rows (->> (:entries fleet)
+                  (mapcat (fn [{:keys [profile graph-digest artifact]}]
+                            (for [job (get-in artifact [:profile-ir :jobs])
+                                  :when (fleet/coding-candidate? job)
+                                  :when (:enabled job)
+                                  :let [facts (get facts-by-workspace (:workdir job))
+                                        admission (fleet/coding-readiness
+                                                   job (set (keys registered)) facts)]]
+                              {:profile profile :profileDigest graph-digest
+                               :jobId (:id job) :job (:name job)
+                               :workspace (:workdir job) :admission (name admission)
+                               :toolProfile (get-in registered [(:workdir job) :path])})))
+                  vec)
+        counts (->> rows (group-by :admission)
+                    (map (fn [[key values]] [key (count values)]))
+                    (into (sorted-map)))]
+    {:format "https://mithril.fund/report/hermes-coding-admission-v1"
+     :profiles (count (:entries fleet)) :codingJobs (count rows)
+     :counts counts :jobs rows}))
+
+(let [[command profiles-root output registry-path & extra] *command-line-args*]
+  (if-not (and (contains? #{"sync" "verify" "admit-coding"} command)
+               profiles-root output
+               (if (= "admit-coding" command)
+                 (and registry-path (empty? extra))
+                 (and (nil? registry-path) (empty? extra)))
+               (.isAbsolute path profiles-root)
                (.isAbsolute path output))
     (usage!)
     (try
       (let [fleet (build-fleet profiles-root)]
         (case command
           "sync" (write-fleet! output fleet)
-          "verify" (verify-fleet! output fleet))
-        (println (json (summary fleet))))
+          "verify" (verify-fleet! output fleet)
+          "admit-coding"
+          (let [_ (verify-fleet! output fleet)
+                report (coding-admission fleet registry-path)]
+            (println (json report))
+            (when-not (= (get-in report [:counts "ready"] 0) (:codingJobs report))
+              (js/process.exit 1))))
+        (when-not (= "admit-coding" command)
+          (println (json (summary fleet)))))
       (catch :default error
         (println (str "REFUSE\t" (or (some-> error ex-data :mithril/error name) "fleet-error")
                       "\t" (.-message error)))

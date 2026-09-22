@@ -30,11 +30,25 @@
              "scriptDigest" "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
              "scriptPresent" true
              "scheduleDigest" "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-             "workdir" "/tmp/work" "effects" ["scheduler/tick" "host/script-run" "agent/coding-turn"]}
+             "workdir" "/tmp/work" "effects" ["scheduler/tick" "host/script-run" "agent/workspace-turn"]}
         artifact (fleet/compile-document "itonami.mith" (assoc base "jobs" [job]))]
-    (is (= [:scheduler/tick :host/script-run :agent/coding-turn]
+    (is (= [:scheduler/tick :host/script-run :agent/workspace-turn]
            (get-in artifact [:profile-ir :jobs 0 :effects])))
     (is (= :mithril.fleet/effect-mismatch
            (error-code #(fleet/compile-document
                           "itonami.mith"
                           (assoc base "jobs" [(assoc job "effects" ["llm/agent-turn"])])))))))
+
+(deftest coding-admission-fails-closed
+  (let [job {:effects [:scheduler/tick :agent/workspace-turn] :workdir "/tmp/work"}]
+    (is (= :missing-workspace
+           (fleet/coding-readiness job #{} {:exists? false :git? false :clean? false})))
+    (is (= :not-git
+           (fleet/coding-readiness job #{} {:exists? true :git? false :clean? false})))
+    (is (= :dirty-workspace
+           (fleet/coding-readiness job #{} {:exists? true :git? true :clean? false})))
+    (is (= :unregistered-workspace
+           (fleet/coding-readiness job #{} {:exists? true :git? true :clean? true})))
+    (is (= :ready
+           (fleet/coding-readiness job #{"/tmp/work"}
+                                   {:exists? true :git? true :clean? true})))))
