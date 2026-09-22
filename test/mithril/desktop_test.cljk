@@ -33,6 +33,7 @@
     (is (str/includes? plugin "host.request('cron.manage'"))
     (is (str/includes? plugin "ctx.rest('/kanban/tasks'"))
     (is (str/includes? plugin "ctx.rest('/kanban/dispatch?max='"))
+    (is (str/includes? plugin "attempt<20"))
     (is (str/includes? plugin "cwd:input.workspace"))
     (is (str/includes? plugin "receipts-v1"))
     (is (str/includes? plugin "\"navLabel\":\"Mithril\""))
