@@ -46,6 +46,12 @@ The repository now contains source authored in Mithril itself:
   sends every route choice in one OpenJev request. The compiler checks one
   complete distribution per route, seals each admitted decision into Web IR,
   and the deterministic runtime executes all selected handlers.
+- [`lib/web/pipeline-v1.mith`](lib/web/pipeline-v1.mith) and
+  [`examples/typed-call-dag-web-synthesis.mith`](examples/typed-call-dag-web-synthesis.mith)
+  extend the same closed composition boundary to router, handler, view and
+  effect roles. One model forward answers all twelve finite questions; when
+  every answer is admitted, the compiler seals them into three typed call DAGs
+  before runtime dispatch.
 
 `resources`, `lib` and `examples` are package classpath roots, so downstream
 builds consume these exact files from the pinned Git commit instead of copying
@@ -93,7 +99,7 @@ SynthesizeWebApplication (.mith JSON-LD)
 ```
 
 The model cannot emit an identifier, route, body, effect or source fragment.
-It can select only an OWL/SPARQL-discovered imported handler label. The result
+It can select only OWL/SPARQL-discovered imported component labels. The result
 is refused unless it declares `generated_text: false`, covers the exact finite
 candidate set, selects the distribution winner, meets the selected library
 symbol's `confidenceFloor`, and carries an immutable 40-character model
@@ -112,6 +118,23 @@ points, `HEAD /health` selected it at 6,919, and `/retired` selected not-found
 at 6,296; all three exceeded the 6,000-point ontology floor. This is still
 evidence for this closed two-candidate handler family, not a claim of arbitrary
 code generation or general web-program synthesis.
+
+`SynthesizeWebPipelineApplication` applies the same checks independently to
+the router, handler, view and effect pools. Its output is a versioned call DAG
+with fixed role order and dependencies: router → handler → view → effect. The
+runtime checks that graph again and refuses malformed dependencies or unknown
+operations. This remains constrained composition from an authored catalog;
+the model still cannot create identifiers, strings, control flow or effects.
+
+The currently pinned OpenJev revision is qualified for the earlier handler
+family, but is not yet qualified for this wider four-role catalog. It can
+complete the twelve decisions in one forward pass, while the compiler refuses
+the artifact whenever any role falls below its ontology-authored confidence
+floor. In the recorded run, the first exact-router decision scored 5,090 basis
+points against its 5,500-point floor, so no artifact was emitted. The
+deterministic tests exercise admitted call DAG construction and all runtime
+branches; a successful test fixture is not reported as learned-model
+qualification. New-role training and held-out calibration remain required.
 
 `bin/mithril-run.cljk` executes a previously compiled Web IR artifact without
 loading OpenJev. Inference is therefore a compile-time policy input rather than

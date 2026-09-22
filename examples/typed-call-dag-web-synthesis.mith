@@ -1,0 +1,54 @@
+{
+  "@context": "https://mithril.fund/context/v1",
+  "@id": "https://mithril.fund/app/typed-call-dag-web-synthesis",
+  "@type": "SynthesizeWebPipelineApplication",
+  "goal": "https://mithril.fund/id/goal/web-application",
+  "ontology": "f6371c58ffa5d9587867f9f7ae33aa62fabf99b354070c2ad6da5323d5c85ceb",
+  "imports": [
+    {
+      "library": "https://mithril.fund/lib/web/pipeline-v1",
+      "digest": "sha256:23c7e582b920f42e134f01a7fb86896684a825a23e0b440e03889c966a16428b"
+    }
+  ],
+  "routes": [
+    {
+      "method": "GET",
+      "path": "/data",
+      "intent": {
+        "routerIntent": "Only the exact request method and path may match.",
+        "handlerIntent": "This endpoint must return the authored static response.",
+        "viewIntent": "The response body must be rendered as JSON.",
+        "effectIntent": "The complete typed HTTP response must be emitted."
+      },
+      "status": 200,
+      "contentType": "text/plain; charset=utf-8",
+      "body": "ontology"
+    },
+    {
+      "method": "GET",
+      "path": "/health",
+      "intent": {
+        "routerIntent": "A HEAD request must match the corresponding GET route.",
+        "handlerIntent": "This endpoint must return the authored static response.",
+        "viewIntent": "The response body must remain plain text.",
+        "effectIntent": "The response must have no content."
+      },
+      "status": 200,
+      "contentType": "text/plain; charset=utf-8",
+      "body": "healthy"
+    },
+    {
+      "method": "GET",
+      "path": "/retired",
+      "intent": {
+        "routerIntent": "Only the exact request method and path may match.",
+        "handlerIntent": "This retired endpoint must return not found.",
+        "viewIntent": "The response body must remain plain text.",
+        "effectIntent": "The complete typed HTTP response must be emitted."
+      },
+      "status": 410,
+      "contentType": "text/plain; charset=utf-8",
+      "body": "retired"
+    }
+  ]
+}

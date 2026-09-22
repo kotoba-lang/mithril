@@ -1,0 +1,17 @@
+{
+  "@context": "https://mithril.fund/context/v1",
+  "@id": "https://mithril.fund/lib/web/pipeline-v1",
+  "@type": "Library",
+  "ontology": "f6371c58ffa5d9587867f9f7ae33aa62fabf99b354070c2ad6da5323d5c85ceb",
+  "version": 1,
+  "exports": [
+    {"symbol": "https://mithril.fund/lib/web/pipeline-v1/router/exact", "kind": "mith:router", "label": "match only the exact request method and path", "confidenceFloor": 5500},
+    {"symbol": "https://mithril.fund/lib/web/pipeline-v1/router/head-fallback", "kind": "mith:router", "label": "match HEAD to the corresponding GET path", "confidenceFloor": 5500},
+    {"symbol": "https://mithril.fund/lib/web/pipeline-v1/handler/static-response", "kind": "mith:handler", "label": "return the authored static response", "confidenceFloor": 5500},
+    {"symbol": "https://mithril.fund/lib/web/pipeline-v1/handler/not-found", "kind": "mith:handler", "label": "return a not found response", "confidenceFloor": 5500},
+    {"symbol": "https://mithril.fund/lib/web/pipeline-v1/view/text", "kind": "mith:view", "label": "render the body as plain text", "confidenceFloor": 5500},
+    {"symbol": "https://mithril.fund/lib/web/pipeline-v1/view/json", "kind": "mith:view", "label": "render the body as JSON", "confidenceFloor": 5500},
+    {"symbol": "https://mithril.fund/lib/web/pipeline-v1/effect/http-response", "kind": "mith:effect", "label": "emit the complete typed HTTP response", "confidenceFloor": 5500},
+    {"symbol": "https://mithril.fund/lib/web/pipeline-v1/effect/no-content", "kind": "mith:effect", "label": "emit a no content response", "confidenceFloor": 5500}
+  ]
+}
