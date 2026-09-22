@@ -52,6 +52,7 @@
    :max-goal-chars "maxGoalChars"
    :scheduler-policy "schedulerPolicy"
    :board-policy "boardPolicy"
+   :worker-board "workerBoard"
    :max-active-jobs "maxActiveJobs"
    :max-dispatch-tasks "maxDispatchTasks"
    :max-retries "maxRetries"
