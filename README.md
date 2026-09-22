@@ -1,5 +1,9 @@
 # Mithril
 
+The name is a metaphor: mithril is the imagined metal, used here for a source
+surface whose graph semantics stay inspectable through compilation. It does
+not name Tolkien's work or imply compatibility with another Mithril project.
+
 Mithril is an ontology-based programming language whose implementation files
 are JSON-LD. Both `.mith` and `.mithril` have exactly the same syntax and
 semantics: JSON-LD 1.1 with media type `application/ld+json`.
@@ -46,4 +50,3 @@ amu check src/mithril/runtime.kotoba --jvm-free
 The CLI prints a JSON artifact containing the semantic graph digest and the
 typed OaK transaction. The sibling `.mithril` example must compile to the same
 semantic projection.
-
