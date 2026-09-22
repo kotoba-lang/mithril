@@ -403,6 +403,7 @@ kbb --backend sci --classpath "$CP" bin/mithril.cljk compile examples/tender.mit
 kbb --backend sci --classpath "$CP" bin/mithril.cljk compile-ontology ontology/semantic-core-v1.mith
 kbb --backend sci --classpath "$CP" bin/mithril.cljk compile-library lib/web/v1.mith
 kbb --backend sci --classpath "$CP" bin/mithril.cljk compile-web examples/hello-web.mith lib/web/v1.mith
+kbb --backend sci bin/mithril.cljk emit-desktop examples/mithril-desktop.mith
 kbb --backend sci --classpath "$CP" bin/mithril.cljk request examples/hello-web.mith lib/web/v1.mith GET /hello
 kbb --backend sci --classpath "$CP":test test/run.cljk
 kbb --backend sci --classpath "$CP":test test/run_synthesis.cljk

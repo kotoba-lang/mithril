@@ -10,7 +10,7 @@
 (def cp (js/require "node:child_process"))
 
 (defn- usage! []
-  (println "usage: mithril-kanban-worker tick <board> <profile.mith> <coding-tools.json> <state-dir> <owner> <grants.csv> execute")
+  (println "usage: mithril-kanban-worker tick <board> <profile.mith> <coding-tools-or-registry.json> <state-dir> <owner> <grants.csv> execute")
   (js/process.exit 2))
 
 (defn- read-text [file] (.readFileSync fs file "utf8"))
@@ -36,7 +36,18 @@
 
 (defn- write-json! [file value]
   (.mkdirSync fs (.dirname path file) #js {:recursive true})
-  (.writeFileSync fs file (json value) "utf8"))
+    (.writeFileSync fs file (json value) "utf8"))
+
+(defn- resolve-tool-profile [config-path workspace]
+  (let [config (parse-json (read-text config-path))
+        profile-path (when (= worker/registry-format (:format config))
+                       (worker/coding-tool-profile-path config workspace))
+        profile (if profile-path (parse-json (read-text profile-path)) config)]
+    (when-not (= workspace (:workspace profile))
+      (throw (ex-info "registered coding profile does not bind the card workspace"
+                      {:mithril/error :mithril.kanban/profile-workspace-mismatch
+                       :workspace workspace})))
+    profile))
 
 (defn- block! [board task-id kind reason]
   (hermes! board ["block" "--kind" kind task-id reason]))
@@ -66,7 +77,7 @@
 
 (defn- tick-card! [board profile-path tool-profile-path state-dir owner grants mode card]
   (let [properties (worker/parse-card-body (:body card))
-        tool-profile (parse-json (read-text tool-profile-path))
+        tool-profile (resolve-tool-profile tool-profile-path (:workspace properties))
         tool-digest (mithril-hermes/tool-profile-digest tool-profile)
         task (worker/semantic-task properties tool-digest)
         key (worker/state-key properties)

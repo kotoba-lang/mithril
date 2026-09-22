@@ -46,3 +46,18 @@
   (is (= :mithril.kanban/step-mismatch
          (try (worker/reconcile-step 2 {:step 4}) nil
               (catch :default error (:mithril/error (ex-data error)))))))
+
+(deftest coding-registry-is-closed-and-workspace-scoped
+  (let [registry {:format worker/registry-format
+                  :profiles [{:workspace "/tmp/a" :tool-profile "/tmp/a.json"}
+                             {:workspace "/tmp/b" :tool-profile "/tmp/b.json"}]}]
+    (is (= "/tmp/b.json" (worker/coding-tool-profile-path registry "/tmp/b")))
+    (is (= :mithril.kanban/unregistered-workspace
+           (try (worker/coding-tool-profile-path registry "/tmp/c") nil
+                (catch :default error (:mithril/error (ex-data error))))))
+    (is (= :mithril.kanban/invalid-registry
+           (try (worker/coding-tool-profile-path
+                 (update registry :profiles conj
+                         {:workspace "/tmp/a" :tool-profile "/tmp/other.json"}) "/tmp/a")
+                nil
+                (catch :default error (:mithril/error (ex-data error))))))))

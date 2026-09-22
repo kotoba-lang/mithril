@@ -1,0 +1,8 @@
+name: mithril-app
+version: 0.3.0
+description: "Mithril governed Cron and semantic-action Kanban adapter for Hermes Desktop."
+author: kotoba-lang
+kind: standalone
+platforms:
+  - macos
+  - linux

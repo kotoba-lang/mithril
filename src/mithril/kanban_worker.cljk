@@ -13,6 +13,7 @@
 (def operation 'mithril/kanban-task)
 (def protocol "https://mithril.fund/id/protocol/hermes-coding-agent-v1")
 (def governor "https://mithril.fund/id/governor/user-commit-v1")
+(def registry-format "https://mithril.fund/profile/coding-tool-registry-v1")
 (def required-keys
   #{:protocol :workspace :input :governor :decision-output :generated-text
     :action-candidates :effect-catalog :output})
@@ -25,6 +26,29 @@
   (and (string? value)
        (or (str/starts-with? value "/")
            (boolean (re-matches #"[A-Za-z]:[\\\\/].+" value)))))
+
+(defn coding-tool-profile-path
+  "Return the one registered tool profile for workspace.  The registry is a
+  closed policy document, not mutable actor state."
+  [registry workspace]
+  (when-not (and (map? registry)
+                 (= #{:format :profiles} (set (keys registry)))
+                 (= registry-format (:format registry))
+                 (vector? (:profiles registry)))
+    (fail! :mithril.kanban/invalid-registry "coding tool registry is invalid" {}))
+  (let [profiles (:profiles registry)
+        valid-entry? #(and (map? %)
+                           (= #{:workspace :tool-profile} (set (keys %)))
+                           (absolute-path? (:workspace %))
+                           (absolute-path? (:tool-profile %)))
+        workspaces (mapv :workspace profiles)]
+    (when-not (and (every? valid-entry? profiles)
+                   (= (count workspaces) (count (set workspaces))))
+      (fail! :mithril.kanban/invalid-registry
+             "registry entries must be unique absolute workspace/profile pairs" {}))
+    (or (some #(when (= workspace (:workspace %)) (:tool-profile %)) profiles)
+        (fail! :mithril.kanban/unregistered-workspace
+               "workspace has no governed coding tool profile" {:workspace workspace}))))
 
 (defn parse-card-body [body]
   (let [form (try (reader/read-string body)

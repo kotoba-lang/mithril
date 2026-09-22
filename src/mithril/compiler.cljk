@@ -73,6 +73,7 @@
     "maxGoalChars" {"@id" "mith:maxGoalChars" "@type" "http://www.w3.org/2001/XMLSchema#integer"}
     "schedulerPolicy" {"@id" "mith:schedulerPolicy" "@type" "@id"}
     "boardPolicy" {"@id" "mith:boardPolicy" "@type" "@id"}
+    "workerBoard" "mith:workerBoard"
     "maxActiveJobs" {"@id" "mith:maxActiveJobs" "@type" "http://www.w3.org/2001/XMLSchema#integer"}
     "maxDispatchTasks" {"@id" "mith:maxDispatchTasks" "@type" "http://www.w3.org/2001/XMLSchema#integer"}
     "maxRetries" {"@id" "mith:maxRetries" "@type" "http://www.w3.org/2001/XMLSchema#integer"}

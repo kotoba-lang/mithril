@@ -1,6 +1,7 @@
 (ns mithril.cli
   (:require [mithril.compiler :as compiler]
             [mithril.bot :as bot]
+            [mithril.desktop :as desktop]
             [mithril.web :as web]))
 
 (defn- usage! []
@@ -9,6 +10,8 @@
   (println "  mithril compile-ontology <ontology.mith|ontology.mithril>")
   (println "  mithril compile-library <library.mith|library.mithril>")
   (println "  mithril compile-bot <profile.mith|profile.mithril>")
+  (println "  mithril compile-desktop <app.mith|app.mithril>")
+  (println "  mithril emit-desktop <app.mith|app.mithril>")
   (println "  mithril compile-web <app.mith|app.mithril> <library.mith>...")
   (println "  mithril request <app.mith|app.mithril> <library.mith> <METHOD> <PATH>")
   (js/process.exit 2))
@@ -60,6 +63,16 @@
       "compile-bot"
       (if (and path (empty? args))
         (print-json (bot/compile-text path (read-text path)))
+        (usage!))
+
+      "compile-desktop"
+      (if (and path (empty? args))
+        (print-json (desktop/compile-text path (read-text path)))
+        (usage!))
+
+      "emit-desktop"
+      (if (and path (empty? args))
+        (print (desktop/emit-plugin (desktop/compile-text path (read-text path))))
         (usage!))
 
       "compile-web"
