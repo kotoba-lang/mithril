@@ -1,17 +1,87 @@
 (ns mithril.hermes
-  "Hermes host adapter for one governed, read-only Mithril effect.
+  "Hermes host adapter for governed Mithril coding effects.
 
-  The adapter deliberately has no generic shell or text-generation escape
-  hatch. It returns the exact receipt consumed by `mithril.bot/apply-receipt`
-  plus a bounded audit summary that never contains command output or paths."
-  (:require [mithril.bot :as bot]
+  Jev selects only an ontology action ID. A separate generative advisor may
+  propose one unified diff, but it receives no tools. The Governor validates
+  that diff against a digest-bound tool profile before deterministic host
+  functions apply it and run exact argv compile/test tools without a shell."
+  (:require [cljs.reader :as reader]
+            [clojure.string :as str]
+            [mithril.bot :as bot]
             [mithril.execution :as execution]))
 
-(def adapter-format "https://mithril.fund/adapter/hermes-read-only-v1")
+(def adapter-format "https://mithril.fund/adapter/hermes-coding-v1")
+(def tool-profile-format "https://mithril.fund/profile/coding-tools-v1")
+(def proposal-format "https://mithril.fund/artifact/patch-proposal-v1")
 (def read-only-effects #{:workspace/read :git/status :agent/stop})
+(def coding-effects #{:llm/propose-patch :workspace/apply-patch :amu/compile :test/run})
+(def admitted-effects (into read-only-effects coding-effects))
 
 (defn- fail! [code detail data]
   (throw (ex-info detail (merge {:mithril/error code :detail detail} data))))
+
+(defn- absolute-path? [value]
+  (and (string? value)
+       (or (str/starts-with? value "/")
+           (boolean (re-matches #"[A-Za-z]:[\\\\/].+" value)))))
+
+(defn- relative-file? [value]
+  (and (string? value)
+       (not (str/blank? value))
+       (not (absolute-path? value))
+       (not (str/includes? value "\\"))
+       (not-any? #{"" "." ".."} (str/split value #"/"))))
+
+(defn- command-spec? [spec]
+  (and (map? spec)
+       (= #{:program :args :timeout-ms} (set (keys spec)))
+       (absolute-path? (:program spec))
+       (vector? (:args spec))
+       (every? string? (:args spec))
+       (integer? (:timeout-ms spec))
+       (<= 1000 (:timeout-ms spec) 900000)))
+
+(defn validate-tool-profile [profile]
+  (let [expected #{:format :workspace :artifact-dir :allowed-paths
+                   :max-patch-bytes :max-context-bytes :proposer :tools}]
+    (when-not (and (map? profile) (= expected (set (keys profile)))
+                   (= tool-profile-format (:format profile)))
+      (fail! :mithril.hermes/invalid-tool-profile
+             "coding tool profile has an invalid field set or format" {}))
+    (when-not (and (absolute-path? (:workspace profile))
+                   (absolute-path? (:artifact-dir profile))
+                   (let [workspace (str/replace (:workspace profile) #"/+$" "")]
+                     (and (not= workspace (str/replace (:artifact-dir profile) #"/+$" ""))
+                          (not (str/starts-with? (:artifact-dir profile) (str workspace "/"))))))
+      (fail! :mithril.hermes/invalid-tool-profile
+             "workspace and out-of-workspace artifact directory must be absolute" {}))
+    (when-not (and (vector? (:allowed-paths profile))
+                   (seq (:allowed-paths profile))
+                   (= (count (:allowed-paths profile)) (count (set (:allowed-paths profile))))
+                   (every? relative-file? (:allowed-paths profile)))
+      (fail! :mithril.hermes/invalid-tool-profile
+             "allowed paths must be a non-empty unique list of relative files" {}))
+    (when-not (and (integer? (:max-patch-bytes profile))
+                   (<= 1 (:max-patch-bytes profile) 262144)
+                   (integer? (:max-context-bytes profile))
+                   (<= 1 (:max-context-bytes profile) 1048576))
+      (fail! :mithril.hermes/invalid-tool-profile "coding byte budgets are invalid" {}))
+    (when-not (and (map? (:proposer profile))
+                   (= #{:program :profile :timeout-ms} (set (keys (:proposer profile))))
+                   (absolute-path? (get-in profile [:proposer :program]))
+                   (string? (get-in profile [:proposer :profile]))
+                   (not (str/blank? (get-in profile [:proposer :profile])))
+                   (integer? (get-in profile [:proposer :timeout-ms]))
+                   (<= 1000 (get-in profile [:proposer :timeout-ms]) 900000))
+      (fail! :mithril.hermes/invalid-tool-profile "proposer specification is invalid" {}))
+    (when-not (and (= #{:amu/compile :test/run} (set (keys (:tools profile))))
+                   (every? command-spec? (vals (:tools profile))))
+      (fail! :mithril.hermes/invalid-tool-profile
+             "compile and test must be exact no-shell command specifications" {}))
+    profile))
+
+(defn tool-profile-digest [profile]
+  (execution/digest (validate-tool-profile profile)))
 
 (defn- completed [effect output audit]
   {:receipt {:format bot/receipt-format
@@ -27,45 +97,242 @@
              :output-digest (execution/digest {:error code})}
    :audit {:adapter adapter-format :operation (:operation effect) :error code}})
 
+(defn- default-context []
+  (let [fs (js/require "node:fs")
+        path (js/require "node:path")
+        cp (js/require "node:child_process")]
+    {:stat-fn (fn [value] (.statSync fs value))
+     :list-fn (fn [value] (.readdirSync fs value))
+     :read-fn (fn [value] (.readFileSync fs value "utf8"))
+     :lstat-fn (fn [value] (.lstatSync fs value))
+     :realpath-fn (fn [value] (.realpathSync fs value))
+     :write-fn (fn [value content]
+                 (.mkdirSync fs (.dirname path value) #js {:recursive true})
+                 (let [temporary (str value ".tmp-" (.-pid js/process))]
+                   (.writeFileSync fs temporary content "utf8")
+                   (.renameSync fs temporary value)))
+     :exec-fn (fn [program args cwd timeout-ms]
+                (.execFileSync cp program (clj->js args)
+                               #js {:cwd cwd :encoding "utf8" :timeout timeout-ms
+                                    :maxBuffer 1048576
+                                    :stdio #js ["ignore" "pipe" "pipe"]}))
+     :join-fn (fn [& values] (.apply (.-join path) path (to-array values)))}))
+
+(defn- profile! [effect profile]
+  (when-not profile
+    (fail! :mithril.hermes/tool-profile-required
+           "mutating and build effects require a digest-bound coding tool profile" {}))
+  (validate-tool-profile profile)
+  (when-not (= (:workspace effect) (:workspace profile))
+    (fail! :mithril.hermes/workspace-mismatch
+           "effect workspace does not match the coding tool profile" {}))
+  (let [actual (tool-profile-digest profile)]
+    (when-not (= actual (:tool-profile-digest effect))
+      (fail! :mithril.hermes/tool-profile-mismatch
+             "effect is not bound to this coding tool profile" {})))
+  profile)
+
+(defn- runtime-paths! [ctx profile]
+  (let [workspace ((:realpath-fn ctx) (:workspace profile))
+        artifact-dir ((:realpath-fn ctx) (:artifact-dir profile))]
+    (when (or (= workspace artifact-dir)
+              (str/starts-with? artifact-dir (str workspace "/")))
+      (fail! :mithril.hermes/artifact-path-denied
+             "artifact directory resolves inside the coding workspace" {}))
+    (doseq [relative (:allowed-paths profile)]
+      (let [file ((:join-fn ctx) workspace relative)
+            stat ((:lstat-fn ctx) file)
+            actual ((:realpath-fn ctx) file)]
+        (when-not (and (.isFile stat) (not (.isSymbolicLink stat))
+                       (str/starts-with? actual (str workspace "/")))
+          (fail! :mithril.hermes/path-denied
+                 "allowlisted source must be a regular in-workspace file" {}))))
+    profile))
+
+(defn- byte-count [value]
+  (.byteLength js/Buffer value "utf8"))
+
+(defn- artifact-path [profile effect join-fn]
+  (join-fn (:artifact-dir profile)
+           (str (str/replace (:run-id effect) ":" "_") ".proposal.edn")))
+
+(defn- git! [ctx workspace & args]
+  ((:exec-fn ctx) "/usr/bin/git" (vec args) workspace 30000))
+
+(defn- clean-head! [ctx workspace]
+  (let [head (str/trim (git! ctx workspace "rev-parse" "HEAD"))
+        status (git! ctx workspace "status" "--porcelain=v1" "--untracked-files=all")]
+    (when-not (boolean (re-matches #"[0-9a-f]{40,64}" head))
+      (fail! :mithril.hermes/not-git-workspace "workspace has no admitted Git HEAD" {}))
+    (when-not (str/blank? status)
+      (fail! :mithril.hermes/dirty-workspace
+             "coding effects require an isolated clean Git workspace" {}))
+    head))
+
+(defn- git-state [ctx workspace]
+  {:head (str/trim (git! ctx workspace "rev-parse" "HEAD"))
+   :status (git! ctx workspace "status" "--porcelain=v1" "--untracked-files=all")})
+
+(defn- snapshot [ctx profile]
+  (loop [paths (:allowed-paths profile) total 0 result []]
+    (if-let [relative (first paths)]
+      (let [content ((:read-fn ctx) ((:join-fn ctx) (:workspace profile) relative))
+            next-total (+ total (byte-count content))]
+        (when (> next-total (:max-context-bytes profile))
+          (fail! :mithril.hermes/context-budget "workspace snapshot exceeds the context budget" {}))
+        (recur (rest paths) next-total (conj result {:path relative :content content})))
+      result)))
+
+(defn- proposal-prompt [effect files]
+  (str "You are a patch advisor with no tools. Return exactly one git unified diff and nothing else.\n"
+       "The diff may modify only the listed files. Do not rename, delete, chmod, add binaries, or add symlinks.\n"
+       "Goal: " (:goal effect) "\n"
+       (str/join "\n" (map (fn [{:keys [path content]}]
+                               (str "<file path=\"" path "\">\n" content "\n</file>"))
+                             files))))
+
+(defn- default-propose! [ctx profile effect files]
+  (let [{program :program proposer-profile :profile timeout-ms :timeout-ms} (:proposer profile)]
+    ((:exec-fn ctx) program
+     ["-p" proposer-profile "--ignore-rules" "-t" "none" "--in" (:workspace effect)
+      "-z" (proposal-prompt effect files)]
+     (:workspace effect) timeout-ms)))
+
+(defn- diff-paths! [profile patch]
+  (when (or (str/blank? patch)
+            (> (byte-count patch) (:max-patch-bytes profile))
+            (not (str/starts-with? patch "diff --git ")))
+    (fail! :mithril.hermes/invalid-patch "proposal is empty, oversized, or not a raw Git diff" {}))
+  (when (re-find #"(?mi)^(GIT binary patch|Binary files |rename (from|to) |copy (from|to) |old mode |new mode |deleted file mode |new file mode 120000|index [^\n]+ 160000)" patch)
+    (fail! :mithril.hermes/invalid-patch "binary, rename, delete, mode and symlink changes are forbidden" {}))
+  (let [pairs (re-seq #"(?m)^diff --git a/([^\n]+) b/([^\n]+)$" patch)
+        header-paths (mapcat (fn [[_ left right]] [left right]) pairs)
+        marker-paths (->> (re-seq #"(?m)^(?:---|\+\+\+) (?:[ab]/([^\n]+)|/dev/null)$" patch)
+                          (keep second))
+        paths (vec (distinct (concat header-paths marker-paths)))
+        allowed (set (:allowed-paths profile))]
+    (when (or (empty? pairs)
+              (some (fn [[_ left right]] (not= left right)) pairs)
+              (some #(or (not (relative-file? %)) (not (contains? allowed %))) paths))
+      (fail! :mithril.hermes/path-denied "patch names a path outside the exact allowlist" {}))
+    paths))
+
+(defn- propose! [effect profile ctx]
+  (let [head (clean-head! ctx (:workspace profile))
+        files (snapshot ctx profile)
+        patch (if-let [propose-fn (:propose-fn ctx)]
+                (propose-fn {:effect effect :profile profile :files files
+                             :prompt (proposal-prompt effect files)})
+                (default-propose! ctx profile effect files))
+        paths (diff-paths! profile patch)
+        proposal {:format proposal-format :run-id (:run-id effect) :base-head head
+                  :profile-digest (tool-profile-digest profile)
+                  :patch-digest (execution/digest patch) :patch patch}
+        file (artifact-path profile effect (:join-fn ctx))]
+    ((:write-fn ctx) file (pr-str proposal))
+    (completed effect (dissoc proposal :patch)
+               {:proposal-digest (:patch-digest proposal) :files (count paths)
+                :bytes (byte-count patch)})))
+
+(defn- read-proposal! [effect profile ctx]
+  (let [file (artifact-path profile effect (:join-fn ctx))
+        proposal (reader/read-string ((:read-fn ctx) file))]
+    (when-not (and (= #{:format :run-id :base-head :profile-digest :patch-digest :patch}
+                      (set (keys proposal)))
+                   (= proposal-format (:format proposal))
+                   (= (:run-id effect) (:run-id proposal))
+                   (= (tool-profile-digest profile) (:profile-digest proposal))
+                   (= (execution/digest (:patch proposal)) (:patch-digest proposal)))
+      (fail! :mithril.hermes/proposal-integrity "proposal artifact failed identity checks" {}))
+    proposal))
+
+(defn- apply-patch! [effect profile ctx]
+  (let [proposal (read-proposal! effect profile ctx)
+        paths (diff-paths! profile (:patch proposal))
+        patch-file (str (artifact-path profile effect (:join-fn ctx)) ".patch")
+        _ ((:write-fn ctx) patch-file (:patch proposal))
+        {:keys [head status]} (git-state ctx (:workspace profile))]
+    (when-not (= head (:base-head proposal))
+      (fail! :mithril.hermes/stale-proposal "workspace HEAD changed after proposal" {}))
+    (if (str/blank? status)
+      (do
+        ((:exec-fn ctx) "/usr/bin/git" ["apply" "--check" "--" patch-file]
+         (:workspace profile) 30000)
+        ((:exec-fn ctx) "/usr/bin/git" ["apply" "--" patch-file]
+         (:workspace profile) 30000))
+      (try
+        ((:exec-fn ctx) "/usr/bin/git" ["apply" "--reverse" "--check" "--" patch-file]
+         (:workspace profile) 30000)
+        (catch :default _
+          (fail! :mithril.hermes/dirty-workspace
+                 "dirty workspace is not exactly the already-applied proposal" {}))))
+    (let [delta (git! ctx (:workspace profile) "diff" "--binary" "--")]
+      (completed effect {:patch-digest (:patch-digest proposal)
+                         :workspace-digest (execution/digest delta)}
+                 {:files (count paths) :changed true}))))
+
+(defn- tool! [effect profile ctx]
+  (let [spec (get-in profile [:tools (:operation effect)])]
+    (try
+      (let [output ((:exec-fn ctx) (:program spec) (:args spec)
+                    (:workspace profile) (:timeout-ms spec))]
+        (completed effect {:tool (:operation effect) :output-digest (execution/digest output)}
+                   {:tool (:operation effect) :exit 0 :output-bytes (byte-count output)}))
+      (catch :default _
+        (failed effect (case (:operation effect)
+                         :amu/compile :compile-failed
+                         :test/run :test-failed
+                         :tool-failed))))))
+
 (defn execute-effect
-  "Execute one closed read-only host effect. Host functions are injectable so
-  the Governor/executor contract is testable without touching a workspace."
-  ([effect] (execute-effect effect
-                            {:stat-fn (fn [path] (.statSync (js/require "node:fs") path))
-                             :list-fn (fn [path] (.readdirSync (js/require "node:fs") path))
-                             :git-fn (fn [path]
-                                       (.execFileSync (js/require "node:child_process") "git"
-                                                      #js ["status" "--porcelain=v1" "--branch"]
-                                                      #js {:cwd path :encoding "utf8"
-                                                           :stdio #js ["ignore" "pipe" "ignore"]}))}))
-  ([effect {:keys [stat-fn list-fn git-fn]}]
+  "Execute one closed host effect. Coding effects require a digest-bound tool
+  profile. All host functions are injectable for contract tests."
+  ([effect] (execute-effect effect (default-context)))
+  ([effect supplied-context]
    (when-not (and (map? effect)
                   (= "https://mithril.fund/effect/bot-action-v1" (:format effect))
                   (string? (:id effect))
-                  (contains? read-only-effects (:operation effect)))
-     (fail! :mithril.hermes/effect-denied
-            "Hermes canary admits only workspace/read, git/status and agent/stop" {}))
-   (try
-     (case (:operation effect)
-       :workspace/read
-       (let [stat (stat-fn (:workspace effect))]
-         (when-not (.isDirectory stat)
-           (fail! :mithril.hermes/not-directory "workspace is not a directory" {}))
-         (let [entries (list-fn (:workspace effect))
-               output {:kind :directory :entry-count (count entries)}]
-           (completed effect output output)))
+                  (contains? admitted-effects (:operation effect)))
+     (fail! :mithril.hermes/effect-denied "effect is outside the Hermes coding catalog" {}))
+   (let [ctx (merge (default-context) supplied-context)
+         profile (when (contains? coding-effects (:operation effect))
+                   (->> (:profile ctx) (profile! effect) (runtime-paths! ctx)))]
+     (try
+       (case (:operation effect)
+         :workspace/read
+         (let [stat ((:stat-fn ctx) (:workspace effect))]
+           (when-not (.isDirectory stat)
+             (fail! :mithril.hermes/not-directory "workspace is not a directory" {}))
+           (let [entries ((:list-fn ctx) (:workspace effect))
+                 output {:kind :directory :entry-count (count entries)}]
+             (completed effect output output)))
 
-       :git/status
-       (let [lines (->> (.split (git-fn (:workspace effect)) "\n")
-                        (remove empty?) vec)
-             output {:repository true
-                     :changed-lines (max 0 (dec (count lines)))
-                     :branch-observed (boolean (seq lines))}]
-         (completed effect output output))
+         :git/status
+         (let [status-text (if-let [git-fn (:git-fn supplied-context)]
+                             (git-fn (:workspace effect))
+                             (git! ctx (:workspace effect)
+                                   "status" "--porcelain=v1" "--branch"))
+               lines (->> (.split status-text "\n")
+                          (remove empty?) vec)
+               output {:repository true :changed-lines (max 0 (dec (count lines)))
+                       :branch-observed (boolean (seq lines))}]
+           (completed effect output output))
 
-       :agent/stop
-       (completed effect {:stopped true} {:stopped true}))
-     (catch :default error
-       (if (:mithril/error (ex-data error))
-         (throw error)
-         (failed effect :host-read-failed))))))
+         :agent/stop (completed effect {:stopped true} {:stopped true})
+         :llm/propose-patch (propose! effect profile ctx)
+         :workspace/apply-patch (apply-patch! effect profile ctx)
+         :amu/compile (tool! effect profile ctx)
+         :test/run (tool! effect profile ctx))
+       (catch :default error
+         (if (and (:mithril/error (ex-data error))
+                  (contains? #{:mithril.hermes/effect-denied
+                               :mithril.hermes/invalid-tool-profile
+                               :mithril.hermes/tool-profile-required
+                               :mithril.hermes/tool-profile-mismatch
+                               :mithril.hermes/workspace-mismatch}
+                             (:mithril/error (ex-data error))))
+           (throw error)
+           (failed effect (or (:mithril/error (ex-data error))
+                              (if (contains? read-only-effects (:operation effect))
+                                :host-read-failed
+                                :host-effect-failed)))))))))

@@ -11,7 +11,8 @@
 (def cp (js/require "node:child_process"))
 
 (defn- usage! []
-  (println "usage: mithril-hermes tick <profile.mith> <task.json> <state.edn> <owner> <grants.csv> <shadow|execute>")
+  (println "usage: mithril-hermes tick <profile.mith> <task.json> <state.edn> <owner> <grants.csv> <shadow|execute> [coding-tools.json]")
+  (println "       mithril-hermes profile-digest <coding-tools.json>")
   (js/process.exit 2))
 
 (defn- read-text [file] (.readFileSync fs file "utf8"))
@@ -108,10 +109,17 @@
                 "\t" (.-message error)))
   (js/process.exitCode 1))
 
-(let [[command profile-path task-path state-path owner grants-csv mode & extra]
+(let [[command profile-path task-path state-path owner grants-csv mode tool-profile-path & extra]
       *command-line-args*]
-  (if-not (and (= "tick" command) profile-path task-path state-path owner grants-csv
-               (contains? #{"shadow" "execute"} mode) (empty? extra))
+  (if (= "profile-digest" command)
+    (if (and profile-path (nil? task-path))
+      (try
+        (println (hermes/tool-profile-digest
+                  (js->clj (js/JSON.parse (read-text profile-path)) :keywordize-keys true)))
+        (catch :default error (refuse! error)))
+      (usage!))
+    (if-not (and (= "tick" command) profile-path task-path state-path owner grants-csv
+                 (contains? #{"shadow" "execute"} mode) (empty? extra))
     (usage!)
     (let [lock (try (acquire-lock! state-path) (catch :default error (refuse! error) nil))]
       (when lock
@@ -136,7 +144,12 @@
                                              :step (:step state) :run-status (:status state)})))
                        (let [{requested-state :state effect :effect}
                              (bot/request-effect state admitted grants owner (+ now 3))
-                             {:keys [receipt audit]} (hermes/execute-effect effect)
+                             tool-profile (when tool-profile-path
+                                            (js->clj (js/JSON.parse (read-text tool-profile-path))
+                                                     :keywordize-keys true))
+                             {:keys [receipt audit]}
+                             (hermes/execute-effect effect (cond-> {}
+                                                            tool-profile (assoc :profile tool-profile)))
                              next-state (bot/apply-receipt requested-state receipt owner (+ now 4))]
                          (write-state! state-path next-state)
                          (append-audit! state-path
@@ -150,4 +163,4 @@
                 (.finally #(release-lock! lock))))
           (catch :default error
             (release-lock! lock)
-            (refuse! error)))))))
+            (refuse! error))))))))

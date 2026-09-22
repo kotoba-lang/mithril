@@ -11,7 +11,9 @@
    :action "https://mithril.fund/id/action/workspace-inspect"
    :operation :workspace/read
    :workspace "/workspace"
-   :task-id "task-1"})
+   :task-id "task-1"
+   :goal "Change one admitted source file"
+   :tool-profile-digest nil})
 
 (defn error-code [f]
   (try (f) nil (catch :default error (:mithril/error (ex-data error)))))
@@ -45,7 +47,80 @@
                    :list-fn identity :git-fn identity})]
       (is (= :failed (get-in result [:receipt :status])))
       (is (= :host-read-failed (get-in result [:audit :error])))))
-  (testing "the canary has no generic mutation escape hatch"
-    (is (= :mithril.hermes/effect-denied
+  (testing "mutation has no ambient authority without a bound tool profile"
+    (is (= :mithril.hermes/tool-profile-required
            (error-code #(hermes/execute-effect
                          (assoc base-effect :operation :workspace/apply-patch)))))))
+
+(defn- exec! [cwd program & args]
+  (.execFileSync (js/require "node:child_process") program (clj->js args)
+                 #js {:cwd cwd :encoding "utf8" :stdio #js ["ignore" "pipe" "pipe"]}))
+
+(defn- coding-profile [workspace artifact-dir]
+  {:format hermes/tool-profile-format
+   :workspace workspace
+   :artifact-dir artifact-dir
+   :allowed-paths ["app.mith"]
+   :max-patch-bytes 8192
+   :max-context-bytes 8192
+   :proposer {:program "/bin/echo" :profile "fixture" :timeout-ms 5000}
+   :tools {:amu/compile {:program "/usr/bin/git" :args ["diff" "--check"]
+                         :timeout-ms 5000}
+           :test/run {:program "/usr/bin/grep" :args ["-q" "value 2" "app.mith"]
+                      :timeout-ms 5000}}})
+
+(deftest coding-write-compile-and-test-use-a-digest-bound-catalog
+  (let [fs (js/require "node:fs")
+        workspace (.mkdtempSync fs "/tmp/mithril-coding-workspace-")
+        artifacts (.mkdtempSync fs "/tmp/mithril-coding-artifacts-")]
+    (try
+      (.writeFileSync fs (str workspace "/app.mith") "value 1\n" "utf8")
+      (exec! workspace "/usr/bin/git" "init" "-q")
+      (exec! workspace "/usr/bin/git" "add" "app.mith")
+      (exec! workspace "/usr/bin/git" "-c" "user.name=Mithril Test"
+             "-c" "user.email=mithril@example.invalid" "commit" "-qm" "base")
+      (let [profile (coding-profile workspace artifacts)
+            digest (hermes/tool-profile-digest profile)
+            effect (assoc base-effect :workspace workspace :run-id "sha256:run-1"
+                          :tool-profile-digest digest)
+            patch (str "diff --git a/app.mith b/app.mith\n"
+                       "index d00491f..0cfbf08 100644\n"
+                       "--- a/app.mith\n+++ b/app.mith\n"
+                       "@@ -1 +1 @@\n-value 1\n+value 2\n")
+            proposed (hermes/execute-effect
+                      (assoc effect :id "propose" :operation :llm/propose-patch)
+                      {:profile profile :propose-fn (fn [_] patch)})
+            applied (hermes/execute-effect
+                     (assoc effect :id "apply" :operation :workspace/apply-patch)
+                     {:profile profile})
+            applied-again (hermes/execute-effect
+                           (assoc effect :id "apply-retry" :operation :workspace/apply-patch)
+                           {:profile profile})
+            compiled (hermes/execute-effect
+                      (assoc effect :id "compile" :operation :amu/compile)
+                      {:profile profile})
+            tested (hermes/execute-effect
+                    (assoc effect :id "test" :operation :test/run)
+                    {:profile profile})]
+        (is (= :completed (get-in proposed [:receipt :status])))
+        (is (= 1 (get-in proposed [:audit :files])))
+        (is (= :completed (get-in applied [:receipt :status])))
+        (is (= :completed (get-in applied-again [:receipt :status]))
+            "a crash after apply but before receipt persistence is idempotent")
+        (is (= "value 2\n" (.readFileSync fs (str workspace "/app.mith") "utf8")))
+        (is (= :completed (get-in compiled [:receipt :status])))
+        (is (= :completed (get-in tested [:receipt :status])))
+        (is (not (some #{"value 2"} (tree-seq coll? seq [proposed applied compiled tested])))))
+      (finally
+        (.rmSync fs workspace #js {:recursive true :force true})
+        (.rmSync fs artifacts #js {:recursive true :force true})))))
+
+(deftest coding-profile-and-patch-boundaries-fail-closed
+  (let [profile (coding-profile "/tmp/work" "/tmp/mithril-artifacts")
+        effect (assoc base-effect :workspace "/tmp/work" :operation :llm/propose-patch
+                      :tool-profile-digest "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")]
+    (is (= :mithril.hermes/tool-profile-mismatch
+           (error-code #(hermes/execute-effect effect {:profile profile}))))
+    (is (= :mithril.hermes/invalid-tool-profile
+           (error-code #(hermes/tool-profile-digest
+                         (assoc profile :allowed-paths ["../escape"])))))))

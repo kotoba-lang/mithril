@@ -244,7 +244,8 @@ kbb --backend sci --classpath "$CP" bin/mithril-jev.cljk \
   workspace/read,git/status,agent/stop
 ```
 
-`task.json` contains exactly `id`, `workspace`, and `goal`. The credential is
+`task.json` contains `id`, `workspace`, and `goal`; a coding task additionally
+binds the SHA-256 `tool-profile-digest`. The credential is
 read at call time from `OPENROUTER_API_KEY`, then from the exact macOS Keychain
 item `service=gftd.openrouter account=OPENROUTER_API_KEY`; it is never written
 to the artifact or receipt. The adapter pins the request to
@@ -256,9 +257,9 @@ usage and cost, and refuses malformed responses before the Governor runs.
 `mithril-hermes` is the durable outer-loop adapter for Hermes `--no-agent`
 jobs. One invocation acquires the state lease, asks TypeSafe Jev for at most
 one finite decision, intersects it with Governor grants, executes at most one
-read-only host effect, atomically checkpoints the Mithril state, and appends a
-JSONL audit record. A final singleton `stop` action is deterministic and does
-not spend a model request.
+host effect, atomically checkpoints the Mithril state, and appends a JSONL
+audit record. A final singleton `stop` action is deterministic and does not
+spend a model request.
 
 ```sh
 kbb --backend sci bin/mithril-hermes.cljk tick \
@@ -271,13 +272,36 @@ kbb --backend sci bin/mithril-hermes.cljk tick \
 ```
 
 `shadow` records the decision but requests no effect and does not advance the
-state. `execute` admits only `workspace/read`, `git/status`, and `agent/stop`;
-there is no generic shell, patch, or generated-text path. Workspace and Git
+state. Without a coding tool profile, `execute` admits only `workspace/read`,
+`git/status`, and `agent/stop`. Workspace and Git
 observations are reduced to counts/booleans before hashing, so command output,
 file names, and the workspace path are absent from stdout and the audit log.
 The state lock fails closed on overlap. A crashed process may leave that lock
 file behind; removing a stale lock is an operator recovery action rather than
 an automatic lease override.
+
+For a coding run, the optional final argument is a JSON tool profile. The task
+must contain the digest printed by `profile-digest`:
+
+```sh
+kbb --backend sci bin/mithril-hermes.cljk profile-digest coding-tools.json
+
+kbb --backend sci bin/mithril-hermes.cljk tick \
+  examples/governed-coding-bot.mith task.json state.edn worker-1 \
+  workspace/read,llm/propose-patch,workspace/apply-patch,amu/compile,test/run,git/status,agent/stop \
+  execute coding-tools.json
+```
+
+The coding profile fixes an absolute isolated Git workspace, an exact file
+allowlist, byte/time budgets, one Hermes proposer profile, and exact argv for
+compile and test. The proposer is invoked with `-t none`: it receives only the
+goal and bounded allowlisted file snapshot and can return only a raw unified
+diff. It cannot call a tool. The host checks clean `HEAD`, profile and patch
+digests, path/mode/binary constraints, then runs `git apply --check` before the
+write. Compile and test use `execFile` with the profile's argv and no shell;
+neither Jev nor the proposing model can invent a command or argument. Patch
+text and tool output stay in the private artifact directory and are represented
+in state/audit only by digests and bounded counts.
 
 The Hermes Desktop artifact embeds the same closed action/effect catalog. Cron
 creation refuses duplicate enabled routines and the configured active-job
