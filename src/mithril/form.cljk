@@ -17,13 +17,14 @@
    'mithril/synthesize-web-pipeline-application "SynthesizeWebPipelineApplication"
    'mithril/graph-agent "GraphAgentApplication"
    'mithril/app-agent "AppAgentApplication"
+   'mithril/bot-profile "BotProfile"
    'mithril/desktop-application "DesktopApplication"
    'mithril/ontology "Ontology"})
 
 (def ^:private nested-tags
   #{'mithril/choice 'mithril/export 'mithril/import 'mithril/route
     'mithril/source 'mithril/loop 'mithril/app 'mithril/page
-    'mithril/agent-loop 'mithril/actor 'mithril/activity 'rdf/node})
+    'mithril/agent-loop 'mithril/bot-policy 'mithril/actor 'mithril/activity 'rdf/node})
 
 (def ^:private typed-node-tags
   {'owl/class "owl:Class"
@@ -53,6 +54,9 @@
    :board-policy "boardPolicy"
    :max-active-jobs "maxActiveJobs"
    :max-dispatch-tasks "maxDispatchTasks"
+   :max-retries "maxRetries"
+   :lease-seconds "leaseSeconds"
+   :effects "effects"
    :rdf/type "@type"
    :rdfs/sub-class-of "subClassOf"
    :rdfs/sub-property-of "subPropertyOf"

@@ -25,6 +25,7 @@
     "SynthesizeWebPipelineApplication" "mith:SynthesizeWebPipelineApplication"
     "GraphAgentApplication" "mith:GraphAgentApplication"
     "AppAgentApplication" "mith:AppAgentApplication"
+    "BotProfile" "mith:BotProfile"
     "DesktopApplication" "mith:DesktopApplication"
     "Ontology" "owl:Ontology"
     "profile" {"@id" "mith:profile" "@type" "@id" "@container" "@set"}
@@ -74,6 +75,10 @@
     "boardPolicy" {"@id" "mith:boardPolicy" "@type" "@id"}
     "maxActiveJobs" {"@id" "mith:maxActiveJobs" "@type" "http://www.w3.org/2001/XMLSchema#integer"}
     "maxDispatchTasks" {"@id" "mith:maxDispatchTasks" "@type" "http://www.w3.org/2001/XMLSchema#integer"}
+    "maxRetries" {"@id" "mith:maxRetries" "@type" "http://www.w3.org/2001/XMLSchema#integer"}
+    "leaseSeconds" {"@id" "mith:leaseSeconds" "@type" "http://www.w3.org/2001/XMLSchema#integer"}
+    "effects" {"@id" "mith:effect" "@type" "@id" "@container" "@set"}
+    "policy" "mith:policy"
     "page" "mith:page"
     "actions" {"@id" "mith:action" "@type" "@id" "@container" "@list"}
     "navLabel" "mith:navLabel"

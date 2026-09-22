@@ -1,5 +1,6 @@
 (ns mithril.cli
   (:require [mithril.compiler :as compiler]
+            [mithril.bot :as bot]
             [mithril.web :as web]))
 
 (defn- usage! []
@@ -7,6 +8,7 @@
   (println "  mithril compile <program.mith|program.mithril>")
   (println "  mithril compile-ontology <ontology.mith|ontology.mithril>")
   (println "  mithril compile-library <library.mith|library.mithril>")
+  (println "  mithril compile-bot <profile.mith|profile.mithril>")
   (println "  mithril compile-web <app.mith|app.mithril> <library.mith>...")
   (println "  mithril request <app.mith|app.mithril> <library.mith> <METHOD> <PATH>")
   (js/process.exit 2))
@@ -20,6 +22,7 @@
     (map? x) (into {} (map (fn [[k v]] [(if (keyword? k) (keyword-string k) k)
                                          (json-safe v)]) x))
     (vector? x) (mapv json-safe x)
+    (set? x) (mapv json-safe (sort-by pr-str x))
     :else x))
 
 (defn- read-text [path]
@@ -52,6 +55,11 @@
       "compile-library"
       (if (and path (empty? args))
         (print-json (compile-library path))
+        (usage!))
+
+      "compile-bot"
+      (if (and path (empty? args))
+        (print-json (bot/compile-text path (read-text path)))
         (usage!))
 
       "compile-web"

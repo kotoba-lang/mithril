@@ -198,6 +198,48 @@ deterministic tests exercise admitted call DAG construction and all runtime
 branches; a successful test fixture is not reported as learned-model
 qualification. New-role training and held-out calibration remain required.
 
+## Governed coding bots
+
+[`examples/governed-coding-bot.mith`](examples/governed-coding-bot.mith)
+defines the executable bot policy as Mithril data. `mithril.bot` performs the
+OWL 2 RL / SPARQL candidate closure, validates the task with the declared SHACL
+shape, and exposes only these typed actions: workspace inspection, patch
+proposal, patch application, Amu compilation, test execution, git status and
+stop.
+
+OpenJev is restricted to one finite `Choice` distribution over the actions
+whose prerequisites are true. It cannot emit source, identifiers, tool names or
+arguments. The independent Governor must grant the selected capability before
+the runtime emits one effect. Exactly one matching receipt advances the state;
+effect IDs are content-derived, duplicate receipts fail closed, and lease,
+retry and total-step budgets are carried in the state.
+
+```text
+.mith BotProfile
+  -> OWL 2 RL action entailment
+  -> bounded SPARQL candidate query
+  -> SHACL task validation
+  -> OpenJev typed action choice
+  -> Governor capability intersection
+  -> one deterministic host effect
+  -> content-addressed receipt
+  -> next semantic state
+```
+
+Compile the published profile with:
+
+```sh
+kbb --backend sci --classpath "$CP" bin/mithril.cljk \
+  compile-bot examples/governed-coding-bot.mith
+```
+
+The Hermes Desktop artifact embeds the same closed action/effect catalog. Cron
+creation refuses duplicate enabled routines and the configured active-job
+ceiling. Kanban task identity is SHA-256 derived from profile, workspace, title,
+body and the Desktop graph digest, so retries reuse the task rather than
+creating parallel work. Kanban execution also receives the compiled lease and
+retry budgets.
+
 ## Bounded graph agent loop
 
 [`lib/graph/agent-loop-v1.mith`](lib/graph/agent-loop-v1.mith) publishes the
