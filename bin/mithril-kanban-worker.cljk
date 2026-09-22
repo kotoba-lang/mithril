@@ -20,6 +20,9 @@
   (or (some-> (.-HERMES_BIN js/process.env) str not-empty)
       "/Users/junkawasaki/.hermes/hermes-agent/venv/bin/hermes"))
 
+(defn- silent-idle? []
+  (= "1" (some-> (.-MITHRIL_SILENT_IDLE js/process.env) str)))
+
 (defn- exec! [program args]
   (.execFileSync cp program (clj->js args)
                  #js {:encoding "utf8" :stdio #js ["ignore" "pipe" "pipe"]}))
@@ -123,7 +126,8 @@
                 (try (block! board (:id card) "transient" message)
                    (catch :default _ nil))
                 (throw error)))))
-          (println (json {:status "idle" :reason "no-ready-mithril-task"}))))
+          (when-not (silent-idle?)
+            (println (json {:status "idle" :reason "no-ready-mithril-task"})))))
       (catch :default error
         (println (str "REFUSE\t"
                       (or (some-> error ex-data :mithril/error name) "kanban-worker-error")
