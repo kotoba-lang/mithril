@@ -39,6 +39,10 @@ The repository now contains source authored in Mithril itself:
   application. It imports the library by its canonical RDF Dataset digest and
   defines `GET` and `HEAD` routes without generated source text.
 
+`resources`, `lib` and `examples` are package classpath roots, so downstream
+builds consume these exact files from the pinned Git commit instead of copying
+or regenerating them.
+
 The v1 web slice is deliberately small but executable. The compiler rejects a
 changed library digest, a route that names anything except an imported handler,
 unknown source keys, unsupported methods, malformed paths and duplicate route
