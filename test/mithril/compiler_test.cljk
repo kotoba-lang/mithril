@@ -1,6 +1,7 @@
 (ns mithril.compiler-test
   (:require [cljs.test :refer [deftest is testing]]
-            [mithril.compiler :as compiler]))
+            [mithril.compiler :as compiler]
+            [mithril.web :as web]))
 
 (defn read-text [path]
   (.readFileSync (js/require "fs") path "utf8"))
@@ -54,3 +55,66 @@
                         (assoc-in ["choices" 1 "candidate"] "https://mithril.fund/id/reasoner/owl2-rl")))
                   nil
                   (catch :default e (:mithril/error (ex-data e)))))))))
+
+(defn error-code [f]
+  (try (f) nil
+       (catch :default e (:mithril/error (ex-data e)))))
+
+(deftest web-library-compiles-and-executes
+  (let [published-context (compiler/parse-json (read-text "resources/context-v1.jsonld"))
+        library-doc (compiler/parse-json (read-text "lib/web/v1.mith"))
+        app-doc (compiler/parse-json (read-text "examples/hello-web.mith"))
+        library (compiler/compile-library-document "lib/web/v1.mith" library-doc)
+        app (compiler/compile-web-document "examples/hello-web.mith" app-doc [library])]
+    (is (= compiler/context-document published-context))
+    (is (= "sha256:9e9b848b995eb565aaf7f85ce6661c2012b4534ac1729acc9fd7fdefa24b1c9e"
+           (:graph-digest library)))
+    (is (= "sha256:c9125761017d55a90a6abc3464ad8757995e5a57fe71407e368fd8f8fc3bbc09"
+           (:graph-digest app)))
+    (is (= {:status 200
+            :headers {"content-type" "text/plain; charset=utf-8"}
+            :body "Hello from a .mith application."}
+           (web/dispatch app {:method "GET" :path "/hello"})))
+    (is (= "" (:body (web/dispatch app {:method "HEAD" :path "/hello"}))))
+    (is (= 404 (:status (web/dispatch app {:method "GET" :path "/missing"}))))))
+
+(deftest web-library-fails-closed
+  (let [library-doc (compiler/parse-json (read-text "lib/web/v1.mith"))
+        app-doc (compiler/parse-json (read-text "examples/hello-web.mith"))
+        library (compiler/compile-library-document "lib/web/v1.mith" library-doc)]
+    (testing "content-addressed import"
+      (is (= :mithril/library-digest-mismatch
+             (error-code #(compiler/compile-web-document
+                            "x.mith"
+                            (assoc-in app-doc ["imports" 0 "digest"]
+                                      "sha256:0000000000000000000000000000000000000000000000000000000000000000")
+                            [library])))))
+    (testing "operation must be an imported handler"
+      (is (= :mithril/unexported-operation
+             (error-code #(compiler/compile-web-document
+                            "x.mith"
+                            (assoc-in app-doc ["routes" 0 "operation"]
+                                      "https://mithril.fund/lib/web/v1/view/text")
+                            [library])))))
+    (testing "method catalog"
+      (is (= :mithril/unsupported-method
+             (error-code #(compiler/compile-web-document
+                            "x.mith" (assoc-in app-doc ["routes" 0 "method"] "POST")
+                            [library])))))
+    (testing "route identity is unique"
+      (is (= :mithril/duplicate-route
+             (error-code #(compiler/compile-web-document
+                            "x.mith"
+                            (assoc-in app-doc ["routes" 1 "method"] "GET")
+                            [library])))))
+    (testing "application and library share one ontology identity"
+      (is (= :mithril/ontology-mismatch
+             (error-code #(compiler/compile-web-document
+                            "x.mith"
+                            (assoc app-doc "ontology"
+                                   "0000000000000000000000000000000000000000000000000000000000000000")
+                            [library])))))
+    (testing "missing source key is refused"
+      (is (= :mithril/unknown-source-key
+             (error-code #(compiler/compile-library-document
+                            "x.mith" (dissoc library-doc "version"))))))))

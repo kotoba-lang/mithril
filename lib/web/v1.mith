@@ -1,0 +1,13 @@
+{
+  "@context": "https://mithril.fund/context/v1",
+  "@id": "https://mithril.fund/lib/web/v1",
+  "@type": "Library",
+  "ontology": "f6371c58ffa5d9587867f9f7ae33aa62fabf99b354070c2ad6da5323d5c85ceb",
+  "version": 1,
+  "exports": [
+    {"symbol": "https://mithril.fund/lib/web/v1/router/exact", "kind": "mith:router"},
+    {"symbol": "https://mithril.fund/lib/web/v1/handler/static-response", "kind": "mith:handler"},
+    {"symbol": "https://mithril.fund/lib/web/v1/view/text", "kind": "mith:view"},
+    {"symbol": "https://mithril.fund/lib/web/v1/effect/http-response", "kind": "mith:effect"}
+  ]
+}

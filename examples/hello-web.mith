@@ -1,0 +1,31 @@
+{
+  "@context": "https://mithril.fund/context/v1",
+  "@id": "https://mithril.fund/app/hello-web",
+  "@type": "WebApplication",
+  "goal": "https://mithril.fund/id/goal/web-application",
+  "ontology": "f6371c58ffa5d9587867f9f7ae33aa62fabf99b354070c2ad6da5323d5c85ceb",
+  "imports": [
+    {
+      "library": "https://mithril.fund/lib/web/v1",
+      "digest": "sha256:9e9b848b995eb565aaf7f85ce6661c2012b4534ac1729acc9fd7fdefa24b1c9e"
+    }
+  ],
+  "routes": [
+    {
+      "method": "GET",
+      "path": "/hello",
+      "operation": "https://mithril.fund/lib/web/v1/handler/static-response",
+      "status": 200,
+      "contentType": "text/plain; charset=utf-8",
+      "body": "Hello from a .mith application."
+    },
+    {
+      "method": "HEAD",
+      "path": "/hello",
+      "operation": "https://mithril.fund/lib/web/v1/handler/static-response",
+      "status": 200,
+      "contentType": "text/plain; charset=utf-8",
+      "body": "Hello from a .mith application."
+    }
+  ]
+}

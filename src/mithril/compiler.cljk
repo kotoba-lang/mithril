@@ -12,13 +12,31 @@
   {"@context"
    {"mith" "https://mithril.fund/ns/v1#"
     "Program" "mith:Program"
+    "Library" "mith:Library"
+    "WebApplication" "mith:WebApplication"
     "goal" {"@id" "mith:goal" "@type" "@id"}
     "ontology" "mith:ontologyDigest"
     "choices" {"@id" "mith:choice" "@container" "@set"}
     "role" {"@id" "mith:role" "@type" "@vocab"}
     "candidate" {"@id" "mith:candidate" "@type" "@id"}
     "confidence" {"@id" "mith:confidence"
-                  "@type" "http://www.w3.org/2001/XMLSchema#integer"}}})
+                  "@type" "http://www.w3.org/2001/XMLSchema#integer"}
+    "version" {"@id" "mith:version"
+               "@type" "http://www.w3.org/2001/XMLSchema#integer"}
+    "exports" {"@id" "mith:export" "@container" "@set"}
+    "symbol" {"@id" "mith:symbol" "@type" "@id"}
+    "kind" {"@id" "mith:kind" "@type" "@vocab"}
+    "imports" {"@id" "mith:import" "@container" "@set"}
+    "library" {"@id" "mith:library" "@type" "@id"}
+    "digest" "mith:digest"
+    "routes" {"@id" "mith:route" "@container" "@set"}
+    "method" "mith:method"
+    "path" "mith:path"
+    "operation" {"@id" "mith:operation" "@type" "@id"}
+    "status" {"@id" "mith:status"
+              "@type" "http://www.w3.org/2001/XMLSchema#integer"}
+    "contentType" "mith:contentType"
+    "body" "mith:body"}})
 
 (def role-order
   ["mith:reasoner" "mith:shape" "mith:query" "mith:view"
@@ -40,6 +58,15 @@
 (def goals #{"https://mithril.fund/id/goal/tender-intake"})
 (def program-keys #{"@context" "@id" "@type" "goal" "ontology" "choices"})
 (def choice-keys #{"role" "candidate" "confidence"})
+
+(def library-keys #{"@context" "@id" "@type" "ontology" "version" "exports"})
+(def export-keys #{"symbol" "kind"})
+(def web-app-keys #{"@context" "@id" "@type" "goal" "ontology" "imports" "routes"})
+(def import-keys #{"library" "digest"})
+(def route-keys #{"method" "path" "operation" "status" "contentType" "body"})
+(def export-kinds #{"mith:router" "mith:handler" "mith:view" "mith:effect"})
+(def web-goal "https://mithril.fund/id/goal/web-application")
+(def web-methods #{"GET" "HEAD"})
 
 (defn- fail! [code detail]
   (throw (ex-info detail {:mithril/error code :detail detail})))
@@ -67,6 +94,37 @@
   (when-not (every? program-keys (keys doc))
     (fail! :mithril/unknown-program-key "program contains an unknown key"))
   doc)
+
+(defn- require-base-source! [path doc expected-type allowed-keys]
+  (when-not (source-path? path)
+    (fail! :mithril/unsupported-extension
+           "Mithril source must end in .mith or .mithril"))
+  (when-not (= context-uri (get doc "@context"))
+    (fail! :mithril/unpinned-context
+           "v1 source must use the pinned Mithril context URI"))
+  (when-not (= expected-type (get doc "@type"))
+    (fail! :mithril/unexpected-source-type
+           (str "@type must be " expected-type)))
+  (when-not (= allowed-keys (set (keys doc)))
+    (fail! :mithril/unknown-source-key
+           (str expected-type " contains an unknown key")))
+  doc)
+
+(defn- canonical-graph [doc]
+  (let [expanded (jsonld/expand doc {:contexts {context-uri context-document}})
+        dataset (to-rdf/to-rdf expanded)]
+    (str "sha256:" (rdf-canon/canonical-hash dataset))))
+
+(defn- require-iri! [value label]
+  (when-not (and (string? value)
+                 (boolean (re-matches #"https://mithril\.fund/[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]+" value)))
+    (fail! :mithril/invalid-identifier (str label " must be a mithril.fund HTTPS IRI")))
+  value)
+
+(defn- require-ontology! [ontology]
+  (when-not (and (string? ontology) (boolean (re-matches #"[0-9a-f]{64}" ontology)))
+    (fail! :mithril/invalid-ontology "ontology must be a 64-character SHA-256 identity"))
+  ontology)
 
 (defn- short-id [iri]
   (when-not (string? iri)
@@ -119,15 +177,136 @@
         goal (short-id goal-iri)
         ontology (get doc "ontology")
         choices (ordered-choices (get doc "choices"))]
-    (when-not (and (string? ontology) (boolean (re-matches #"[0-9a-f]{64}" ontology)))
-      (fail! :mithril/invalid-ontology "ontology must be a 64-character SHA-256 identity"))
+    (require-ontology! ontology)
     {:format "https://mithril.fund/artifact/v1"
      :media-type media-type
      :graph-digest (str "sha256:" graph-digest)
      :transaction [:oak.transaction/v1 goal ontology choices]}))
 
+(defn- compile-export [entry]
+  (when-not (and (map? entry) (= export-keys (set (keys entry))))
+    (fail! :mithril/invalid-export "library export contains an unknown or missing key"))
+  (let [symbol (require-iri! (get entry "symbol") "export symbol")
+        kind (get entry "kind")]
+    (when-not (contains? export-kinds kind)
+      (fail! :mithril/unknown-export-kind (str "unknown export kind: " kind)))
+    {:symbol symbol :kind (keyword (subs kind 5))}))
+
+(defn compile-library-document [path doc]
+  (require-base-source! path doc "Library" library-keys)
+  (let [library-id (require-iri! (get doc "@id") "library @id")
+        ontology (require-ontology! (get doc "ontology"))
+        version (get doc "version")
+        raw-exports (get doc "exports")]
+    (when-not (and (integer? version) (pos? version))
+      (fail! :mithril/invalid-version "library version must be a positive integer"))
+    (when-not (and (vector? raw-exports) (seq raw-exports))
+      (fail! :mithril/missing-exports "library exports must be a non-empty array"))
+    (let [exports (mapv compile-export raw-exports)
+          symbols (map :symbol exports)]
+      (when-not (= (count symbols) (count (set symbols)))
+        (fail! :mithril/duplicate-export "library export symbols must be unique"))
+      {:format "https://mithril.fund/artifact/library-v1"
+       :media-type media-type
+       :graph-digest (canonical-graph doc)
+       :library {:id library-id
+                 :version version
+                 :ontology ontology
+                 :exports exports}})))
+
+(defn- compile-import [entry libraries]
+  (when-not (and (map? entry) (= import-keys (set (keys entry))))
+    (fail! :mithril/invalid-import "import contains an unknown or missing key"))
+  (let [library-id (require-iri! (get entry "library") "import library")
+        digest (get entry "digest")
+        library (get libraries library-id)]
+    (when-not (boolean (re-matches #"sha256:[0-9a-f]{64}" (or digest "")))
+      (fail! :mithril/invalid-import-digest "import digest must be a sha256 graph identity"))
+    (when-not library
+      (fail! :mithril/missing-library (str "library was not supplied: " library-id)))
+    (when-not (= digest (:graph-digest library))
+      (fail! :mithril/library-digest-mismatch (str "library digest mismatch: " library-id)))
+    {:library library-id :digest digest}))
+
+(defn- compile-route [entry exported-symbols]
+  (when-not (and (map? entry) (= route-keys (set (keys entry))))
+    (fail! :mithril/invalid-route "route contains an unknown or missing key"))
+  (let [method (get entry "method")
+        path (get entry "path")
+        operation (require-iri! (get entry "operation") "route operation")
+        status (get entry "status")
+        content-type (get entry "contentType")
+        body (get entry "body")]
+    (when-not (contains? web-methods method)
+      (fail! :mithril/unsupported-method "v1 routes admit only GET and HEAD"))
+    (when-not (and (string? path)
+                   (boolean (re-matches #"/(?:[A-Za-z0-9._~-]+(?:/[A-Za-z0-9._~-]+)*)?" path)))
+      (fail! :mithril/invalid-path "v1 route path must be a static absolute path"))
+    (when-not (= :handler (get exported-symbols operation))
+      (fail! :mithril/unexported-operation
+             (str "route operation is not an imported handler: " operation)))
+    (when-not (and (integer? status) (<= 100 status 599))
+      (fail! :mithril/invalid-status "response status must be 100 through 599"))
+    (when-not (and (string? content-type) (<= (count content-type) 128))
+      (fail! :mithril/invalid-content-type "contentType must be a string of at most 128 characters"))
+    (when-not (and (string? body) (<= (count body) 65536))
+      (fail! :mithril/invalid-body "body must be a string of at most 65536 characters"))
+    {:method method
+     :path path
+     :operation operation
+     :response {:status status
+                :headers {"content-type" content-type}
+                :body body}}))
+
+(defn compile-web-document [path doc library-artifacts]
+  (require-base-source! path doc "WebApplication" web-app-keys)
+  (when-not (= web-goal (get doc "goal"))
+    (fail! :mithril/unknown-goal "web application goal is outside the v1 catalog"))
+  (let [ontology (require-ontology! (get doc "ontology"))
+        libraries (into {} (map (fn [artifact]
+                                  [(get-in artifact [:library :id]) artifact])
+                                library-artifacts))
+        raw-imports (get doc "imports")]
+    (when-not (and (vector? raw-imports) (seq raw-imports))
+      (fail! :mithril/missing-imports "web application imports must be a non-empty array"))
+    (let [imports (mapv #(compile-import % libraries) raw-imports)
+          imported-ids (set (map :library imports))
+          exported-symbols (into {}
+                                 (mapcat (fn [[library-id artifact]]
+                                           (when (contains? imported-ids library-id)
+                                             (map (juxt :symbol :kind)
+                                                  (get-in artifact [:library :exports]))))
+                                         libraries))
+          raw-routes (get doc "routes")]
+      (when-not (= (count imports) (count imported-ids))
+        (fail! :mithril/duplicate-import "each library may be imported exactly once"))
+      (doseq [library-id imported-ids]
+        (when-not (= ontology (get-in libraries [library-id :library :ontology]))
+          (fail! :mithril/ontology-mismatch
+                 (str "application and library ontology identities differ: " library-id))))
+      (when-not (and (vector? raw-routes) (seq raw-routes))
+        (fail! :mithril/missing-routes "web application routes must be a non-empty array"))
+      (let [routes (mapv #(compile-route % exported-symbols) raw-routes)
+            route-identities (map (juxt :method :path) routes)]
+        (when-not (= (count route-identities) (count (set route-identities)))
+          (fail! :mithril/duplicate-route "method and path pairs must be unique"))
+        {:format "https://mithril.fund/artifact/web-application-v1"
+         :media-type media-type
+         :graph-digest (canonical-graph doc)
+         :web-ir {:version :mithril.web/v1
+                  :goal :goal/web-application
+                  :ontology ontology
+                  :imports imports
+                  :routes routes}}))))
+
 (defn compile-text [path text]
   (compile-document path (parse-json text)))
+
+(defn compile-library-text [path text]
+  (compile-library-document path (parse-json text)))
+
+(defn compile-web-text [path text library-artifacts]
+  (compile-web-document path (parse-json text) library-artifacts))
 
 (defn semantic-projection [artifact]
   (select-keys artifact [:format :media-type :graph-digest :transaction]))

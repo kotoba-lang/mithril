@@ -1,8 +1,13 @@
 (ns mithril.cli
-  (:require [mithril.compiler :as compiler]))
+  (:require [mithril.compiler :as compiler]
+            [mithril.web :as web]))
 
 (defn- usage! []
-  (println "usage: mithril compile <program.mith|program.mithril>")
+  (println "usage:")
+  (println "  mithril compile <program.mith|program.mithril>")
+  (println "  mithril compile-library <library.mith|library.mithril>")
+  (println "  mithril compile-web <app.mith|app.mithril> <library.mith>...")
+  (println "  mithril request <app.mith|app.mithril> <library.mith> <METHOD> <PATH>")
   (js/process.exit 2))
 
 (defn- keyword-string [x]
@@ -11,15 +16,51 @@
 (defn- json-safe [x]
   (cond
     (keyword? x) (keyword-string x)
-    (map? x) (into {} (map (fn [[k v]] [(keyword-string k) (json-safe v)]) x))
+    (map? x) (into {} (map (fn [[k v]] [(if (keyword? k) (keyword-string k) k)
+                                         (json-safe v)]) x))
     (vector? x) (mapv json-safe x)
     :else x))
 
-(let [[command path & extra] *command-line-args*]
-  (when-not (and (= command "compile") path (empty? extra)) (usage!))
+(defn- read-text [path]
+  (.readFileSync (js/require "fs") path "utf8"))
+
+(defn- compile-library [path]
+  (compiler/compile-library-text path (read-text path)))
+
+(defn- compile-web [path library-paths]
+  (compiler/compile-web-text path
+                             (read-text path)
+                             (mapv compile-library library-paths)))
+
+(defn- print-json [value]
+  (println (.stringify js/JSON (clj->js (json-safe value)) nil 2)))
+
+(let [[command path & args] *command-line-args*]
   (try
-    (let [artifact (compiler/compile-text path (.readFileSync (js/require "fs") path "utf8"))]
-      (println (.stringify js/JSON (clj->js (json-safe artifact)) nil 2)))
+    (case command
+      "compile"
+      (if (and path (empty? args))
+        (print-json (compiler/compile-text path (read-text path)))
+        (usage!))
+
+      "compile-library"
+      (if (and path (empty? args))
+        (print-json (compile-library path))
+        (usage!))
+
+      "compile-web"
+      (if (and path (seq args))
+        (print-json (compile-web path args))
+        (usage!))
+
+      "request"
+      (let [[library-path method request-path & extra] args]
+        (if (and path library-path method request-path (empty? extra))
+          (print-json (web/dispatch (compile-web path [library-path])
+                                    {:method method :path request-path}))
+          (usage!)))
+
+      (usage!))
     (catch :default e
       (println (str "REFUSE\t" (or (some-> e ex-data :mithril/error name) "compile-error")
                     "\t" (.-message e)))

@@ -1,0 +1,26 @@
+(ns mithril.web)
+
+(def web-format "https://mithril.fund/artifact/web-application-v1")
+
+(defn- fail! [code detail]
+  (throw (ex-info detail {:mithril/error code :detail detail})))
+
+(defn dispatch
+  "Execute the closed v1 web IR for one request. This reference runtime has no
+  ambient network authority; an HTTP host supplies a typed request and writes
+  the returned response."
+  [artifact request]
+  (when-not (= web-format (:format artifact))
+    (fail! :mithril.web/invalid-artifact "artifact is not a Mithril web application"))
+  (let [method (:method request)
+        path (:path request)]
+    (when-not (and (string? method) (string? path))
+      (fail! :mithril.web/invalid-request "request method and path must be strings"))
+    (if-let [route (first (filter #(and (= method (:method %))
+                                        (= path (:path %)))
+                                  (get-in artifact [:web-ir :routes])))]
+      (cond-> (:response route)
+        (= "HEAD" method) (assoc :body ""))
+      {:status 404
+       :headers {"content-type" "text/plain; charset=utf-8"}
+       :body "Not Found"})))
