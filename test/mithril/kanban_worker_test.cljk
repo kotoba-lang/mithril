@@ -1,0 +1,48 @@
+(ns mithril.kanban-worker-test
+  (:require [cljs.test :refer [deftest is testing]]
+            [clojure.string :as str]
+            [mithril.bot :as bot]
+            [mithril.kanban-worker :as worker]))
+
+(def actions (mapv :id bot/action-catalog))
+(def effects (mapv (comp #(str (namespace %) "/" (name %)) :effect) bot/action-catalog))
+
+(def body
+  (pr-str (list 'mithril/kanban-task
+                :protocol worker/protocol
+                :workspace "/tmp/mithril-work"
+                :input "Apply and verify one bounded change."
+                :governor worker/governor
+                :decision-output 'typed-action-only
+                :generated-text false
+                :action-candidates actions
+                :effect-catalog effects
+                :output 'mithril/bot-effect-receipt)))
+
+(deftest card-form-is-strict-and-content-addressed
+  (let [parsed (worker/parse-card-body body)
+        task (worker/semantic-task parsed (str "sha256:" (apply str (repeat 64 "a"))))
+        continuation (worker/parse-card-body (worker/continuation-body parsed 1 "t_root"))]
+    (is (= "/tmp/mithril-work" (:workspace parsed)))
+    (is (= 1 (:expected-step continuation)))
+    (is (= "t_root" (:root-id continuation)))
+    (is (re-matches #"mithril:[0-9a-f]{64}" (:id task)))
+    (is (= (worker/state-key parsed) (worker/state-key continuation)))))
+
+(deftest generated-text-and-catalog-drift-fail-closed
+  (testing "generated text"
+    (is (= :mithril.kanban/generated-text-forbidden
+           (try (worker/parse-card-body (str/replace body ":generated-text false"
+                                                     ":generated-text true")) nil
+                (catch :default error (:mithril/error (ex-data error)))))))
+  (testing "catalog mismatch"
+    (is (= :mithril.kanban/catalog-mismatch
+           (try (worker/parse-card-body (str/replace body (pr-str actions) "[]")) nil
+                (catch :default error (:mithril/error (ex-data error))))))))
+
+(deftest step-reconciliation-prevents-double-effects
+  (is (= :execute (worker/reconcile-step 2 {:step 2})))
+  (is (= :handoff (worker/reconcile-step 2 {:step 3})))
+  (is (= :mithril.kanban/step-mismatch
+         (try (worker/reconcile-step 2 {:step 4}) nil
+              (catch :default error (:mithril/error (ex-data error)))))))

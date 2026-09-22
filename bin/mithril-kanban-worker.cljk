@@ -1,0 +1,131 @@
+#!/usr/bin/env kbb
+(ns mithril.kanban-worker-cli
+  (:require [cljs.reader :as reader]
+            [clojure.string :as str]
+            [mithril.hermes :as mithril-hermes]
+            [mithril.kanban-worker :as worker]))
+
+(def fs (js/require "node:fs"))
+(def path (js/require "node:path"))
+(def cp (js/require "node:child_process"))
+
+(defn- usage! []
+  (println "usage: mithril-kanban-worker tick <board> <profile.mith> <coding-tools.json> <state-dir> <owner> <grants.csv> execute")
+  (js/process.exit 2))
+
+(defn- read-text [file] (.readFileSync fs file "utf8"))
+(defn- parse-json [text] (js->clj (js/JSON.parse text) :keywordize-keys true))
+(defn- json [value] (.stringify js/JSON (clj->js value)))
+(defn- hermes-bin []
+  (or (some-> (.-HERMES_BIN js/process.env) str not-empty)
+      "/Users/junkawasaki/.hermes/hermes-agent/venv/bin/hermes"))
+
+(defn- exec! [program args]
+  (.execFileSync cp program (clj->js args)
+                 #js {:encoding "utf8" :stdio #js ["ignore" "pipe" "pipe"]}))
+
+(defn- hermes! [board args]
+  (exec! (hermes-bin) (into ["kanban" "--board" board] args)))
+
+(defn- load-state [state-path]
+  (when (.existsSync fs state-path)
+    (reader/read-string (read-text state-path))))
+
+(defn- write-json! [file value]
+  (.mkdirSync fs (.dirname path file) #js {:recursive true})
+  (.writeFileSync fs file (json value) "utf8"))
+
+(defn- block! [board task-id kind reason]
+  (hermes! board ["block" "--kind" kind task-id reason]))
+
+(defn- complete! [board task-id result metadata]
+  (hermes! board ["complete" task-id "--result" result "--summary" result
+                  "--metadata" (json metadata)]))
+
+(defn- create-continuation! [board card body next-step root-id workspace]
+  (let [root-title (str/replace (:title card) #"(?: \[step [0-9]+\])+$" "")
+        created (parse-json
+                 (hermes! board
+                          ["create" (str root-title " [step " next-step "]")
+                           "--body" body
+                           "--assignee" "mithril-runtime"
+                           "--parent" (:id card)
+                           "--workspace" (str "dir:" workspace)
+                           "--idempotency-key" (str "mithril:" root-id ":step:" next-step)
+                           "--max-runtime" "900"
+                           "--max-retries" "3"
+                           "--completion-contract" "local-only"
+                           "--created-by" "mithril-runtime"
+                           "--json"]))]
+    (or (:id created) (get-in created [:task :id])
+        (throw (ex-info "Hermes did not return a continuation task id"
+                        {:mithril/error :mithril.kanban/create-failed})))))
+
+(defn- tick-card! [board profile-path tool-profile-path state-dir owner grants mode card]
+  (let [properties (worker/parse-card-body (:body card))
+        tool-profile (parse-json (read-text tool-profile-path))
+        tool-digest (mithril-hermes/tool-profile-digest tool-profile)
+        task (worker/semantic-task properties tool-digest)
+        key (worker/state-key properties)
+        state-path (.join path state-dir (str key ".edn"))
+        task-path (.join path state-dir (str key ".task.json"))
+        state (load-state state-path)
+        expected (or (:expected-step properties) 0)
+        disposition (worker/reconcile-step expected state)
+        root-id (or (:root-id properties) (:id card))]
+    (write-json! task-path task)
+    (when (= :execute disposition)
+      (exec! "kbb" ["--backend" "sci" "bin/mithril-hermes.cljk" "tick"
+                     profile-path task-path state-path owner grants mode tool-profile-path]))
+    (let [next-state (load-state state-path)
+          run-status (:status next-state)
+          next-step (:step next-state)
+          base {:mithril_state key :run_id (:run-id next-state)
+                :step next-step :run_status (name run-status)
+                :delivery (name disposition)}]
+      (case run-status
+        :completed
+        (complete! board (:id card) "Mithril run completed" (assoc base :terminal true))
+
+        :held
+        (block! board (:id card) "needs_input" "Mithril retry budget exhausted")
+
+        :running
+        (let [body (worker/continuation-body properties next-step root-id)
+              child-id (create-continuation! board card body next-step root-id (:workspace properties))]
+          (complete! board (:id card) "Mithril semantic step committed"
+                     (assoc base :terminal false :continuation child-id)))
+
+        (throw (ex-info "Mithril checkpoint has no admitted run status"
+                        {:mithril/error :mithril.kanban/invalid-state}))))))
+
+(let [[command board profile-path tool-profile-path state-dir owner grants mode & extra]
+      *command-line-args*]
+  (if-not (and (= command "tick") board profile-path tool-profile-path state-dir owner grants
+               (= "execute" mode) (empty? extra))
+    (usage!)
+    (try
+      (.mkdirSync fs state-dir #js {:recursive true})
+      (let [cards (parse-json (hermes! board ["list" "--assignee" "mithril-runtime"
+                                               "--status" "ready" "--sort" "created" "--json"]))]
+        (if-let [card (first cards)]
+          (do
+            ;; A lost claim race is idle work, not a task failure.  Never block
+            ;; a card merely because another worker claimed it first.
+            (hermes! board ["claim" (:id card) "--ttl" "900"])
+            (try
+            (tick-card! board profile-path tool-profile-path state-dir owner grants mode card)
+            (println (json {:status "committed" :task_id (:id card)}))
+            (catch :default error
+              (let [message (subs (or (.-message error) "Mithril worker failure")
+                                  0 (min 1000 (count (or (.-message error)
+                                                         "Mithril worker failure"))))]
+                (try (block! board (:id card) "transient" message)
+                   (catch :default _ nil))
+                (throw error)))))
+          (println (json {:status "idle" :reason "no-ready-mithril-task"}))))
+      (catch :default error
+        (println (str "REFUSE\t"
+                      (or (some-> error ex-data :mithril/error name) "kanban-worker-error")
+                      "\t" (.-message error)))
+        (set! (.-exitCode js/process) 1)))))
