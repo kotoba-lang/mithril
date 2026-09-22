@@ -1,0 +1,89 @@
+(ns mithril.graph
+  "Compiler for a bounded collect -> analyze -> govern -> persist agent tick."
+  (:require [clojure.string :as str]
+            [mithril.compiler :as compiler]))
+
+(def graph-format "https://mithril.fund/artifact/graph-agent-v1")
+(def graph-goal "https://mithril.fund/id/goal/collect-analyze-preserve-graph")
+(def source-keys #{"@context" "@id" "@type" "goal" "ontology" "imports" "loop" "sources"})
+(def loop-keys #{"maxSources" "maxBytesPerSource" "collector" "analyzer" "store" "governor"})
+(def source-entry-keys #{"url" "mediaType"})
+(def role-fields {"collector" :collector "analyzer" :analyzer "store" :store "governor" :governor})
+
+(defn- fail! [code detail]
+  (throw (ex-info detail {:mithril/error code :detail detail})))
+
+(defn- https-source? [value]
+  (and (string? value)
+       (boolean (re-matches #"https://mithril\.fund/[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]+" value))))
+
+(defn compile-document [path doc library-artifacts]
+  (when-not (compiler/source-path? path)
+    (fail! :mithril/unsupported-extension "graph agent source must end in .mith or .mithril"))
+  (when-not (= compiler/context-uri (get doc "@context"))
+    (fail! :mithril/unpinned-context "graph agent source must use the pinned context"))
+  (when-not (= "GraphAgentApplication" (get doc "@type"))
+    (fail! :mithril/unexpected-source-type "@type must be GraphAgentApplication"))
+  (when-not (= source-keys (set (keys doc)))
+    (fail! :mithril/unknown-source-key "graph agent source has an unknown or missing key"))
+  (when-not (= graph-goal (get doc "goal"))
+    (fail! :mithril/unknown-goal "graph agent goal is outside the v1 catalog"))
+  (let [ontology (get doc "ontology")
+        imports (get doc "imports")
+        loop-spec (get doc "loop")
+        sources (get doc "sources")
+        libraries (into {} (map (fn [artifact] [(get-in artifact [:library :id]) artifact]) library-artifacts))]
+    (when-not (boolean (re-matches #"[0-9a-f]{64}" (or ontology "")))
+      (fail! :mithril/invalid-ontology "ontology must be a 64-character SHA-256 identity"))
+    (when-not (and (vector? imports) (= 1 (count imports)))
+      (fail! :mithril/invalid-import "graph agent v1 requires exactly one library import"))
+    (let [{library-id "library" digest "digest" :as imported} (first imports)
+          library (get libraries library-id)]
+      (when-not (= #{"library" "digest"} (set (keys imported)))
+        (fail! :mithril/invalid-import "graph agent import field set is invalid"))
+      (when-not library (fail! :mithril/missing-library "graph agent library was not supplied"))
+      (when-not (= digest (:graph-digest library))
+        (fail! :mithril/library-digest-mismatch "graph agent library digest mismatch"))
+      (when-not (= ontology (get-in library [:library :ontology]))
+        (fail! :mithril/ontology-mismatch "graph agent and library ontology identities differ"))
+      (when-not (= loop-keys (set (keys loop-spec)))
+        (fail! :mithril/invalid-loop "graph agent loop has an unknown or missing key"))
+      (when-not (and (integer? (get loop-spec "maxSources"))
+                     (<= 1 (get loop-spec "maxSources") 16)
+                     (integer? (get loop-spec "maxBytesPerSource"))
+                     (<= 1024 (get loop-spec "maxBytesPerSource") 1048576))
+        (fail! :mithril/invalid-budget "graph agent budgets are outside v1 bounds"))
+      (when-not (and (vector? sources) (seq sources)
+                     (<= (count sources) (get loop-spec "maxSources")))
+        (fail! :mithril/invalid-sources "graph agent sources exceed the declared bounded set"))
+      (doseq [source sources]
+        (when-not (and (= source-entry-keys (set (keys source)))
+                       (https-source? (get source "url"))
+                       (= "application/ld+json" (get source "mediaType")))
+          (fail! :mithril/source-not-admitted "only declared mithril.fund JSON-LD HTTPS sources are admitted")))
+      (let [exports (into {} (map (juxt :symbol :kind) (get-in library [:library :exports])))]
+        (doseq [[field role] role-fields]
+          (when-not (= role (get exports (get loop-spec field)))
+            (fail! :mithril/unexported-operation (str field " is not an imported " (name role)))))
+        {:format graph-format
+         :media-type compiler/media-type
+         :graph-digest (compiler/graph-digest doc)
+         :graph-ir {:version "mithril.graph-agent/v1"
+                    :goal :goal/collect-analyze-preserve-graph
+                    :ontology ontology
+                    :import {:library library-id :digest digest}
+                    :budget {:max-sources (get loop-spec "maxSources")
+                             :max-bytes-per-source (get loop-spec "maxBytesPerSource")}
+                    :operations (into {} (map (fn [[field role]] [role (get loop-spec field)]) role-fields))
+                    :sources (mapv (fn [source] {:url (get source "url") :media-type (get source "mediaType")}) sources)}}))))
+
+(defn compile-text [path text library-artifacts]
+  (compile-document path (compiler/parse-json text) library-artifacts))
+
+(defn prepare-tick [artifact]
+  (when-not (= graph-format (:format artifact))
+    (fail! :mithril.graph/invalid-artifact "artifact is not a graph agent"))
+  {:kind :mithril.graph/tick
+   :budget (get-in artifact [:graph-ir :budget])
+   :requests (mapv #(assoc % :method "GET" :accept "application/ld+json")
+                   (get-in artifact [:graph-ir :sources]))})

@@ -16,10 +16,21 @@
     "WebApplication" "mith:WebApplication"
     "SynthesizeWebApplication" "mith:SynthesizeWebApplication"
     "SynthesizeWebPipelineApplication" "mith:SynthesizeWebPipelineApplication"
+    "GraphAgentApplication" "mith:GraphAgentApplication"
     "routerIntent" "mith:routerIntent"
     "handlerIntent" "mith:handlerIntent"
     "viewIntent" "mith:viewIntent"
     "effectIntent" "mith:effectIntent"
+    "loop" "mith:loop"
+    "sources" {"@id" "mith:source" "@container" "@set"}
+    "url" {"@id" "mith:url" "@type" "@id"}
+    "mediaType" "mith:mediaType"
+    "maxSources" {"@id" "mith:maxSources" "@type" "http://www.w3.org/2001/XMLSchema#integer"}
+    "maxBytesPerSource" {"@id" "mith:maxBytesPerSource" "@type" "http://www.w3.org/2001/XMLSchema#integer"}
+    "collector" {"@id" "mith:collector" "@type" "@id"}
+    "analyzer" {"@id" "mith:analyzer" "@type" "@id"}
+    "store" {"@id" "mith:store" "@type" "@id"}
+    "governor" {"@id" "mith:governor" "@type" "@id"}
     "goal" {"@id" "mith:goal" "@type" "@id"}
     "ontology" "mith:ontologyDigest"
     "choices" {"@id" "mith:choice" "@container" "@set"}
@@ -74,7 +85,8 @@
 (def web-app-keys #{"@context" "@id" "@type" "goal" "ontology" "imports" "routes"})
 (def import-keys #{"library" "digest"})
 (def route-keys #{"method" "path" "operation" "status" "contentType" "body"})
-(def export-kinds #{"mith:router" "mith:handler" "mith:view" "mith:effect"})
+(def export-kinds #{"mith:router" "mith:handler" "mith:view" "mith:effect"
+                    "mith:collector" "mith:analyzer" "mith:store" "mith:governor"})
 (def web-goal "https://mithril.fund/id/goal/web-application")
 (def web-methods #{"GET" "HEAD"})
 

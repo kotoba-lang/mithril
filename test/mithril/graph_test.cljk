@@ -1,0 +1,36 @@
+(ns mithril.graph-test
+  (:require [cljs.test :refer [deftest is testing]]
+            [mithril.compiler :as compiler]
+            [mithril.graph :as graph]))
+
+(defn read-text [path] (.readFileSync (js/require "fs") path "utf8"))
+(defn fixture []
+  (let [library (compiler/compile-library-text "lib/graph/agent-loop-v1.mith"
+                                               (read-text "lib/graph/agent-loop-v1.mith"))
+        app (compiler/parse-json (read-text "examples/mithril-graph-agent.mith"))]
+    {:library library :app app}))
+(defn error-code [f] (try (f) nil (catch :default e (:mithril/error (ex-data e)))))
+
+(deftest graph-agent-compiles-to-a-bounded-tick
+  (let [{:keys [library app]} (fixture)
+        artifact (graph/compile-document "examples/mithril-graph-agent.mith" app [library])
+        tick (graph/prepare-tick artifact)]
+    (is (= graph/graph-format (:format artifact)))
+    (is (= 3 (count (:requests tick))))
+    (is (= {:max-sources 4 :max-bytes-per-source 262144} (:budget tick)))
+    (is (= #{:collector :analyzer :store :governor}
+           (set (keys (get-in artifact [:graph-ir :operations])))))
+    (is (every? #(= "GET" (:method %)) (:requests tick)))))
+
+(deftest graph-agent-refuses-unbounded-or-foreign-collection
+  (let [{:keys [library app]} (fixture)]
+    (testing "budget"
+      (is (= :mithril/invalid-budget
+             (error-code #(graph/compile-document "x.mith"
+                                                  (assoc-in app ["loop" "maxSources"] 100)
+                                                  [library])))))
+    (testing "source governor"
+      (is (= :mithril/source-not-admitted
+             (error-code #(graph/compile-document "x.mith"
+                                                  (assoc-in app ["sources" 0 "url"] "https://example.com/data")
+                                                  [library])))))))
