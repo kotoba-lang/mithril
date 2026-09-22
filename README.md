@@ -148,6 +148,22 @@ receipt, then store the immutable receipt as a Kotobase raw block. A durable
 outer scheduler may repeat ticks; the graph IR itself contains no unbounded
 internal loop and cannot invent a source URL or storage effect.
 
+## Bounded application agent loop
+
+[`lib/app/agent-loop-v1.mith`](lib/app/agent-loop-v1.mith) and
+[`examples/mithril-app-agent.mith`](examples/mithril-app-agent.mith) define the
+closed loop used by `app.mithril.fund`: OWL 2 RL inference, bounded SPARQL
+component selection, SHACL Core validation, deterministic Web IR compilation,
+conformance execution and a self-contained deployment URL. The corresponding
+OWL vocabulary is published at
+[`ontology/app-agent-v1.mith`](ontology/app-agent-v1.mith).
+
+The user may author bounded display strings, but the agent does not generate
+source text or identifiers. Template, data shape, operations and effects are
+selected from the imported ontology catalog. The only admitted deployment
+effect is a read-only, content-addressed URL carrying its complete source; it
+does not grant server-side storage, DNS or Cloudflare authority.
+
 `bin/mithril-run.cljk` executes a previously compiled Web IR artifact without
 loading OpenJev. Inference is therefore a compile-time policy input rather than
 ambient runtime authority:

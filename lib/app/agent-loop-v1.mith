@@ -1,0 +1,16 @@
+{
+  "@context": "https://mithril.fund/context/v1",
+  "@id": "https://mithril.fund/lib/app/agent-loop-v1",
+  "@type": "Library",
+  "ontology": "a8d21164d99278f517181b06d063ea8a63249bff57e8e1a5e72aed5758a28f47",
+  "version": 1,
+  "exports": [
+    {"symbol": "https://mithril.fund/lib/app/agent-loop-v1/reasoner/owl2-rl", "kind": "mith:reasoner", "label": "derive the finite component closure with OWL 2 RL", "confidenceFloor": 10000},
+    {"symbol": "https://mithril.fund/lib/app/agent-loop-v1/query/component-catalog", "kind": "mith:query", "label": "select admitted components with bounded SPARQL algebra", "confidenceFloor": 10000},
+    {"symbol": "https://mithril.fund/lib/app/agent-loop-v1/validator/shacl-core", "kind": "mith:validator", "label": "validate the application source against SHACL Core", "confidenceFloor": 10000},
+    {"symbol": "https://mithril.fund/lib/app/agent-loop-v1/compiler/web-ir", "kind": "mith:compiler", "label": "compile admitted components to deterministic Web IR", "confidenceFloor": 10000},
+    {"symbol": "https://mithril.fund/lib/app/agent-loop-v1/tester/conformance", "kind": "mith:tester", "label": "execute the bounded conformance suite", "confidenceFloor": 10000},
+    {"symbol": "https://mithril.fund/lib/app/agent-loop-v1/deployer/self-contained-url", "kind": "mith:deployer", "label": "seal source into a content-addressed self-contained deployment URL", "confidenceFloor": 10000},
+    {"symbol": "https://mithril.fund/lib/app/agent-loop-v1/governor/static-read-only", "kind": "mith:governor", "label": "admit only static read-only application effects", "confidenceFloor": 10000}
+  ]
+}

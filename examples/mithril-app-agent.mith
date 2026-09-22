@@ -1,0 +1,26 @@
+{
+  "@context": "https://mithril.fund/context/v1",
+  "@id": "https://app.mithril.fund/id/starter",
+  "@type": "AppAgentApplication",
+  "goal": "https://mithril.fund/id/goal/compile-test-deploy-app",
+  "ontology": "a8d21164d99278f517181b06d063ea8a63249bff57e8e1a5e72aed5758a28f47",
+  "imports": [{"library": "https://mithril.fund/lib/app/agent-loop-v1", "digest": "sha256:a8ceb6dd2a13217028bd84e35fd8eec6d6873290a3733e9a10dce714038ced73"}],
+  "loop": {
+    "maxSteps": 6,
+    "reasoner": "https://mithril.fund/lib/app/agent-loop-v1/reasoner/owl2-rl",
+    "query": "https://mithril.fund/lib/app/agent-loop-v1/query/component-catalog",
+    "validator": "https://mithril.fund/lib/app/agent-loop-v1/validator/shacl-core",
+    "compiler": "https://mithril.fund/lib/app/agent-loop-v1/compiler/web-ir",
+    "tester": "https://mithril.fund/lib/app/agent-loop-v1/tester/conformance",
+    "deployer": "https://mithril.fund/lib/app/agent-loop-v1/deployer/self-contained-url",
+    "governor": "https://mithril.fund/lib/app/agent-loop-v1/governor/static-read-only"
+  },
+  "app": {
+    "name": "Mithril Observatory",
+    "description": "A bounded ontology application compiled without generated source text.",
+    "headline": "Signals become an inspectable graph.",
+    "summary": "OWL closes the component set, SHACL validates the source, SPARQL selects facts, and Web IR renders the admitted result.",
+    "template": "https://mithril.fund/id/template/dashboard",
+    "dataShape": "https://mithril.fund/id/shape/metric-cards"
+  }
+}

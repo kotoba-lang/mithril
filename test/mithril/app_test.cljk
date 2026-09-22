@@ -1,0 +1,34 @@
+(ns mithril.app-test
+  (:require [cljs.test :refer [deftest is testing]]
+            [mithril.app :as app]
+            [mithril.compiler :as compiler]))
+
+(defn read-text [path] (.readFileSync (js/require "fs") path "utf8"))
+(defn fixture []
+  (let [library (compiler/compile-library-text "lib/app/agent-loop-v1.mith" (read-text "lib/app/agent-loop-v1.mith"))
+        source (compiler/parse-json (read-text "examples/mithril-app-agent.mith"))]
+    {:library library :source source}))
+(defn error-code [f] (try (f) nil (catch :default e (:mithril/error (ex-data e)))))
+
+(deftest app-agent-compiles-to-bounded-run
+  (let [{:keys [library source]} (fixture)
+        artifact (app/compile-document "examples/mithril-app-agent.mith" source [library])
+        run (app/prepare-run artifact)]
+    (is (= app/app-format (:format artifact)))
+    (is (= 6 (count (:steps run))))
+    (is (= 6 (get-in run [:budget :max-steps])))
+    (is (= #{:reasoner :query :validator :compiler :tester :deployer :governor}
+           (set (keys (get-in artifact [:app-ir :operations])))))
+    (is (= [:render/static-document :deploy/self-contained-url] (:effects run)))))
+
+(deftest app-agent-refuses-open-ended-programs
+  (let [{:keys [library source]} (fixture)]
+    (testing "unknown template"
+      (is (= :mithril/unknown-template
+             (error-code #(app/compile-document "x.mith" (assoc-in source ["app" "template"] "https://example.com/free") [library])))))
+    (testing "unbounded loop"
+      (is (= :mithril/invalid-budget
+             (error-code #(app/compile-document "x.mith" (assoc-in source ["loop" "maxSteps"] 99) [library])))))
+    (testing "unknown effect"
+      (is (= :mithril/unexported-operation
+             (error-code #(app/compile-document "x.mith" (assoc-in source ["loop" "deployer"] "https://example.com/deploy") [library])))))))
