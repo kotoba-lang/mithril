@@ -1,0 +1,106 @@
+(ns mithril.synthesize-cli
+  (:require [clojure.string :as str]
+            [mithril.compiler :as compiler]
+            [mithril.synthesis :as synthesis]
+            [mithril.web :as web]
+            ["node:child_process" :as child]
+            ["node:fs" :as fs]
+            ["node:path" :as path]))
+
+(def env (.-env js/process))
+
+(defn- refuse! [code detail exit-code]
+  (println (str "REFUSE\t" (name code) "\t" detail))
+  (.exit js/process exit-code))
+
+(defn- required-env [name]
+  (let [value (aget env name)]
+    (when (str/blank? value)
+      (refuse! :mithril/missing-model-input (str "missing " name) 2))
+    value))
+
+(defn- read-text [file]
+  (.readFileSync fs file "utf8"))
+
+(defn- model-pythonpath [root]
+  (cond
+    (.existsSync fs (.join path root "typed_decisions")) root
+    (.existsSync fs (.join path root "src" "typed_decisions")) (.join path root "src")
+    :else (refuse! :mithril/missing-model-source
+                   "OPEN_JEV_SRC has no typed_decisions package" 2)))
+
+(defn- keyword-map [value]
+  (into {} (map (fn [[key item]] [(keyword key) item]) value)))
+
+(defn- parse-model-result [text]
+  (let [wire (js->clj (.parse js/JSON text))
+        result (keyword-map wire)]
+    (cond-> result
+      (map? (:artifact result)) (update :artifact keyword-map)
+      (vector? (:decisions result))
+      (update :decisions
+              (fn [decisions]
+                (mapv (fn [decision]
+                        (let [typed (keyword-map decision)]
+                          ;; Probability keys are candidate values, not schema
+                          ;; field names, and therefore remain exact strings.
+                          (update typed :probabilities identity)))
+                      decisions))))))
+
+(defn- model-forward [request]
+  (let [python (required-env "OPEN_JEV_PYTHON")
+        root (required-env "OPEN_JEV_SRC")
+        model (required-env "OPEN_JEV_MODEL")
+        revision (required-env "OPEN_JEV_REVISION")
+        args #js ["-m" "typed_decisions.open_jev"
+                  "--model" model "--revision" revision "--device" "cpu"]
+        run (.spawnSync child python args
+                        #js {:cwd root
+                             :input (.stringify js/JSON (clj->js request))
+                             :encoding "utf8"
+                             :env (js/Object.assign
+                                   #js {} js/process.env
+                                   #js {"PYTHONPATH" (model-pythonpath root)})})]
+    (when-not (zero? (or (.-status run) 1))
+      (refuse! :mithril/model-forward-failed
+               (str "OpenJev exited " (.-status run) ": " (str/trim (or (.-stderr run) "")))
+               2))
+    (when (str/blank? (.-stdout run))
+      (refuse! :mithril/model-forward-empty "OpenJev emitted no JSON" 2))
+    (parse-model-result (str/trim (.-stdout run)))))
+
+(defn- keyword-string [x]
+  (if-let [ns (namespace x)] (str ns "/" (name x)) (name x)))
+
+(defn- json-safe [x]
+  (cond
+    (keyword? x) (keyword-string x)
+    (map? x) (into {} (map (fn [[k v]] [(if (keyword? k) (keyword-string k) k)
+                                         (json-safe v)]) x))
+    (vector? x) (mapv json-safe x)
+    :else x))
+
+(defn- print-json [value]
+  (println (.stringify js/JSON (clj->js (json-safe value)) nil 2)))
+
+(let [[command app-path library-path method request-path & extra] *command-line-args*]
+  (when-not (and (#{"compile" "request"} command)
+                 app-path library-path
+                 (if (= command "request") (and method request-path (empty? extra))
+                     (and (nil? method) (nil? request-path) (empty? extra))))
+    (println "usage:")
+    (println "  mithril-synthesize compile <app.mith> <library.mith>")
+    (println "  mithril-synthesize request <app.mith> <library.mith> <METHOD> <PATH>")
+    (.exit js/process 2))
+  (try
+    (let [app-doc (compiler/parse-json (read-text app-path))
+          library (compiler/compile-library-text library-path (read-text library-path))
+          prepared (synthesis/prepare-request app-path app-doc [library])
+          result (model-forward (:request prepared))
+          artifact (synthesis/compile-with-model app-path app-doc [library] result)]
+      (if (= command "request")
+        (print-json (web/dispatch artifact {:method method :path request-path}))
+        (print-json artifact)))
+    (catch :default e
+      (refuse! (or (some-> e ex-data :mithril/error) :mithril/synthesis-error)
+               (.-message e) 1))))

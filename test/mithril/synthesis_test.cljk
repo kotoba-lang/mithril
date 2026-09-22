@@ -1,0 +1,97 @@
+(ns mithril.synthesis-test
+  (:require [cljs.test :refer [deftest is testing]]
+            [mithril.compiler :as compiler]
+            [mithril.synthesis :as synthesis]
+            [mithril.web :as web]))
+
+(def static-label "return the authored static response")
+(def not-found-label "return a not found response")
+(def revision (apply str (repeat 40 "a")))
+
+(defn read-text [path]
+  (.readFileSync (js/require "fs") path "utf8"))
+
+(defn fixture []
+  (let [library (compiler/compile-library-text
+                 "lib/web/v1.mith" (read-text "lib/web/v1.mith"))
+        app (compiler/parse-json (read-text "examples/hello-web-synthesis.mith"))]
+    {:library library :app app}))
+
+(defn result
+  ([choice confidence]
+   (result choice confidence {static-label confidence
+                              not-found-label (- 1 confidence)}))
+  ([choice confidence probabilities]
+   {:kind "typed-decisions/open-jev-v1"
+    :generated_text false
+    :model {:base_model "test-fixture" :pool "mean" :temperature 1.0}
+    :decisions [{:choice choice
+                 :probabilities probabilities
+                 :confidence confidence}]
+    :artifact {:repo_or_dir "com-kotobalabs/open-jev-deberta-v3-large"
+               :revision revision}}))
+
+(defn error-code [f]
+  (try (f) nil
+       (catch :default e (:mithril/error (ex-data e)))))
+
+(deftest owl-sparql-discovery-prepares-a-closed-jev-request
+  (let [{:keys [library app]} (fixture)
+        prepared (synthesis/prepare-request
+                  "examples/hello-web-synthesis.mith" app [library])
+        candidates (:candidates prepared)
+        question (get-in prepared [:request :questions 0])]
+    (is (= 2 (count candidates))
+        "both handlers are discovered through OaK's OWL/SPARQL boundary")
+    (is (= #{"https://mithril.fund/lib/web/v1/handler/static-response"
+             "https://mithril.fund/lib/web/v1/handler/not-found"}
+           (set (map :symbol candidates))))
+    (is (= "choice" (:type question)))
+    (is (= [not-found-label static-label] (:options question)))
+    (is (re-find #"No source text may be generated" (get-in prepared [:request :state])))))
+
+(deftest admitted-openjev-choice-is-sealed-and-executed
+  (let [{:keys [library app]} (fixture)
+        artifact (synthesis/compile-with-model
+                  "examples/hello-web-synthesis.mith" app [library]
+                  (result static-label 0.9))
+        route (get-in artifact [:web-ir :routes 0])]
+    (is (= false (get-in artifact [:synthesis :generated_text])))
+    (is (= revision (get-in artifact [:synthesis :artifact :revision])))
+    (is (= "https://mithril.fund/lib/web/v1/handler/static-response"
+           (:operation route)))
+    (is (= 9000 (get-in route [:decision :confidence])))
+    (is (= {:status 200
+            :headers {"content-type" "text/plain; charset=utf-8"}
+            :body "Hello from an OpenJev-selected .mith application."}
+           (web/dispatch artifact {:method "GET" :path "/hello"})))
+    (is (not= (:graph-digest artifact) (:source-graph-digest artifact)))))
+
+(deftest synthesis-fails-closed-before-and-after-model-forward
+  (let [{:keys [library app]} (fixture)]
+    (testing "invalid route is rejected while preparing the model request"
+      (is (= :mithril/invalid-path
+             (error-code #(synthesis/prepare-request
+                           "x.mith" (assoc-in app ["routes" 0 "path"] "relative")
+                           [library])))))
+    (testing "generated text claims are forbidden"
+      (is (= :mithril/generated-text-forbidden
+             (error-code #(synthesis/compile-with-model
+                           "x.mith" app [library]
+                           (assoc (result static-label 0.9) :generated_text true))))))
+    (testing "confidence below the ontology-authored handler floor is refused"
+      (is (= :mithril/model-confidence-below-floor
+             (error-code #(synthesis/compile-with-model
+                           "x.mith" app [library] (result static-label 0.59))))))
+    (testing "choice must be the distribution winner"
+      (is (= :mithril/invalid-model-confidence
+             (error-code #(synthesis/compile-with-model
+                           "x.mith" app [library]
+                           (result static-label 0.8
+                                   {static-label 0.2 not-found-label 0.8}))))))
+    (testing "the model artifact must be pinned to an immutable revision"
+      (is (= :mithril/unpinned-model
+             (error-code #(synthesis/compile-with-model
+                           "x.mith" app [library]
+                           (assoc-in (result static-label 0.9)
+                                     [:artifact :revision] "main"))))))))

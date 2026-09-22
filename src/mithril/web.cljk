@@ -19,8 +19,19 @@
     (if-let [route (first (filter #(and (= method (:method %))
                                         (= path (:path %)))
                                   (get-in artifact [:web-ir :routes])))]
-      (cond-> (:response route)
-        (= "HEAD" method) (assoc :body ""))
+      (let [response (case (:operation route)
+                       "https://mithril.fund/lib/web/v1/handler/static-response"
+                       (:response route)
+
+                       "https://mithril.fund/lib/web/v1/handler/not-found"
+                       {:status 404
+                        :headers {"content-type" "text/plain; charset=utf-8"}
+                        :body "Not Found"}
+
+                       (fail! :mithril.web/unknown-operation
+                              "route operation has no admitted runtime implementation"))]
+        (cond-> response
+          (= "HEAD" method) (assoc :body "")))
       {:status 404
        :headers {"content-type" "text/plain; charset=utf-8"}
        :body "Not Found"})))

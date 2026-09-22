@@ -38,6 +38,10 @@ The repository now contains source authored in Mithril itself:
 - [`examples/hello-web.mith`](examples/hello-web.mith) is a Mithril web
   application. It imports the library by its canonical RDF Dataset digest and
   defines `GET` and `HEAD` routes without generated source text.
+- [`examples/hello-web-synthesis.mith`](examples/hello-web-synthesis.mith)
+  leaves only the handler choice open. OaK materializes the imported handler
+  classes with OWL 2 RL, the SPARQL engine discovers the permitted finite
+  candidates, and OpenJev selects one typed choice without generating source.
 
 `resources`, `lib` and `examples` are package classpath roots, so downstream
 builds consume these exact files from the pinned Git commit instead of copying
@@ -65,6 +69,41 @@ modules. It does not yet claim dynamic path parameters, middleware, streaming,
 cookies, templates or a production HTTP listener; those require additional
 typed library symbols and the Kotoba HTTP ingress capability qualification.
 
+## Typed synthesis without generated code
+
+`mithril.synthesis` is a separate, model-using compiler front end. Ordinary
+Mithril compilation and runtime dispatch stay deterministic and do not load a
+model. The synthesis boundary is:
+
+```text
+SynthesizeWebApplication (.mith JSON-LD)
+  -> validate imports, routes and ontology identity
+  -> OaK OWL 2 RL materialization
+  -> OaK SPARQL candidate discovery
+  -> finite Choice question
+  -> one trained OpenJev forward pass
+  -> revalidate distribution, winner, confidence floor and model revision
+  -> deterministic WebApplication compiler
+  -> :mithril.web/v1 IR
+  -> deterministic dispatch
+```
+
+The model cannot emit an identifier, route, body, effect or source fragment.
+It can select only an OWL/SPARQL-discovered imported handler label. The result
+is refused unless it declares `generated_text: false`, covers the exact finite
+candidate set, selects the distribution winner, meets the selected library
+symbol's `confidenceFloor`, and carries an immutable 40-character model
+revision. The resulting Web IR stores the selected symbol, basis-point
+confidence and complete distribution as execution evidence.
+
+The included synthesis example was exercised with the published trained
+OpenJev artifact at revision
+`19bf9a64815add579fbf6c907bef584d9277a8e4`. It selected the authored static
+response handler at 7,676 basis points against a 6,000-point ontology floor;
+dispatching `GET /hello` then returned the authored response with status 200.
+This is evidence for this closed two-candidate handler family, not a claim of
+arbitrary code generation or general web-program synthesis.
+
 ## Source contract
 
 - `.mith` and `.mithril` are aliases. The suffix never enters semantic identity.
@@ -85,7 +124,21 @@ kbb --backend sci --classpath "$CP" bin/mithril.cljk compile-library lib/web/v1.
 kbb --backend sci --classpath "$CP" bin/mithril.cljk compile-web examples/hello-web.mith lib/web/v1.mith
 kbb --backend sci --classpath "$CP" bin/mithril.cljk request examples/hello-web.mith lib/web/v1.mith GET /hello
 kbb --backend sci --classpath "$CP":test test/run.cljk
+kbb --backend sci --classpath "$CP":test test/run_synthesis.cljk
 amu check src/mithril/runtime.kotoba --jvm-free
+```
+
+The model-backed CLI additionally requires `OPEN_JEV_PYTHON`, `OPEN_JEV_SRC`,
+`OPEN_JEV_MODEL` and an immutable `OPEN_JEV_REVISION`; there is no model ID
+fallback in the compiler:
+
+```sh
+OPEN_JEV_PYTHON=/path/to/python \
+OPEN_JEV_SRC=/path/to/typed-decisions \
+OPEN_JEV_MODEL=your/pinned-open-jev-artifact \
+OPEN_JEV_REVISION=0123456789abcdef0123456789abcdef01234567 \
+kbb --backend sci --classpath "$CP" bin/mithril-synthesize.cljk \
+  request examples/hello-web-synthesis.mith lib/web/v1.mith GET /hello
 ```
 
 The CLI prints a JSON artifact containing the semantic graph digest and the
