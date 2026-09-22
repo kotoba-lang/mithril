@@ -1,7 +1,9 @@
 (ns mithril.app-test
   (:require [cljs.test :refer [deftest is testing]]
             [mithril.app :as app]
-            [mithril.compiler :as compiler]))
+            [mithril.compiler :as compiler]
+            [mithril.execution :as execution]
+            [oak.semantic :as oak]))
 
 (defn read-text [path] (.readFileSync (js/require "fs") path "utf8"))
 (defn fixture []
@@ -32,3 +34,43 @@
     (testing "unknown effect"
       (is (= :mithril/unexported-operation
              (error-code #(app/compile-document "x.mith" (assoc-in source ["loop" "deployer"] "https://example.com/deploy") [library])))))))
+
+(deftest semantic-run-executes-reasoning-query-and-validation
+  (let [{:keys [library source]} (fixture)
+        artifact (app/compile-document "examples/mithril-app-agent.mith" source [library])
+        run (execution/execute artifact)
+        [infer query validate] (:receipts run)]
+    (is (= :executed (:status run)))
+    (is (pos? (get-in infer [:metrics :derived-triples]))
+        "the OWL step must add an entailed application type")
+    (is (= 1 (get-in query [:metrics :rows]))
+        "SPARQL must read the entailed type and asserted template")
+    (is (zero? (get-in validate [:metrics :violations])))
+    (is (= (:output-digest infer)
+           (execution/digest
+            (oak/materialize
+             :owl2-rl
+             #{(oak/triple :mithril/DashboardApplication :rdfs/subClassOf :mithril/Application)
+               (oak/triple
+                (keyword "mithril.instance" (subs (:graph-digest artifact) 7 19))
+                :rdf/type :mithril/DashboardApplication)
+               (oak/triple
+                (keyword "mithril.instance" (subs (:graph-digest artifact) 7 19))
+                :mithril/template "https://mithril.fund/id/template/dashboard")
+               (oak/triple
+                (keyword "mithril.instance" (subs (:graph-digest artifact) 7 19))
+                :mithril/dataShape "https://mithril.fund/id/shape/metric-cards")})))
+        "receipt output digest is computed from the actual entailed graph")
+    (is (not= (:input-digest infer) (:output-digest infer)))))
+
+(deftest semantic-run-refuses-the-named-shacl-violation
+  (let [{:keys [library source]} (fixture)
+        artifact (app/compile-document "examples/mithril-app-agent.mith" source [library])
+        broken (assoc-in artifact [:app-ir :app :headline] 7)]
+    (try
+      (execution/execute broken)
+      (is false "expected SHACL refusal")
+      (catch :default error
+        (is (= :mithril.execution/shacl-violation (:mithril/error (ex-data error))))
+        (is (= [{:code :shacl/datatype :path :headline :expected :string}]
+               (get-in (ex-data error) [:report :errors])))))))

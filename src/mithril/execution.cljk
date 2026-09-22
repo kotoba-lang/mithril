@@ -1,0 +1,170 @@
+(ns mithril.execution
+  "Bounded semantic execution for a compiled Mithril application.
+
+  The runner changes semantic state instead of emitting source text. OWL 2 RL
+  and SPARQL are executed by OaK's pinned mechanism adapter. SHACL validation
+  consumes OaK's canonical shape ABI and deliberately supports only the
+  count/datatype/sh:in subset named in each receipt. Unknown constraints fail
+  closed."
+  (:require [clojure.string :as str]
+            [mithril.app :as app]
+            [oak.semantic :as oak]
+            [sha2.core :as sha2]))
+
+(def execution-format "https://mithril.fund/receipt/semantic-execution-v1")
+(def application-class :mithril/Application)
+
+(defn- fail! [code detail data]
+  (throw (ex-info detail (merge {:mithril/error code :detail detail} data))))
+
+(defn- canonical-value [value]
+  (cond
+    (map? value) (into (sorted-map-by #(compare (pr-str %1) (pr-str %2)))
+                       (map (fn [[k v]] [k (canonical-value v)])) value)
+    (set? value) (mapv canonical-value (sort-by pr-str value))
+    (sequential? value) (mapv canonical-value value)
+    :else value))
+
+(defn digest [value]
+  (let [text (pr-str (canonical-value value))
+        bytes #?(:cljs (vec (js/Array.from (.encode (js/TextEncoder.) text)))
+                 :clj (vec (.getBytes ^String text "UTF-8")))]
+    (str "sha256:" (sha2/sha256-hex bytes))))
+
+(defn- receipt [id operation engine input output metrics]
+  {:id id
+   :operation operation
+   :status :executed
+   :engine engine
+   :input-digest (digest input)
+   :output-digest (digest output)
+   :metrics metrics})
+
+(defn- template-class [template]
+  (case template
+    "https://mithril.fund/id/template/dashboard" :mithril/DashboardApplication
+    "https://mithril.fund/id/template/report" :mithril/ReportApplication
+    "https://mithril.fund/id/template/directory" :mithril/DirectoryApplication
+    (fail! :mithril.execution/unknown-template
+           "semantic execution received a template outside the closed catalog"
+           {:template template})))
+
+(defn- asserted-graph [artifact]
+  (let [app-ir (:app-ir artifact)
+        app-node (keyword "mithril.instance" (subs (:graph-digest artifact) 7 19))
+        class (template-class (get-in app-ir [:app :template]))]
+    {:app-node app-node
+     :triples #{(oak/triple class :rdfs/subClassOf application-class)
+                (oak/triple app-node :rdf/type class)
+                (oak/triple app-node :mithril/template (get-in app-ir [:app :template]))
+                (oak/triple app-node :mithril/dataShape (get-in app-ir [:app :data-shape]))}}))
+
+(def query-plan
+  [:sparql/project [:?app :?template]
+   [:sparql/bgp
+    [:?app :rdf/type application-class]
+    [:?app :mithril/template :?template]]])
+
+(def shape-plan
+  [:shacl/node application-class
+   [:shacl/property :name :string 1 1]
+   [:shacl/property :headline :string 1 1]
+   [:shacl/property :template :string 1 1
+    [:shacl/in
+     "https://mithril.fund/id/template/dashboard"
+     "https://mithril.fund/id/template/report"
+     "https://mithril.fund/id/template/directory"]]
+   [:shacl/property :data-shape :string 1 1
+    [:shacl/in
+     "https://mithril.fund/id/shape/metric-cards"
+     "https://mithril.fund/id/shape/claim-list"
+     "https://mithril.fund/id/shape/entity-directory"]]])
+
+(defn- values-at [node path]
+  (let [value (get node path ::missing)]
+    (cond
+      (= ::missing value) []
+      (vector? value) value
+      :else [value])))
+
+(defn- datatype? [datatype value]
+  (case datatype
+    :string (string? value)
+    :number (number? value)
+    :integer (integer? value)
+    :boolean (boolean? value)
+    :keyword (keyword? value)
+    :map (map? value)
+    :vector (vector? value)
+    false))
+
+(defn validate-shape
+  "Execute OaK's canonical shape document over one application node.
+  This is the edge adapter for the declared count/datatype/sh:in subset."
+  [shape node]
+  (when-not (= :node-shape (:shacl/type shape))
+    (fail! :mithril.execution/invalid-shape "expected a canonical SHACL node shape" {:shape shape}))
+  (let [errors
+        (reduce
+         (fn [errors property]
+           (let [supported #{:path :datatype :min-count :max-count :in}
+                 unknown (seq (remove supported (keys property)))
+                 path (:path property)
+                 values (values-at node path)]
+             (when unknown
+               (fail! :mithril.execution/unsupported-shacl-constraint
+                      "SHACL adapter received an unsupported constraint"
+                      {:constraints (vec unknown)}))
+             (cond-> errors
+               (< (count values) (:min-count property))
+               (conj {:code :shacl/min-count :path path})
+               (> (count values) (:max-count property))
+               (conj {:code :shacl/max-count :path path})
+               (some #(not (datatype? (:datatype property) %)) values)
+               (conj {:code :shacl/datatype :path path :expected (:datatype property)})
+               (and (:in property) (some #(not (some #{%} (:in property))) values))
+               (conj {:code :shacl/in :path path :allowed (:in property)}))))
+         [] (:property shape))]
+    {:valid? (empty? errors) :errors errors}))
+
+(defn execute
+  "Run the bounded OWL -> SPARQL -> SHACL semantic prefix and return chained
+  receipts. A non-conforming node is a refusal, never a successful trace."
+  [artifact]
+  (when-not (= app/app-format (:format artifact))
+    (fail! :mithril.execution/invalid-artifact "artifact is not a compiled Mithril application" {}))
+  (when (< (get-in artifact [:app-ir :budget :max-steps] 0) 3)
+    (fail! :mithril.execution/budget "semantic execution needs three admitted steps" {}))
+  (let [{:keys [app-node triples]} (asserted-graph artifact)
+        entailed (oak/materialize :owl2-rl triples)
+        inferred (set (remove triples entailed))
+        infer-receipt (receipt "infer" "OWL 2 RL materialization"
+                               :oak.semantic/materialize-owl2-rl triples entailed
+                               {:asserted-triples (count triples)
+                                :derived-triples (count inferred)})
+        rows (oak/execute :owl2-rl query-plan triples)
+        query-receipt (receipt "query" "SPARQL algebra"
+                               :sparql.core/select
+                               {:graph entailed :plan query-plan} rows
+                               {:rows (count rows)})
+        app-node-value (get-in artifact [:app-ir :app])
+        canonical-shape (:shape (oak/shape-plan->shacl shape-plan))
+        report (validate-shape canonical-shape app-node-value)
+        validation-receipt (receipt "validate" "SHACL bounded validation"
+                                    :mithril.execution/shacl-edge-adapter
+                                    {:shape canonical-shape :node app-node-value} report
+                                    {:violations (count (:errors report))
+                                     :constraints [:min-count :max-count :datatype :in]})]
+    (when-not (some #(= app-node (get % '?app)) rows)
+      (fail! :mithril.execution/query-miss
+             "SPARQL did not select the application through its inferred class"
+             {:rows rows :app-node app-node}))
+    (when-not (:valid? report)
+      (fail! :mithril.execution/shacl-violation
+             "application does not conform to the admitted SHACL shape"
+             {:report report}))
+    {:format execution-format
+     :status :executed
+     :artifact-digest (:graph-digest artifact)
+     :state-digest (digest {:entailed entailed :rows rows :report report})
+     :receipts [infer-receipt query-receipt validation-receipt]}))

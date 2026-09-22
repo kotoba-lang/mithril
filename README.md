@@ -32,6 +32,15 @@ JSON-LD is the RDF interchange projection, not the query engine, reasoner,
 SHACL engine or runtime. Those responsibilities remain explicit: `org-w3-json-ld-api`,
 `org-w3-rdf-canon`, OaK's OWL/SPARQL/SHACL adapters, and Kotoba/Amu.
 
+`mithril.execution/execute` is the bounded runtime prefix used by the app
+compiler surface. It passes the asserted application graph through OaK's real
+OWL 2 RL least-fixpoint adapter, executes the pinned SPARQL algebra engine over
+the entailed graph, and validates the application node against OaK's canonical
+SHACL shape document. The edge SHACL adapter names its supported
+`minCount`/`maxCount`/datatype/`sh:in` subset in the receipt and rejects every
+unknown constraint. Each step hashes its actual input and output; a violation
+throws a named refusal and cannot appear as an executed step.
+
 ## Semantic core and execution core
 
 Mithril does not make RDF the program-execution IR and does not put OWL inside
