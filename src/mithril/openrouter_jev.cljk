@@ -1,0 +1,92 @@
+(ns mithril.openrouter-jev
+  "Thin OpenRouter Decisions API adapter for TypeSafe Jev 1.13.
+
+  This namespace owns transport and response normalization only. It never
+  executes an action. `mithril.bot` independently validates the returned
+  distribution, confidence, model identity and Governor capability."
+  (:require [clojure.string :as str]
+            [mithril.bot :as bot]))
+
+(def question-id "next_action")
+(def timeout-ms 30000)
+
+(defn- fail! [code detail data]
+  (throw (ex-info detail (merge {:mithril/error code :detail detail} data))))
+
+(defn decision-request [{:keys [state questions candidates]}]
+  (when-not (and (string? state) (= 1 (count questions)) (seq candidates))
+    (fail! :mithril.jev/invalid-plan "bot decision plan is invalid" {}))
+  (let [question (first questions)
+        labels (mapv :label candidates)
+        descriptions (into {}
+                           (map (fn [{:keys [label effect requires produces]}]
+                                  [label (str "Effect " (name effect)
+                                              "; requires " (str/join "," (map name (sort requires)))
+                                              "; produces " (str/join "," (map name (sort produces))))])
+                                candidates))]
+    (when-not (= labels (:options question))
+      (fail! :mithril.jev/candidate-mismatch "question options do not match candidates" {}))
+    {:model bot/jev-model
+     :state state
+     :questions {question-id
+                 {:type "choice"
+                  :instructions (:instructions question)
+                  :criteria descriptions}}}))
+
+(defn normalize-response [response]
+  (when-not (map? response)
+    (fail! :mithril.jev/invalid-response "OpenRouter response is not an object" {}))
+  (let [answer (get-in response [:answers (keyword question-id)])
+        resolved (:model response)
+        probabilities (when (map? (:probabilities answer))
+                        (into {} (map (fn [[k v]] [(name k) v]) (:probabilities answer))))]
+    (when-not (and (string? (:id response))
+                   (string? resolved)
+                   (= "choice" (:type answer))
+                   (string? (:choice answer))
+                   (map? probabilities)
+                   (number? (:confidence answer)))
+      (fail! :mithril.jev/invalid-response "OpenRouter Jev response shape is invalid" {}))
+    {:model-result
+     {:kind bot/model-kind
+      :generated_text false
+      :model resolved
+      :decisions [{:choice (:choice answer)
+                   :probabilities probabilities
+                   :confidence (:confidence answer)}]
+      :artifact {:provider bot/jev-provider
+                 :endpoint bot/jev-endpoint
+                 :requested_model bot/jev-model
+                 :resolved_model resolved}}
+     :audit {:request-id (:id response)
+             :model resolved
+             :usage (:usage response)}}))
+
+(defn decide!
+  "Call OpenRouter Jev. API key is required explicitly and never returned."
+  ([plan api-key] (decide! plan api-key js/fetch))
+  ([plan api-key fetch-fn]
+   (when (str/blank? (str api-key))
+     (fail! :mithril.jev/missing-credential "OPENROUTER_API_KEY is unavailable" {}))
+   (let [controller (js/AbortController.)
+         timer (js/setTimeout #(.abort controller) timeout-ms)
+         body (.stringify js/JSON (clj->js (decision-request plan)))]
+     (-> (fetch-fn bot/jev-endpoint
+                   #js {:method "POST"
+                        :headers #js {"authorization" (str "Bearer " api-key)
+                                     "content-type" "application/json"
+                                     "HTTP-Referer" "https://mithril.fund"
+                                     "X-OpenRouter-Title" "Mithril"}
+                        :body body
+                        :signal (.-signal controller)})
+         (.then (fn [response]
+                  (if (.-ok response)
+                    (.json response)
+                    (-> (.text response)
+                        (.then (fn [body]
+                                 (fail! :mithril.jev/http-error
+                                        (str "OpenRouter returned HTTP " (.-status response))
+                                        {:status (.-status response)
+                                         :body (subs body 0 (min 300 (count body)))})))))))
+         (.then #(normalize-response (js->clj % :keywordize-keys true)))
+         (.finally #(js/clearTimeout timer))))))

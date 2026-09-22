@@ -1,7 +1,7 @@
 (ns mithril.bot
   "Ontology-closed bot policy and durable, one-effect-at-a-time runtime.
 
-  OpenJev may choose only an OWL/SPARQL-discovered action label. The Governor
+  TypeSafe Jev may choose only an OWL/SPARQL-discovered action label. The Governor
   converts an admitted choice to one typed effect. A host receipt is the only
   event that advances state; retries, leases and total steps are bounded."
   (:require [clojure.string :as str]
@@ -12,7 +12,7 @@
 (def artifact-format "https://mithril.fund/artifact/bot-profile-v1")
 (def receipt-format "https://mithril.fund/receipt/bot-effect-v1")
 (def goal "https://mithril.fund/id/goal/governed-coding-task")
-(def model-kind "typed-decisions/open-jev-v1")
+(def model-kind "openrouter/typesafe-jev-v1")
 
 (def source-keys #{"@context" "@id" "@type" "goal" "ontology" "policy"})
 (def policy-keys #{"maxSteps" "maxRetries" "leaseSeconds" "confidenceFloor"
@@ -21,24 +21,31 @@
 (def action-catalog
   [{:id "https://mithril.fund/id/action/workspace-inspect"
     :label "workspace-inspect" :effect :workspace/read
+    :confidence-floor 3000
     :requires #{:semantic/prefix-valid} :produces #{:workspace/inspected}}
    {:id "https://mithril.fund/id/action/code-propose"
     :label "code-propose" :effect :llm/propose-patch
+    :confidence-floor 6000
     :requires #{:workspace/inspected} :produces #{:proposal/ready}}
    {:id "https://mithril.fund/id/action/patch-apply"
     :label "patch-apply" :effect :workspace/apply-patch
+    :confidence-floor 8500
     :requires #{:proposal/ready} :produces #{:workspace/changed}}
    {:id "https://mithril.fund/id/action/amu-compile"
     :label "amu-compile" :effect :amu/compile
+    :confidence-floor 7000
     :requires #{:workspace/changed} :produces #{:artifact/compiled}}
    {:id "https://mithril.fund/id/action/test-run"
     :label "test-run" :effect :test/run
+    :confidence-floor 7000
     :requires #{:artifact/compiled} :produces #{:tests/passed}}
    {:id "https://mithril.fund/id/action/git-status"
     :label "git-status" :effect :git/status
+    :confidence-floor 3000
     :requires #{:semantic/prefix-valid} :produces #{:git/observed}}
    {:id "https://mithril.fund/id/action/stop"
     :label "stop" :effect :agent/stop
+    :confidence-floor 0
     :requires #{:semantic/prefix-valid} :produces #{:run/stopped}}])
 
 (def action-by-id (into {} (map (juxt :id identity) action-catalog)))
@@ -51,11 +58,17 @@
 (defn- sha256? [value]
   (and (string? value) (boolean (re-matches #"[0-9a-f]{64}" value))))
 
-(defn- revision? [value]
-  (and (string? value) (boolean (re-matches #"[0-9a-f]{40}" value))))
+(def jev-provider "openrouter")
+(def jev-endpoint "https://openrouter.ai/api/alpha/decisions")
+(def jev-model "typesafe/jev-1.13")
 
-(defn- repository? [value]
-  (and (string? value) (boolean (re-matches #"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+" value))))
+(defn- jev-artifact? [artifact]
+  (and (= #{:provider :endpoint :requested_model :resolved_model} (set (keys artifact)))
+       (= jev-provider (:provider artifact))
+       (= jev-endpoint (:endpoint artifact))
+       (= jev-model (:requested_model artifact))
+       (string? (:resolved_model artifact))
+       (str/starts-with? (:resolved_model artifact) "typesafe/jev-1.13-")))
 
 (defn compile-document [path doc]
   (when-not (compiler/source-path? path)
@@ -202,13 +215,12 @@
     (when-not (= expected (set (keys model-result)))
       (fail! :mithril.bot/invalid-model-result "model result has an invalid field set" {}))
     (when-not (= model-kind (:kind model-result))
-      (fail! :mithril.bot/invalid-model-result "model result is not OpenJev v1" {}))
+      (fail! :mithril.bot/invalid-model-result "model result is not OpenRouter TypeSafe Jev" {}))
     (when-not (false? (:generated_text model-result))
       (fail! :mithril.bot/generated-text-forbidden "bot policy accepts no generated text" {}))
-    (let [artifact (:artifact model-result)]
-      (when-not (and (= #{:repo_or_dir :revision} (set (keys artifact)))
-                     (repository? (:repo_or_dir artifact)) (revision? (:revision artifact)))
-        (fail! :mithril.bot/unpinned-model "model repository and immutable revision are required" {})))
+    (when-not (jev-artifact? (:artifact model-result))
+      (fail! :mithril.bot/unpinned-model
+             "OpenRouter provider, endpoint, pinned request model and resolved Jev model are required" {}))
     (when-not (and (vector? (:decisions model-result)) (= 1 (count (:decisions model-result))))
       (fail! :mithril.bot/model-cardinality "model must return exactly one decision" {}))
     (let [decision (first (:decisions model-result))
@@ -229,11 +241,14 @@
             basis-points (when (number? confidence) (js/Math.round (* confidence 10000)))]
         (when-not (and candidate (contains? labels choice))
           (fail! :mithril.bot/outside-candidate-set "choice is outside the discovered actions" {}))
-        (when-not (and (number? confidence) (= selected confidence) (= winner confidence))
-          (fail! :mithril.bot/invalid-model-confidence "choice must be a distribution winner" {}))
-        (when (< basis-points (get-in state [:policy :confidence-floor]))
+        (when-not (and (= selected winner) (number? confidence) (<= 0 confidence 1))
+          (fail! :mithril.bot/invalid-model-confidence
+                 "choice must be the distribution winner and confidence must be within 0..1" {}))
+        (let [floor (max (get-in state [:policy :confidence-floor])
+                         (:confidence-floor candidate))]
+          (when (< basis-points floor)
           (fail! :mithril.bot/model-confidence-below-floor "choice is below the ontology floor"
-                 {:confidence basis-points}))
+                 {:confidence basis-points :required floor})))
          {:action candidate :confidence basis-points
          :probabilities (into (sorted-map) probabilities)
          :model (select-keys model-result [:model :artifact])}))))

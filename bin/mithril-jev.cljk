@@ -1,0 +1,69 @@
+#!/usr/bin/env kbb
+(ns mithril.jev-cli
+  (:require [clojure.string :as str]
+            [mithril.bot :as bot]
+            [mithril.compiler :as compiler]
+            [mithril.openrouter-jev :as jev]))
+
+(def fs (js/require "node:fs"))
+(def cp (js/require "node:child_process"))
+
+(defn- usage! []
+  (println "usage: mithril-jev next <profile.mith> <task.json> <lease-owner> <grants.csv>")
+  (js/process.exit 2))
+
+(defn- read-text [path] (.readFileSync fs path "utf8"))
+
+(defn- read-key []
+  (or (let [value (.-OPENROUTER_API_KEY js/process.env)]
+        (when-not (str/blank? (str value)) value))
+      (try
+        (let [value (.execFileSync cp "security"
+                                   #js ["find-generic-password" "-s" "gftd.openrouter"
+                                        "-a" "OPENROUTER_API_KEY" "-w"]
+                                   #js {:encoding "utf8" :stdio #js ["ignore" "pipe" "ignore"]})]
+          (str/trim value))
+        (catch :default _ nil))))
+
+(defn- keyword-string [value]
+  (if-let [ns (namespace value)] (str ns "/" (name value)) (name value)))
+
+(defn- json-safe [value]
+  (cond
+    (keyword? value) (keyword-string value)
+    (map? value) (into {} (map (fn [[k v]] [(if (keyword? k) (keyword-string k) k)
+                                             (json-safe v)]) value))
+    (vector? value) (mapv json-safe value)
+    (set? value) (mapv json-safe (sort-by pr-str value))
+    :else value))
+
+(defn- print-json [value]
+  (println (.stringify js/JSON (clj->js (json-safe value)) nil 2)))
+
+(defn- refuse! [error]
+  (println (str "REFUSE\t" (or (some-> error ex-data :mithril/error name) "jev-error")
+                "\t" (.-message error)))
+  (js/process.exit 1))
+
+(let [[command profile-path task-path owner grants-csv & extra] *command-line-args*]
+  (if-not (and (= "next" command) profile-path task-path owner grants-csv (empty? extra))
+    (usage!)
+    (try
+      (let [artifact (bot/compile-text profile-path (read-text profile-path))
+            task (js->clj (js/JSON.parse (read-text task-path)) :keywordize-keys true)
+            now (.now js/Date)
+            state (bot/start-run artifact task owner now)
+            plan (bot/prepare-request state owner (inc now))
+            grants (set (map keyword (remove str/blank? (str/split grants-csv #","))))
+            key (read-key)]
+        (-> (jev/decide! plan key)
+            (.then (fn [{:keys [model-result audit]}]
+                     (let [admitted (bot/admit-decision state model-result owner (+ now 2))
+                           requested (bot/request-effect state admitted grants owner (+ now 3))]
+                       (print-json {:format "https://mithril.fund/decision/openrouter-jev-v1"
+                                    :audit audit
+                                    :decision (select-keys admitted [:confidence :probabilities :model])
+                                    :action (select-keys (:action admitted) [:id :label :effect])
+                                    :effect (:effect requested)}))))
+            (.catch refuse!)))
+      (catch :default error (refuse! error)))))
