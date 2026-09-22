@@ -1,0 +1,39 @@
+{
+  "@context": "https://mithril.fund/context/v1",
+  "@id": "https://mithril.fund/app/multiroute-web-synthesis",
+  "@type": "SynthesizeWebApplication",
+  "goal": "https://mithril.fund/id/goal/web-application",
+  "ontology": "f6371c58ffa5d9587867f9f7ae33aa62fabf99b354070c2ad6da5323d5c85ceb",
+  "imports": [
+    {
+      "library": "https://mithril.fund/lib/web/v1",
+      "digest": "sha256:8d0f7c9356a99d1b0ef2ea4ab02cce508e841502f5aea91278e92b7d21bdbc91"
+    }
+  ],
+  "routes": [
+    {
+      "method": "GET",
+      "path": "/hello",
+      "intent": "Return the authored greeting as a successful plain text response.",
+      "status": 200,
+      "contentType": "text/plain; charset=utf-8",
+      "body": "Hello from a multi-route OpenJev-selected .mith application."
+    },
+    {
+      "method": "HEAD",
+      "path": "/health",
+      "intent": "Return the authored healthy response without a response body.",
+      "status": 204,
+      "contentType": "text/plain; charset=utf-8",
+      "body": "healthy"
+    },
+    {
+      "method": "GET",
+      "path": "/retired",
+      "intent": "Return a not found response because this route is intentionally unavailable.",
+      "status": 410,
+      "contentType": "text/plain; charset=utf-8",
+      "body": "retired"
+    }
+  ]
+}

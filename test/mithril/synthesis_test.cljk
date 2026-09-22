@@ -17,6 +17,12 @@
         app (compiler/parse-json (read-text "examples/hello-web-synthesis.mith"))]
     {:library library :app app}))
 
+(defn multiroute-fixture []
+  (let [library (compiler/compile-library-text
+                 "lib/web/v1.mith" (read-text "lib/web/v1.mith"))
+        app (compiler/parse-json (read-text "examples/multiroute-web-synthesis.mith"))]
+    {:library library :app app}))
+
 (defn result
   ([choice confidence]
    (result choice confidence {static-label confidence
@@ -30,6 +36,19 @@
                  :confidence confidence}]
     :artifact {:repo_or_dir "com-kotobalabs/open-jev-deberta-v3-large"
                :revision revision}}))
+
+(defn multiroute-result []
+  (assoc (result static-label 0.9)
+         :decisions
+         [{:choice static-label
+           :probabilities {static-label 0.9 not-found-label 0.1}
+           :confidence 0.9}
+          {:choice static-label
+           :probabilities {static-label 0.8 not-found-label 0.2}
+           :confidence 0.8}
+          {:choice not-found-label
+           :probabilities {static-label 0.15 not-found-label 0.85}
+           :confidence 0.85}]))
 
 (defn error-code [f]
   (try (f) nil
@@ -66,6 +85,36 @@
             :body "Hello from an OpenJev-selected .mith application."}
            (web/dispatch artifact {:method "GET" :path "/hello"})))
     (is (not= (:graph-digest artifact) (:source-graph-digest artifact)))))
+
+(deftest one-model-forward-composes-and-executes-multiple-routes
+  (let [{:keys [library app]} (multiroute-fixture)
+        prepared (synthesis/prepare-request
+                  "examples/multiroute-web-synthesis.mith" app [library])
+        artifact (synthesis/compile-with-model
+                  "examples/multiroute-web-synthesis.mith" app [library]
+                  (multiroute-result))
+        routes (get-in artifact [:web-ir :routes])]
+    (is (= 3 (count (get-in prepared [:request :questions])))
+        "one OpenJev request carries every route question")
+    (is (= 3 (count routes)))
+    (is (= ["https://mithril.fund/lib/web/v1/handler/static-response"
+            "https://mithril.fund/lib/web/v1/handler/static-response"
+            "https://mithril.fund/lib/web/v1/handler/not-found"]
+           (mapv :operation routes)))
+    (is (= [9000 8000 8500]
+           (mapv #(get-in % [:decision :confidence]) routes)))
+    (is (= {:status 200
+            :headers {"content-type" "text/plain; charset=utf-8"}
+            :body "Hello from a multi-route OpenJev-selected .mith application."}
+           (web/dispatch artifact {:method "GET" :path "/hello"})))
+    (is (= {:status 204
+            :headers {"content-type" "text/plain; charset=utf-8"}
+            :body ""}
+           (web/dispatch artifact {:method "HEAD" :path "/health"})))
+    (is (= {:status 404
+            :headers {"content-type" "text/plain; charset=utf-8"}
+            :body "Not Found"}
+           (web/dispatch artifact {:method "GET" :path "/retired"})))))
 
 (deftest synthesis-fails-closed-before-and-after-model-forward
   (let [{:keys [library app]} (fixture)]
