@@ -1,0 +1,26 @@
+(ns mithril.cli
+  (:require [mithril.compiler :as compiler]))
+
+(defn- usage! []
+  (println "usage: mithril compile <program.mith|program.mithril>")
+  (js/process.exit 2))
+
+(defn- keyword-string [x]
+  (if-let [ns (namespace x)] (str ns "/" (name x)) (name x)))
+
+(defn- json-safe [x]
+  (cond
+    (keyword? x) (keyword-string x)
+    (map? x) (into {} (map (fn [[k v]] [(keyword-string k) (json-safe v)]) x))
+    (vector? x) (mapv json-safe x)
+    :else x))
+
+(let [[command path & extra] *command-line-args*]
+  (when-not (and (= command "compile") path (empty? extra)) (usage!))
+  (try
+    (let [artifact (compiler/compile-text path (.readFileSync (js/require "fs") path "utf8"))]
+      (println (.stringify js/JSON (clj->js (json-safe artifact)) nil 2)))
+    (catch :default e
+      (println (str "REFUSE\t" (or (some-> e ex-data :mithril/error name) "compile-error")
+                    "\t" (.-message e)))
+      (js/process.exit 1))))

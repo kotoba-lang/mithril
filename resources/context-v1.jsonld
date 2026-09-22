@@ -1,0 +1,13 @@
+{
+  "@context": {
+    "mith": "https://mithril.fund/ns/v1#",
+    "Program": "mith:Program",
+    "goal": {"@id": "mith:goal", "@type": "@id"},
+    "ontology": "mith:ontologyDigest",
+    "choices": {"@id": "mith:choice", "@container": "@set"},
+    "role": {"@id": "mith:role", "@type": "@vocab"},
+    "candidate": {"@id": "mith:candidate", "@type": "@id"},
+    "confidence": {"@id": "mith:confidence", "@type": "http://www.w3.org/2001/XMLSchema#integer"}
+  }
+}
+

@@ -1,0 +1,28 @@
+(ns mithril.runtime
+  (:export [transaction-version transaction-goal transaction-ontology
+            transaction-choices transaction-shape-valid? admit main]))
+
+(defn at [d :document i :i64] :document
+  (option-or (document-vector-at d i) (document-null)))
+
+(defn transaction-version [tx :document] :keyword
+  (option-or (document-keyword-value (at tx 0)) :mithril/none))
+
+(defn transaction-goal [tx :document] :keyword
+  (option-or (document-keyword-value (at tx 1)) :mithril/none))
+
+(defn transaction-ontology [tx :document] :string
+  (option-or (document-string-value (at tx 2)) ""))
+
+(defn transaction-choices [tx :document] :document
+  (at tx 3))
+
+(defn transaction-shape-valid? [tx :document] :bool
+  ;; Full cardinality, ontology, SHACL, authority and digest checks are repeated
+  ;; by OaK before effects. This portable boundary pins the typed envelope.
+  (= (transaction-version tx) :oak.transaction/v1))
+
+(defn admit [tx :document] :bool
+  (transaction-shape-valid? tx))
+
+(defn main [] 0)

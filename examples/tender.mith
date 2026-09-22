@@ -1,0 +1,16 @@
+{
+  "@context": "https://mithril.fund/context/v1",
+  "@id": "urn:mithril:example:tender",
+  "@type": "Program",
+  "goal": "https://mithril.fund/id/goal/tender-intake",
+  "ontology": "f6371c58ffa5d9587867f9f7ae33aa62fabf99b354070c2ad6da5323d5c85ceb",
+  "choices": [
+    {"role": "mith:reasoner", "candidate": "https://mithril.fund/id/reasoner/owl2-rl", "confidence": 9300},
+    {"role": "mith:shape", "candidate": "https://mithril.fund/id/shape/tender-input", "confidence": 9400},
+    {"role": "mith:query", "candidate": "https://mithril.fund/id/query/open-tenders", "confidence": 9100},
+    {"role": "mith:view", "candidate": "https://mithril.fund/id/view/tender-list", "confidence": 9000},
+    {"role": "mith:action", "candidate": "https://mithril.fund/id/action/declare-tender", "confidence": 9200},
+    {"role": "mith:effect", "candidate": "https://mithril.fund/id/effect/assert-tender", "confidence": 8800},
+    {"role": "mith:implementation", "candidate": "https://mithril.fund/id/implementation/oak-declare", "confidence": 9500}
+  ]
+}

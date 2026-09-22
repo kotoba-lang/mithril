@@ -1,0 +1,7 @@
+{:paths ["src" "test"
+         "../org-w3-json-ld-api/src"
+         "../org-w3-rdf-canon/src"
+         "../org-w3-nquads/src"
+         "../io-multiformats/src"
+         "../org-nist-sha2/src"
+         "../text/src"]}

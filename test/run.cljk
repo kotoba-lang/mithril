@@ -1,0 +1,8 @@
+(ns test.run
+  (:require [cljs.test :as t]
+            [mithril.compiler-test]))
+
+(let [result (t/run-tests 'mithril.compiler-test)]
+  (when (pos? (+ (:fail result) (:error result)))
+    (js/process.exit 1)))
+

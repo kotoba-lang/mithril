@@ -1,0 +1,133 @@
+(ns mithril.compiler
+  (:require [clojure.string :as str]
+            [json-ld-api.core :as jsonld]
+            [json-ld-api.to-rdf :as to-rdf]
+            [rdf-canon.core :as rdf-canon]))
+
+(def context-uri "https://mithril.fund/context/v1")
+(def media-type "application/ld+json")
+(def source-extensions #{"mith" "mithril"})
+
+(def context-document
+  {"@context"
+   {"mith" "https://mithril.fund/ns/v1#"
+    "Program" "mith:Program"
+    "goal" {"@id" "mith:goal" "@type" "@id"}
+    "ontology" "mith:ontologyDigest"
+    "choices" {"@id" "mith:choice" "@container" "@set"}
+    "role" {"@id" "mith:role" "@type" "@vocab"}
+    "candidate" {"@id" "mith:candidate" "@type" "@id"}
+    "confidence" {"@id" "mith:confidence"
+                  "@type" "http://www.w3.org/2001/XMLSchema#integer"}}})
+
+(def role-order
+  ["mith:reasoner" "mith:shape" "mith:query" "mith:view"
+   "mith:action" "mith:effect" "mith:implementation"])
+
+(def role->keyword
+  (zipmap role-order
+          [:reasoner :shape :query :view :action :effect :implementation]))
+
+(def catalog
+  {"mith:reasoner" #{"https://mithril.fund/id/reasoner/owl2-rl"}
+   "mith:shape" #{"https://mithril.fund/id/shape/tender-input"}
+   "mith:query" #{"https://mithril.fund/id/query/open-tenders"}
+   "mith:view" #{"https://mithril.fund/id/view/tender-list"}
+   "mith:action" #{"https://mithril.fund/id/action/declare-tender"}
+   "mith:effect" #{"https://mithril.fund/id/effect/assert-tender"}
+   "mith:implementation" #{"https://mithril.fund/id/implementation/oak-declare"}})
+
+(def goals #{"https://mithril.fund/id/goal/tender-intake"})
+(def program-keys #{"@context" "@id" "@type" "goal" "ontology" "choices"})
+(def choice-keys #{"role" "candidate" "confidence"})
+
+(defn- fail! [code detail]
+  (throw (ex-info detail {:mithril/error code :detail detail})))
+
+(defn extension [path]
+  (last (str/split path #"\.")))
+
+(defn source-path? [path]
+  (contains? source-extensions (extension path)))
+
+(defn parse-json [text]
+  #?(:cljs (js->clj (js/JSON.parse text))
+     :clj (fail! :mithril/json-host-unavailable
+                 "JSON parsing is provided by the kbb/CLJS compiler host")))
+
+(defn- require-source! [path doc]
+  (when-not (source-path? path)
+    (fail! :mithril/unsupported-extension
+           "Mithril source must end in .mith or .mithril"))
+  (when-not (= context-uri (get doc "@context"))
+    (fail! :mithril/unpinned-context
+           "v1 source must use the pinned Mithril context URI"))
+  (when-not (= "Program" (get doc "@type"))
+    (fail! :mithril/not-a-program "@type must be Program"))
+  (when-not (every? program-keys (keys doc))
+    (fail! :mithril/unknown-program-key "program contains an unknown key"))
+  doc)
+
+(defn- short-id [iri]
+  (when-not (string? iri)
+    (fail! :mithril/invalid-identifier "goal and candidate identifiers must be IRIs"))
+  (let [marker "/id/"
+        i (.indexOf iri marker)]
+    (when (neg? i)
+      (fail! :mithril/outside-catalog "identifier is outside the Mithril catalog"))
+    (keyword (subs iri (+ i (count marker))))))
+
+(defn- choice-map [choice]
+  (let [role (get choice "role")
+        candidate (get choice "candidate")
+        confidence (get choice "confidence")]
+    (when-not (every? choice-keys (keys choice))
+      (fail! :mithril/unknown-choice-key "choice contains an unknown key"))
+    (when-not (contains? role->keyword role)
+      (fail! :mithril/unknown-role (str "unknown role: " role)))
+    (when-not (contains? (get catalog role) candidate)
+      (fail! :mithril/outside-catalog
+             (str "candidate is not admitted for role " role)))
+    (when-not (and (integer? confidence) (<= 0 confidence 10000))
+      (fail! :mithril/invalid-confidence "confidence must be an integer from 0 through 10000"))
+    {:role (get role->keyword role)
+     :candidate (short-id candidate)
+     :confidence confidence}))
+
+(defn- ordered-choices [choices]
+  (when-not (vector? choices)
+    (fail! :mithril/missing-choices "choices must be an array"))
+  (let [mapped (mapv choice-map choices)
+        grouped (group-by :role mapped)]
+    (doseq [role (vals role->keyword)]
+      (when-not (= 1 (count (get grouped role)))
+        (fail! :mithril/role-cardinality
+               (str "exactly one choice is required for " role))))
+    (mapv (fn [role]
+            (let [{:keys [candidate confidence]} (first (get grouped (get role->keyword role)))]
+              [:choice (get role->keyword role) candidate confidence]))
+          role-order)))
+
+(defn compile-document [path doc]
+  (require-source! path doc)
+  (let [expanded (jsonld/expand doc {:contexts {context-uri context-document}})
+        dataset (to-rdf/to-rdf expanded)
+        graph-digest (rdf-canon/canonical-hash dataset)
+        goal-iri (get doc "goal")
+        _ (when-not (contains? goals goal-iri)
+            (fail! :mithril/unknown-goal "goal is outside the v1 catalog"))
+        goal (short-id goal-iri)
+        ontology (get doc "ontology")
+        choices (ordered-choices (get doc "choices"))]
+    (when-not (and (string? ontology) (boolean (re-matches #"[0-9a-f]{64}" ontology)))
+      (fail! :mithril/invalid-ontology "ontology must be a 64-character SHA-256 identity"))
+    {:format "https://mithril.fund/artifact/v1"
+     :media-type media-type
+     :graph-digest (str "sha256:" graph-digest)
+     :transaction [:oak.transaction/v1 goal ontology choices]}))
+
+(defn compile-text [path text]
+  (compile-document path (parse-json text)))
+
+(defn semantic-projection [artifact]
+  (select-keys artifact [:format :media-type :graph-digest :transaction]))

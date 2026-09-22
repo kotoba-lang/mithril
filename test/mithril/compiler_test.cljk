@@ -1,0 +1,56 @@
+(ns mithril.compiler-test
+  (:require [cljs.test :refer [deftest is testing]]
+            [mithril.compiler :as compiler]))
+
+(defn read-text [path]
+  (.readFileSync (js/require "fs") path "utf8"))
+
+(deftest extensions-are-aliases
+  (let [published-context (compiler/parse-json (read-text "resources/context-v1.jsonld"))
+        short (compiler/compile-text "examples/tender.mith" (read-text "examples/tender.mith"))
+        long (compiler/compile-text "examples/tender.mithril" (read-text "examples/tender.mithril"))]
+    (is (= compiler/context-document published-context)
+        "the public context and the compiler-pinned context are identical")
+    (is (= (compiler/semantic-projection short)
+           (compiler/semantic-projection long)))
+    (is (= "application/ld+json" (:media-type short)))
+    (is (= :oak.transaction/v1 (first (:transaction short))))
+    (is (= 7 (count (get-in short [:transaction 3]))))))
+
+(deftest fail-closed-source-boundary
+  (let [base (compiler/parse-json (read-text "examples/tender.mith"))]
+    (testing "unknown suffix"
+      (is (= :mithril/unsupported-extension
+             (try (compiler/compile-document "x.jsonld" base) nil
+                  (catch :default e (:mithril/error (ex-data e)))))))
+    (testing "remote or changed context"
+      (is (= :mithril/unpinned-context
+             (try (compiler/compile-document "x.mith" (assoc base "@context" "https://example.com/context")) nil
+                  (catch :default e (:mithril/error (ex-data e)))))))
+    (testing "unknown role"
+      (is (= :mithril/unknown-role
+             (try (compiler/compile-document
+                    "x.mith"
+                    (assoc-in base ["choices" 0 "role"] "mith:ambient-authority"))
+                  nil
+                  (catch :default e (:mithril/error (ex-data e)))))))
+    (testing "candidate outside the typed catalog"
+      (is (= :mithril/outside-catalog
+             (try (compiler/compile-document
+                    "x.mith"
+                    (assoc-in base ["choices" 0 "candidate"] "https://mithril.fund/id/reasoner/unknown"))
+                  nil
+                  (catch :default e (:mithril/error (ex-data e)))))))
+    (testing "unknown top-level key"
+      (is (= :mithril/unknown-program-key
+             (try (compiler/compile-document "x.mith" (assoc base "javascript" "alert(1)")) nil
+                  (catch :default e (:mithril/error (ex-data e)))))))
+    (testing "duplicate role"
+      (is (= :mithril/role-cardinality
+             (try (compiler/compile-document
+                    "x.mith"
+                    (-> base
+                        (assoc-in ["choices" 1 "role"] "mith:reasoner")
+                        (assoc-in ["choices" 1 "candidate"] "https://mithril.fund/id/reasoner/owl2-rl")))
+                  nil
+                  (catch :default e (:mithril/error (ex-data e)))))))))
