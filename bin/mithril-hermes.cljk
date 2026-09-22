@@ -70,12 +70,10 @@
   (try (.unlinkSync fs path) (catch :default _ nil)))
 
 (defn- load-or-start [artifact task state-path owner now]
-  (if (.existsSync fs state-path)
-    (let [state (reader/read-string (read-text state-path))]
-      (if (= :running (:status state))
-        (bot/acquire-lease state owner now)
-        (bot/start-run artifact task owner now)))
-    (bot/start-run artifact task owner now)))
+  (bot/resume-or-start artifact task
+                       (when (.existsSync fs state-path)
+                         (reader/read-string (read-text state-path)))
+                       owner now))
 
 (defn- deterministic-stop [state]
   (let [actions (bot/available-actions state)]
@@ -153,9 +151,22 @@
                     (throw (ex-info "task does not bind the supplied coding tool profile"
                                     {:mithril/error :mithril.hermes/tool-profile-mismatch})))
                 now (.now js/Date)
-                state (load-or-start artifact task state-path owner now)
+                run (load-or-start artifact task state-path owner now)
+                state (:state run)
                 grants (set (map keyword (remove str/blank? (str/split grants-csv #","))))]
-            (-> (decide! state owner now (boolean tool-profile))
+            (if (= :terminal (:disposition run))
+              (do
+                (append-audit! state-path {:at (.toISOString (js/Date.))
+                                           :status :idempotent-terminal
+                                           :run-id (:run-id state)
+                                           :task-digest (or (:task-digest state)
+                                                            (bot/task-digest (:task state)))
+                                           :run-status (:status state)})
+                (println (json-line {:status :idempotent-terminal
+                                     :run-id (:run-id state)
+                                     :run-status (:status state)}))
+                (release-lock! lock))
+              (-> (decide! state owner now (boolean tool-profile))
                 (.then
                  (fn [{:keys [admitted audit]}]
                    (let [action (:action admitted)
@@ -183,7 +194,7 @@
                                              :step (:step next-state)
                                              :run-status (:status next-state)})))))))
                 (.catch refuse!)
-                (.finally #(release-lock! lock))))
+                (.finally #(release-lock! lock)))))
           (catch :default error
             (release-lock! lock)
             (refuse! error))))))))

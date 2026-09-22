@@ -150,6 +150,13 @@
 (def task-required-keys #{:id :workspace :goal})
 (def task-optional-keys #{:tool-profile-digest})
 
+(declare acquire-lease)
+
+(defn task-digest
+  "Content identity used to bind a durable run to one exact task value."
+  [task]
+  (execution/digest task))
+
 (defn start-run [artifact task owner now-ms]
   (when-not (= artifact-format (:format artifact))
     (fail! :mithril.bot/invalid-artifact "artifact is not a bot profile" {}))
@@ -181,7 +188,8 @@
     (let [run-id (execution/digest [(:graph-digest artifact) task owner now-ms])
           lease-ms (* 1000 (get-in artifact [:bot-ir :policy :lease-seconds]))]
       {:format "https://mithril.fund/state/bot-run-v1"
-       :run-id run-id :profile-digest (:graph-digest artifact) :task task
+       :run-id run-id :profile-digest (:graph-digest artifact)
+       :task-digest (task-digest task) :task task
        :status :running :step 0 :facts #{:semantic/prefix-valid}
        :awaiting nil :seen-effects #{} :retries {} :receipts []
        :lease {:owner owner :acquired-at now-ms :expires-at (+ now-ms lease-ms)}
@@ -193,6 +201,36 @@
          :output-digest (execution/digest (mapv :id actions)) :metrics {:rows (count actions)}}
         {:operation :validate/shacl :status :executed
          :output-digest (execution/digest report) :metrics {:violations 0}}]})))
+
+(defn resume-or-start
+  "Reconcile one durable checkpoint with the requested profile and task.
+
+  A running checkpoint is resumable only for the exact profile/task binding.
+  Re-delivery of the same terminal task is an idempotent no-op. A distinct task
+  starts a new bounded run, retaining the old run in its append-only audit log."
+  [artifact task state owner now-ms]
+  (if-not state
+    {:disposition :started
+     :state (start-run artifact task owner now-ms)}
+    (let [same-profile? (= (:profile-digest state) (:graph-digest artifact))
+          same-task? (= (or (:task-digest state) (task-digest (:task state)))
+                        (task-digest task))]
+      (cond
+        (= :running (:status state))
+        (do
+          (when-not (and same-profile? same-task?)
+            (fail! :mithril.bot/state-binding-mismatch
+                   "a running checkpoint cannot be rebound to another profile or task"
+                   {:run-id (:run-id state)}))
+          {:disposition :resumed
+           :state (acquire-lease state owner now-ms)})
+
+        (and same-profile? same-task?)
+        {:disposition :terminal :state state}
+
+        :else
+        {:disposition :started
+         :state (start-run artifact task owner now-ms)}))))
 
 (defn acquire-lease
   "Acquire or renew a durable outer-loop lease. A live lease held by another

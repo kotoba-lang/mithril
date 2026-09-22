@@ -280,6 +280,13 @@ The state lock fails closed on overlap. A crashed process may leave that lock
 file behind; removing a stale lock is an operator recovery action rather than
 an automatic lease override.
 
+The checkpoint is content-bound to both the compiled bot profile and the exact
+task. A running checkpoint refuses a different profile or task. Re-delivery of
+the same completed or held task is an idempotent terminal result and executes
+no model or host effect; a task with a distinct content identity starts a new
+bounded run. This makes ordinary cron/webhook at-least-once delivery safe
+without a canary-specific completed-state wrapper.
+
 For a coding run, the optional final argument is a JSON tool profile. The task
 must contain the digest printed by `profile-digest`:
 

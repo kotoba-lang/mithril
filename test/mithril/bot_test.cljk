@@ -103,6 +103,25 @@
     (is (= :mithril.bot/lease-held
            (error-code #(bot/acquire-lease state "worker-2" 1100))))))
 
+(deftest durable-checkpoint-is-task-bound-and-terminal-redelivery-is-idempotent
+  (let [artifact (profile)
+        task-a (task)
+        task-b (assoc task-a :id "task-2" :goal "Implement the next checked change")
+        running (bot/start-run artifact task-a "worker-1" 1000)
+        resumed (bot/resume-or-start artifact task-a running "worker-1" 1100)
+        terminal-state (assoc running :status :completed)
+        terminal (bot/resume-or-start artifact task-a terminal-state "worker-1" 1200)
+        next-run (bot/resume-or-start artifact task-b terminal-state "worker-1" 1300)]
+    (is (= (bot/task-digest task-a) (:task-digest running)))
+    (is (= :resumed (:disposition resumed)))
+    (is (= :terminal (:disposition terminal)))
+    (is (= (:run-id running) (get-in terminal [:state :run-id])))
+    (is (= :started (:disposition next-run)))
+    (is (= task-b (get-in next-run [:state :task])))
+    (is (not= (:run-id running) (get-in next-run [:state :run-id])))
+    (is (= :mithril.bot/state-binding-mismatch
+           (error-code #(bot/resume-or-start artifact task-b running "worker-1" 1400))))))
+
 (deftest generated-text-and-low-confidence-are-refused
   (let [state (bot/start-run (profile) (task) "worker-1" 1000)]
     (is (= :mithril.bot/generated-text-forbidden
