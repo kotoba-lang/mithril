@@ -8,7 +8,8 @@
      :id \"https://mithril.fund/id/app/desktop\"
      :goal \"https://mithril.fund/id/goal/hermes-agent-loop\"
      :page (mithril/page :name \"Mithril\" :description \"Desktop app\" :headline \"Build with Mithril\" :summary \"A bounded semantic coding loop.\" :path \"/mithril\" :nav-label \"Mithril\" :codicon \"symbol-structure\")
-     :loop (mithril/agent-loop :max-steps 5 :max-polls 60 :poll-interval-ms 1000 :session-title \"Mithril agent\" :actions [\"https://mithril.fund/id/action/session-create\" \"https://mithril.fund/id/action/prompt-submit\" \"https://mithril.fund/id/action/session-status\" \"https://mithril.fund/id/action/session-history\" \"https://mithril.fund/id/action/stop\"]))")
+     :actor (mithril/actor :protocol \"https://mithril.fund/id/protocol/hermes-coding-agent-v1\" :governor \"https://mithril.fund/id/governor/user-commit-v1\" :receipt-policy \"https://mithril.fund/id/receipt/append-only-v1\" :workspace-policy \"https://mithril.fund/id/workspace/user-selected-local-v1\" :max-goal-chars 4096)
+     :loop (mithril/agent-loop :max-steps 9 :max-polls 60 :poll-interval-ms 1000 :session-title \"Mithril agent\" :actions [\"https://mithril.fund/id/action/profiles-list\" \"https://mithril.fund/id/action/session-list\" \"https://mithril.fund/id/action/session-create\" \"https://mithril.fund/id/action/session-resume\" \"https://mithril.fund/id/action/prompt-submit\" \"https://mithril.fund/id/action/session-status\" \"https://mithril.fund/id/action/session-history\" \"https://mithril.fund/id/action/session-interrupt\" \"https://mithril.fund/id/action/stop\"]))")
 
 (defn error-code [f] (try (f) nil (catch :default e (:mithril/error (ex-data e)))))
 
@@ -16,10 +17,18 @@
   (let [artifact (desktop/compile-text "app.mith" source)
         plugin (desktop/emit-plugin artifact)]
     (is (= desktop/artifact-format (:format artifact)))
-    (is (= [:session/create :prompt/submit :session/status :session/history :stop]
+    (is (= [:profiles/list :session/list :session/create :session/resume
+            :prompt/submit :session/status :session/history :session/interrupt :stop]
            (get-in artifact [:desktop-ir :loop :actions])))
+    (is (= "https://mithril.fund/id/governor/user-commit-v1"
+           (get-in artifact [:desktop-ir :actor :governor])))
     (is (str/includes? plugin "from '@hermes/plugin-sdk'"))
+    (is (str/includes? plugin "host.request('profiles.list'"))
+    (is (str/includes? plugin "host.request('session.resume'"))
     (is (str/includes? plugin "host.request('prompt.submit'"))
+    (is (str/includes? plugin "host.request('session.interrupt'"))
+    (is (str/includes? plugin "cwd:input.workspace"))
+    (is (str/includes? plugin "receipts-v1"))
     (is (str/includes? plugin "\"navLabel\":\"Mithril\""))
     (is (str/includes? plugin "\"maxPolls\":60"))
     (is (str/includes? plugin "area:ROUTES_AREA"))
@@ -33,6 +42,9 @@
     (testing "unbounded polling"
       (is (= :mithril.desktop/invalid-budget
              (error-code #(desktop/compile-text "app.mith" (str/replace source ":max-polls 60" ":max-polls 999"))))))
+    (testing "open actor protocol"
+      (is (= :mithril.desktop/invalid-actor
+             (error-code #(desktop/compile-text "app.mith" (str/replace source "hermes-coding-agent-v1" "arbitrary-agent"))))))
     (testing "only compiled artifacts emit"
       (is (= :mithril.desktop/invalid-artifact
              (error-code #(desktop/emit-plugin (assoc artifact :format "other"))))))))

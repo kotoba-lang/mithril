@@ -67,6 +67,23 @@ rewrites the complete graph and never needs to emit prose. A Jev-like policy
 may eventually select the operation and arguments directly; the same action
 schema remains valid without a text decoder.
 
+## Hermes coding workspace
+
+`mithril.desktop` compiles a `DesktopApplication` into a one-file Hermes
+Desktop plugin from a pinned template. The Mithril document admits exactly
+nine host actions: profile and session discovery, create/resume, prompt,
+status/history, interrupt and stop. It cannot name an arbitrary RPC method or
+inject JavaScript.
+
+The generated application provides four projections over one semantic state:
+Coding, Chat, Sessions and Bots. A coding turn binds an absolute local
+workspace and a live Hermes profile to a typed `mithril/coding-request`.
+Sessions can be resumed, chat continues the same runtime session, and each
+transition is appended to plugin-scoped receipt storage. The user commits a
+bounded task; the model proposes work; Hermes executes tool calls and checks;
+the governor records `committed`, `held` or `refused`. One click runs one
+bounded turn—there is no immortal loop inside the plugin.
+
 [`ontology/semantic-core-v1.mith`](ontology/semantic-core-v1.mith) demonstrates
 native RDF, OWL 2 RL and SHACL forms. The compiler lowers it to JSON-LD and
 canonicalizes the resulting RDF Dataset. [`examples/mithril-app-agent-form.mith`](examples/mithril-app-agent-form.mith)
