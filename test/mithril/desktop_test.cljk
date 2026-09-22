@@ -1,0 +1,36 @@
+(ns mithril.desktop-test
+  (:require [cljs.test :refer [deftest is testing]]
+            [clojure.string :as str]
+            [mithril.desktop :as desktop]))
+
+(def source
+  "(mithril/desktop-application
+     :id \"https://mithril.fund/id/app/desktop\"
+     :goal \"https://mithril.fund/id/goal/hermes-agent-loop\"
+     :page (mithril/page :name \"Mithril\" :description \"Desktop app\" :headline \"Build with Mithril\" :summary \"A bounded semantic coding loop.\" :path \"/mithril\" :nav-label \"Mithril\" :codicon \"symbol-structure\")
+     :loop (mithril/agent-loop :max-steps 5 :max-polls 60 :poll-interval-ms 1000 :session-title \"Mithril agent\" :actions [\"https://mithril.fund/id/action/session-create\" \"https://mithril.fund/id/action/prompt-submit\" \"https://mithril.fund/id/action/session-status\" \"https://mithril.fund/id/action/session-history\" \"https://mithril.fund/id/action/stop\"]))")
+
+(defn error-code [f] (try (f) nil (catch :default e (:mithril/error (ex-data e)))))
+
+(deftest desktop-source-compiles-and-emits-hermes-plugin
+  (let [artifact (desktop/compile-text "app.mith" source)
+        plugin (desktop/emit-plugin artifact)]
+    (is (= desktop/artifact-format (:format artifact)))
+    (is (= [:session/create :prompt/submit :session/status :session/history :stop]
+           (get-in artifact [:desktop-ir :loop :actions])))
+    (is (str/includes? plugin "from '@hermes/plugin-sdk'"))
+    (is (str/includes? plugin "host.request('prompt.submit'"))
+    (is (str/includes? plugin "area:ROUTES_AREA"))
+    (is (not (str/includes? plugin "eval(")))))
+
+(deftest desktop-source-refuses-open-host-programs
+  (let [artifact (desktop/compile-text "app.mith" source)]
+    (testing "arbitrary action"
+      (is (= :mithril.desktop/invalid-actions
+             (error-code #(desktop/compile-text "app.mith" (str/replace source "session-history\"" "shell-exec\""))))))
+    (testing "unbounded polling"
+      (is (= :mithril.desktop/invalid-budget
+             (error-code #(desktop/compile-text "app.mith" (str/replace source ":max-polls 60" ":max-polls 999"))))))
+    (testing "only compiled artifacts emit"
+      (is (= :mithril.desktop/invalid-artifact
+             (error-code #(desktop/emit-plugin (assoc artifact :format "other"))))))))

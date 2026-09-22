@@ -218,6 +218,19 @@ kbb --backend sci --classpath src bin/mithril-run.cljk \
   compiled-artifact.json GET /hello
 ```
 
+## Hermes Desktop application
+
+`mithril.desktop` compiles a `mithril/desktop-application` form to a checked
+Desktop IR and then emits the single-file Hermes Desktop plugin. The source can
+select only the closed `session/create -> prompt/submit -> session/status ->
+session/history -> stop` state machine; RPC names, JavaScript and ambient host
+capabilities are compiler-owned. Poll count and interval are bounded, and the
+generated UI uses the Hermes plugin SDK and its theme variables.
+
+The compiler output is ordinary deterministic build output. It is not source
+text proposed by the agent. The agent receives a Mithril-form request and the
+host executes each admitted transition mechanically.
+
 ## Source contract
 
 - `.mith` and `.mithril` are aliases. The suffix and surface syntax never enter
