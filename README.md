@@ -276,9 +276,11 @@ state. Without a coding tool profile, `execute` admits only `workspace/read`,
 `git/status`, and `agent/stop`. Workspace and Git
 observations are reduced to counts/booleans before hashing, so command output,
 file names, and the workspace path are absent from stdout and the audit log.
-The state lock fails closed on overlap. A crashed process may leave that lock
-file behind; removing a stale lock is an operator recovery action rather than
-an automatic lease override.
+The state lock fails closed on overlap. If its recorded PID is provably absent,
+the next tick atomically renames that stale inode, acquires a replacement lock,
+and appends a `stale-lock-recovered` audit event. An unreadable lock or a live
+PID is never removed automatically, so ambiguity remains an operator recovery
+instead of silently overriding a lease.
 
 The checkpoint is content-bound to both the compiled bot profile and the exact
 task. A running checkpoint refuses a different profile or task. Re-delivery of

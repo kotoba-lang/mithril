@@ -54,16 +54,53 @@
   (let [file (str state-path ".audit.jsonl")]
     (.appendFileSync fs file (str (json-line audit) "\n") "utf8")))
 
+(defn- process-alive? [pid]
+  (try
+    (.kill js/process pid 0)
+    true
+    (catch :default error
+      ;; EPERM proves a process owns the PID even when we cannot signal it.
+      ;; Only ESRCH is evidence that the lock owner is gone.
+      (not= "ESRCH" (.-code error)))))
+
+(defn- lock-owner-pid [lock-path]
+  (try
+    (let [value (str/trim (read-text lock-path))]
+      (when (boolean (re-matches #"[1-9][0-9]*" value))
+        (js/Number value)))
+    (catch :default _ nil)))
+
+(defn- create-lock! [lock-path]
+  (let [fd (.openSync fs lock-path "wx" 384)]
+    (.writeFileSync fs fd (str (.-pid js/process)) "utf8")
+    {:fd fd :path lock-path}))
+
 (defn- acquire-lock! [state-path]
   (let [lock-path (str state-path ".lock")]
     (.mkdirSync fs (.dirname path state-path) #js {:recursive true})
     (try
-      (let [fd (.openSync fs lock-path "wx" 384)]
-        (.writeFileSync fs fd (str (.-pid js/process)) "utf8")
-        {:fd fd :path lock-path})
-      (catch :default _
-        (throw (ex-info "another Mithril tick holds the state lock"
-                        {:mithril/error :mithril.hermes/state-locked}))))))
+      (create-lock! lock-path)
+      (catch :default first-error
+        (let [owner-pid (lock-owner-pid lock-path)]
+          (when (or (nil? owner-pid) (process-alive? owner-pid))
+            (throw (ex-info "another Mithril tick holds the state lock"
+                            {:mithril/error :mithril.hermes/state-locked
+                             :owner-pid owner-pid}
+                            first-error)))
+          ;; rename is the claim: with concurrent recovery only one process can
+          ;; move the observed stale inode. The others fail closed and retry on
+          ;; their next outer-loop tick.
+          (let [stale-path (str lock-path ".stale-" owner-pid "-" (.-pid js/process))]
+            (try
+              (.renameSync fs lock-path stale-path)
+              (let [lock (create-lock! lock-path)]
+                (try (.unlinkSync fs stale-path) (catch :default _ nil))
+                (assoc lock :recovered-pid owner-pid))
+              (catch :default recovery-error
+                (throw (ex-info "another Mithril tick won stale-lock recovery"
+                                {:mithril/error :mithril.hermes/state-locked
+                                 :owner-pid owner-pid}
+                                recovery-error))))))))))
 
 (defn- release-lock! [{:keys [fd path]}]
   (try (.closeSync fs fd) (catch :default _ nil))
@@ -139,6 +176,10 @@
     (usage!)
     (let [lock (try (acquire-lock! state-path) (catch :default error (refuse! error) nil))]
       (when lock
+        (when-let [recovered-pid (:recovered-pid lock)]
+          (append-audit! state-path {:at (.toISOString (js/Date.))
+                                     :status :stale-lock-recovered
+                                     :owner-pid recovered-pid}))
         (try
           (let [artifact (bot/compile-text profile-path (read-text profile-path))
                 task (js->clj (js/JSON.parse (read-text task-path)) :keywordize-keys true)

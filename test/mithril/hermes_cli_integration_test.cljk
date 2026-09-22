@@ -5,25 +5,32 @@
 (def fs (js/require "node:fs"))
 (def cp (js/require "node:child_process"))
 
+(defn- terminal-fixture [dir]
+  (let [task {:id "cli-task" :workspace dir :goal "Observe one terminal delivery"}
+        artifact (bot/compile-text "examples/governed-coding-bot.mith"
+                                   (.readFileSync fs "examples/governed-coding-bot.mith" "utf8"))]
+    {:task task
+     :state (assoc (bot/start-run artifact task "cli-test" 1000) :status :completed)}))
+
+(defn- invoke-terminal! [task-path state-path]
+  (.execFileSync
+   cp "kbb"
+   #js ["--backend" "sci" "bin/mithril-hermes.cljk" "tick"
+        "examples/governed-coding-bot.mith" task-path state-path
+        "cli-test" "workspace/read,git/status,agent/stop" "execute"]
+   #js {:cwd (.cwd js/process) :encoding "utf8"
+        :stdio #js ["ignore" "pipe" "pipe"]}))
+
 (deftest terminal-redelivery-crosses-the-real-cli-boundary
   (let [dir (.mkdtempSync fs "/tmp/mithril-cli-test-")
-        task {:id "cli-task" :workspace dir :goal "Observe one terminal delivery"}
-        artifact (bot/compile-text "examples/governed-coding-bot.mith"
-                                   (.readFileSync fs "examples/governed-coding-bot.mith" "utf8"))
-        state (assoc (bot/start-run artifact task "cli-test" 1000) :status :completed)
+        {:keys [task state]} (terminal-fixture dir)
         task-path (str dir "/task.json")
         state-path (str dir "/state.edn")]
     (try
       (.writeFileSync fs task-path (.stringify js/JSON (clj->js task)) "utf8")
       (.writeFileSync fs state-path (pr-str state) "utf8")
       (let [before (.readFileSync fs state-path "utf8")
-            output (.execFileSync
-                    cp "kbb"
-                    #js ["--backend" "sci" "bin/mithril-hermes.cljk" "tick"
-                         "examples/governed-coding-bot.mith" task-path state-path
-                         "cli-test" "workspace/read,git/status,agent/stop" "execute"]
-                    #js {:cwd (.cwd js/process) :encoding "utf8"
-                         :stdio #js ["ignore" "pipe" "pipe"]})
+            output (invoke-terminal! task-path state-path)
             result (js->clj (js/JSON.parse output) :keywordize-keys true)
             audit-lines (-> (.readFileSync fs (str state-path ".audit.jsonl") "utf8")
                             (.trim)
@@ -34,5 +41,29 @@
             "terminal delivery must not rewrite the durable checkpoint")
         (is (= 1 (alength audit-lines))
             "the CLI must record exactly one delivery receipt"))
+      (finally
+        (.rmSync fs dir #js {:recursive true :force true})))))
+
+(deftest dead-owner-lock-is-recovered-and-audited
+  (let [dir (.mkdtempSync fs "/tmp/mithril-cli-lock-test-")
+        {:keys [task state]} (terminal-fixture dir)
+        task-path (str dir "/task.json")
+        state-path (str dir "/state.edn")
+        lock-path (str state-path ".lock")]
+    (try
+      (.writeFileSync fs task-path (.stringify js/JSON (clj->js task)) "utf8")
+      (.writeFileSync fs state-path (pr-str state) "utf8")
+      (.writeFileSync fs lock-path "99999999" "utf8")
+      (let [result (js->clj (js/JSON.parse (invoke-terminal! task-path state-path))
+                            :keywordize-keys true)
+            audits (->> (-> (.readFileSync fs (str state-path ".audit.jsonl") "utf8")
+                            (.trim)
+                            (.split "\n"))
+                        (map #(js->clj (js/JSON.parse %) :keywordize-keys true)))]
+        (is (= "idempotent-terminal" (:status result)))
+        (is (= ["stale-lock-recovered" "idempotent-terminal"]
+               (mapv :status audits)))
+        (is (false? (.existsSync fs lock-path))
+            "the recovered tick must release its replacement lock"))
       (finally
         (.rmSync fs dir #js {:recursive true :force true})))))
