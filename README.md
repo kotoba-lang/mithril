@@ -42,6 +42,10 @@ The repository now contains source authored in Mithril itself:
   leaves only the handler choice open. OaK materializes the imported handler
   classes with OWL 2 RL, the SPARQL engine discovers the permitted finite
   candidates, and OpenJev selects one typed choice without generating source.
+- [`examples/multiroute-web-synthesis.mith`](examples/multiroute-web-synthesis.mith)
+  sends every route choice in one OpenJev request. The compiler checks one
+  complete distribution per route, seals each admitted decision into Web IR,
+  and the deterministic runtime executes all selected handlers.
 
 `resources`, `lib` and `examples` are package classpath roots, so downstream
 builds consume these exact files from the pinned Git commit instead of copying
@@ -80,7 +84,7 @@ SynthesizeWebApplication (.mith JSON-LD)
   -> validate imports, routes and ontology identity
   -> OaK OWL 2 RL materialization
   -> OaK SPARQL candidate discovery
-  -> finite Choice question
+  -> finite Choice questions for every route
   -> one trained OpenJev forward pass
   -> revalidate distribution, winner, confidence floor and model revision
   -> deterministic WebApplication compiler
@@ -101,8 +105,22 @@ OpenJev artifact at revision
 `19bf9a64815add579fbf6c907bef584d9277a8e4`. It selected the authored static
 response handler at 7,676 basis points against a 6,000-point ontology floor;
 dispatching `GET /hello` then returned the authored response with status 200.
-This is evidence for this closed two-candidate handler family, not a claim of
-arbitrary code generation or general web-program synthesis.
+The multi-route example additionally verifies that one forward pass can fill
+several typed handler holes and that every resulting route is executable. With
+the pinned model above, `/hello` selected the static handler at 6,870 basis
+points, `HEAD /health` selected it at 6,919, and `/retired` selected not-found
+at 6,296; all three exceeded the 6,000-point ontology floor. This is still
+evidence for this closed two-candidate handler family, not a claim of arbitrary
+code generation or general web-program synthesis.
+
+`bin/mithril-run.cljk` executes a previously compiled Web IR artifact without
+loading OpenJev. Inference is therefore a compile-time policy input rather than
+ambient runtime authority:
+
+```sh
+kbb --backend sci --classpath src bin/mithril-run.cljk \
+  compiled-artifact.json GET /hello
+```
 
 ## Source contract
 
