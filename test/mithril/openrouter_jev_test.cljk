@@ -1,0 +1,40 @@
+(ns mithril.openrouter-jev-test
+  (:require [cljs.test :refer [deftest is]]
+            [mithril.bot :as bot]
+            [mithril.openrouter-jev :as jev]))
+
+(def plan
+  {:state "A bounded coding run before workspace inspection."
+   :questions [{:type "choice"
+                :instructions "Choose the safest next action."
+                :options ["workspace-inspect" "git-status" "stop"]}]
+   :candidates [(get bot/action-by-label "workspace-inspect")
+                (get bot/action-by-label "git-status")
+                (get bot/action-by-label "stop")]})
+
+(deftest request-is-the-openrouter-decisions-shape
+  (let [request (jev/decision-request plan)]
+    (is (= bot/jev-model (:model request)))
+    (is (= "choice" (get-in request [:questions jev/question-id :type])))
+    (is (= #{"workspace-inspect" "git-status" "stop"}
+           (set (keys (get-in request [:questions jev/question-id :criteria])))))
+    (is (not (contains? request :messages)))
+    (is (not (contains? request :prompt)))))
+
+(deftest live-response-normalizes-without-generated-text
+  (let [response {:id "gen-dec-test"
+                  :model "typesafe/jev-1.13-20260917"
+                  :answers {:next_action
+                            {:type "choice" :choice "workspace-inspect"
+                             :probabilities {"workspace-inspect" 0.61
+                                             "git-status" 0.38 "stop" 0.01}
+                             :confidence 0.41}}
+                  :usage {:input_tokens 386 :output_tokens 44 :cost 0.000016212}}
+        normalized (jev/normalize-response response)]
+    (is (false? (get-in normalized [:model-result :generated_text])))
+    (is (= bot/model-kind (get-in normalized [:model-result :kind])))
+    (is (= 0.61 (get-in normalized [:model-result :decisions 0 :probabilities
+                                    "workspace-inspect"])))
+    (is (= 0.41 (get-in normalized [:model-result :decisions 0 :confidence])))
+    (is (= "gen-dec-test" (get-in normalized [:audit :request-id])))
+    (is (= 0.000016212 (get-in normalized [:audit :usage :cost])))))

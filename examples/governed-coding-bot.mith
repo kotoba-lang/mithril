@@ -7,7 +7,7 @@
     :max-steps 16
     :max-retries 2
     :lease-seconds 900
-    :confidence-floor 6000
+    :confidence-floor 3000
     :actions
     ["https://mithril.fund/id/action/workspace-inspect"
      "https://mithril.fund/id/action/code-propose"

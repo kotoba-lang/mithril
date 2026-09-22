@@ -10,17 +10,20 @@
 (defn task [] {:id "task-1" :workspace "/tmp/work" :goal "Implement one checked change"})
 (defn error-code [f] (try (f) nil (catch :default e (:mithril/error (ex-data e)))))
 
-(defn model-result [state choice confidence]
+(defn model-result
+  ([state choice confidence] (model-result state choice confidence confidence))
+  ([state choice probability confidence]
   (let [candidates (:candidates (bot/prepare-request state "worker-1" 1001))
         labels (mapv :label candidates)
         rest-labels (remove #{choice} labels)
-        other (/ (- 1 confidence) (count rest-labels))]
-    {:kind bot/model-kind :generated_text false :model {:name "open-jev"}
-     :artifact {:repo_or_dir "kotoba-lang/typed-decisions"
-                :revision "0123456789abcdef0123456789abcdef01234567"}
+        other (/ (- 1 probability) (count rest-labels))]
+    {:kind bot/model-kind :generated_text false :model "typesafe/jev-1.13-20260917"
+     :artifact {:provider bot/jev-provider :endpoint bot/jev-endpoint
+                :requested_model bot/jev-model
+                :resolved_model "typesafe/jev-1.13-20260917"}
      :decisions [{:choice choice :confidence confidence
-                  :probabilities (into {choice confidence}
-                                       (map (fn [label] [label other]) rest-labels))}]}))
+                  :probabilities (into {choice probability}
+                                       (map (fn [label] [label other]) rest-labels))}]})))
 
 (defn complete [state admitted now]
   (let [{:keys [state effect]} (bot/request-effect state admitted
@@ -47,7 +50,7 @@
 
 (deftest jev-choice-is-closed-and-governed
   (let [state (bot/start-run (profile) (task) "worker-1" 1000)
-        admitted (bot/admit-decision state (model-result state "workspace-inspect" 0.8)
+        admitted (bot/admit-decision state (model-result state "workspace-inspect" 0.8 0.7)
                                      "worker-1" 1001)]
     (is (= :workspace/read (get-in admitted [:action :effect])))
     (is (= :mithril.bot/capability-denied
@@ -57,7 +60,9 @@
                          state
                          (assoc-in (model-result state "workspace-inspect" 0.8)
                                    [:decisions 0 :choice] "shell-exec")
-                         "worker-1" 1001))))))
+                         "worker-1" 1001))))
+    (is (= 7000 (:confidence admitted))
+        "TypeSafe confidence is independent from the winning probability")))
 
 (deftest completed-receipts-advance-prerequisites
   (let [s0 (bot/start-run (profile) (task) "worker-1" 1000)
@@ -96,5 +101,5 @@
                                                     :generated_text true)
                                              "worker-1" 1001))))
     (is (= :mithril.bot/model-confidence-below-floor
-           (error-code #(bot/admit-decision state (model-result state "stop" 0.5)
+           (error-code #(bot/admit-decision state (model-result state "stop" 0.8 0.2)
                                              "worker-1" 1001))))))

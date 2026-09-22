@@ -207,19 +207,22 @@ shape, and exposes only these typed actions: workspace inspection, patch
 proposal, patch application, Amu compilation, test execution, git status and
 stop.
 
-OpenJev is restricted to one finite `Choice` distribution over the actions
-whose prerequisites are true. It cannot emit source, identifiers, tool names or
-arguments. The independent Governor must grant the selected capability before
-the runtime emits one effect. Exactly one matching receipt advances the state;
-effect IDs are content-derived, duplicate receipts fail closed, and lease,
-retry and total-step budgets are carried in the state.
+OpenRouter's real `typesafe/jev-1.13` is restricted to one finite `Choice`
+distribution over the actions whose prerequisites are true. It cannot emit
+source, identifiers, tool names or arguments. The independent Governor must
+grant the selected capability before the runtime emits one effect. Exactly one
+matching receipt advances the state; effect IDs are content-derived, duplicate
+receipts fail closed, and lease, retry and total-step budgets are carried in
+the state. Jev's `confidence` is intentionally checked separately from the
+winning option probability; read-only actions and mutating actions have
+different ontology-authored floors.
 
 ```text
 .mith BotProfile
   -> OWL 2 RL action entailment
   -> bounded SPARQL candidate query
   -> SHACL task validation
-  -> OpenJev typed action choice
+  -> OpenRouter TypeSafe Jev typed action choice
   -> Governor capability intersection
   -> one deterministic host effect
   -> content-addressed receipt
@@ -232,6 +235,21 @@ Compile the published profile with:
 kbb --backend sci --classpath "$CP" bin/mithril.cljk \
   compile-bot examples/governed-coding-bot.mith
 ```
+
+Call Jev and emit one governed effect request with:
+
+```sh
+kbb --backend sci --classpath "$CP" bin/mithril-jev.cljk \
+  next examples/governed-coding-bot.mith task.json worker-1 \
+  workspace/read,git/status,agent/stop
+```
+
+`task.json` contains exactly `id`, `workspace`, and `goal`. The credential is
+read at call time from `OPENROUTER_API_KEY`, then from the exact macOS Keychain
+item `service=gftd.openrouter account=OPENROUTER_API_KEY`; it is never written
+to the artifact or receipt. The adapter pins the request to
+`typesafe/jev-1.13`, records OpenRouter's resolved model identity, request id,
+usage and cost, and refuses malformed responses before the Governor runs.
 
 The Hermes Desktop artifact embeds the same closed action/effect catalog. Cron
 creation refuses duplicate enabled routines and the configured active-job
