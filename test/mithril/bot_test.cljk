@@ -72,6 +72,7 @@
                                             "worker-1" 1004) 1005)]
     (is (contains? (:facts s1) :workspace/inspected))
     (is (contains? (:facts s2) :proposal/ready))
+    (is (not-any? #(= "workspace-inspect" (:label %)) (bot/available-actions s1)))
     (is (some #(= "patch-apply" (:label %)) (bot/available-actions s2)))
     (is (= 2 (:step s2)))
     (is (= 2 (count (:receipts s2))))))
@@ -92,6 +93,15 @@
            (error-code #(bot/prepare-request s1 "other-worker" 1004))))
     (is (= :mithril.bot/duplicate-receipt
            (error-code #(bot/apply-receipt s1 failed "worker-1" 1004))))))
+
+(deftest durable-lease-can-be-renewed-but-not-stolen
+  (let [state (bot/start-run (profile) (task) "worker-1" 1000)
+        renewed (bot/acquire-lease state "worker-1" 1100)
+        expired (bot/acquire-lease state "worker-2" 901001)]
+    (is (> (get-in renewed [:lease :expires-at]) (get-in state [:lease :expires-at])))
+    (is (= "worker-2" (get-in expired [:lease :owner])))
+    (is (= :mithril.bot/lease-held
+           (error-code #(bot/acquire-lease state "worker-2" 1100))))))
 
 (deftest generated-text-and-low-confidence-are-refused
   (let [state (bot/start-run (profile) (task) "worker-1" 1000)]

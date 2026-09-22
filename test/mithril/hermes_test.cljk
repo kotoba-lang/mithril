@@ -1,0 +1,51 @@
+(ns mithril.hermes-test
+  (:require [cljs.test :refer [deftest is testing]]
+            [mithril.bot :as bot]
+            [mithril.hermes :as hermes]))
+
+(def base-effect
+  {:format "https://mithril.fund/effect/bot-action-v1"
+   :id "effect-1"
+   :run-id "run-1"
+   :step 0
+   :action "https://mithril.fund/id/action/workspace-inspect"
+   :operation :workspace/read
+   :workspace "/workspace"
+   :task-id "task-1"})
+
+(defn error-code [f]
+  (try (f) nil (catch :default error (:mithril/error (ex-data error)))))
+
+(deftest workspace-read-produces-a-minimal-terminal-receipt
+  (let [result (hermes/execute-effect
+                base-effect
+                {:stat-fn (fn [_] #js {:isDirectory (fn [] true)})
+                 :list-fn (fn [_] #js ["a" "b"])
+                 :git-fn (fn [_] "")})]
+    (is (= #{:format :effect-id :status :output-digest}
+           (set (keys (:receipt result)))))
+    (is (= :completed (get-in result [:receipt :status])))
+    (is (= 2 (get-in result [:audit :entry-count])))
+    (is (= :workspace/read (get-in result [:audit :operation])))))
+
+(deftest git-status-never-exposes-command-output
+  (let [effect (assoc base-effect :operation :git/status)
+        result (hermes/execute-effect
+                effect
+                {:stat-fn identity :list-fn identity
+                 :git-fn (fn [_] "## main\n M secret-name.txt\n")})]
+    (is (= 1 (get-in result [:audit :changed-lines])))
+    (is (not (some #{"secret-name.txt"} (tree-seq coll? seq result))))))
+
+(deftest host-failure-is-a-receipt-and-mutation-is-refused
+  (testing "a host read failure is terminal evidence, not an absent result"
+    (let [result (hermes/execute-effect
+                  base-effect
+                  {:stat-fn (fn [_] (throw (js/Error. "private path")))
+                   :list-fn identity :git-fn identity})]
+      (is (= :failed (get-in result [:receipt :status])))
+      (is (= :host-read-failed (get-in result [:audit :error])))))
+  (testing "the canary has no generic mutation escape hatch"
+    (is (= :mithril.hermes/effect-denied
+           (error-code #(hermes/execute-effect
+                         (assoc base-effect :operation :workspace/apply-patch)))))))
