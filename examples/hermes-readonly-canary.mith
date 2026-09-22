@@ -1,0 +1,16 @@
+(mithril/bot-profile
+  :id "https://mithril.fund/id/bot/hermes-readonly-canary"
+  :goal "https://mithril.fund/id/goal/governed-coding-task"
+  :ontology "3539fef6d1f26c012d4305a55a3782902ff8de47e56901e619ea0cde30ece918"
+  :policy
+  (mithril/bot-policy
+    :max-steps 3
+    :max-retries 1
+    :lease-seconds 900
+    :confidence-floor 3000
+    :actions
+    ["https://mithril.fund/id/action/workspace-inspect"
+     "https://mithril.fund/id/action/git-status"
+     "https://mithril.fund/id/action/stop"]
+    :effects
+    ["workspace/read" "git/status" "agent/stop"]))

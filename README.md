@@ -251,6 +251,34 @@ to the artifact or receipt. The adapter pins the request to
 `typesafe/jev-1.13`, records OpenRouter's resolved model identity, request id,
 usage and cost, and refuses malformed responses before the Governor runs.
 
+### Hermes cron canary
+
+`mithril-hermes` is the durable outer-loop adapter for Hermes `--no-agent`
+jobs. One invocation acquires the state lease, asks TypeSafe Jev for at most
+one finite decision, intersects it with Governor grants, executes at most one
+read-only host effect, atomically checkpoints the Mithril state, and appends a
+JSONL audit record. A final singleton `stop` action is deterministic and does
+not spend a model request.
+
+```sh
+kbb --backend sci bin/mithril-hermes.cljk tick \
+  examples/hermes-readonly-canary.mith task.json state.edn worker-1 \
+  workspace/read,git/status,agent/stop shadow
+
+kbb --backend sci bin/mithril-hermes.cljk tick \
+  examples/hermes-readonly-canary.mith task.json state.edn worker-1 \
+  workspace/read,git/status,agent/stop execute
+```
+
+`shadow` records the decision but requests no effect and does not advance the
+state. `execute` admits only `workspace/read`, `git/status`, and `agent/stop`;
+there is no generic shell, patch, or generated-text path. Workspace and Git
+observations are reduced to counts/booleans before hashing, so command output,
+file names, and the workspace path are absent from stdout and the audit log.
+The state lock fails closed on overlap. A crashed process may leave that lock
+file behind; removing a stale lock is an operator recovery action rather than
+an automatic lease override.
+
 The Hermes Desktop artifact embeds the same closed action/effect catalog. Cron
 creation refuses duplicate enabled routines and the configured active-job
 ceiling. Kanban task identity is SHA-256 derived from profile, workspace, title,

@@ -153,6 +153,9 @@
   (when-not (and (map? task) (= #{:id :workspace :goal} (set (keys task)))
                  (every? #(and (string? %) (not (str/blank? %))) (vals task)))
     (fail! :mithril.bot/invalid-task "task must contain non-empty id, workspace and goal" {}))
+  (when-not (or (str/starts-with? (:workspace task) "/")
+                (boolean (re-matches #"[A-Za-z]:[\\\\/].+" (:workspace task))))
+    (fail! :mithril.bot/invalid-workspace "task workspace must be an absolute path" {}))
   (when-not (and (string? owner) (not (str/blank? owner)) (integer? now-ms) (not (neg? now-ms)))
     (fail! :mithril.bot/invalid-lease "owner and non-negative clock are required" {}))
   (let [actions (discover-actions artifact)
@@ -179,6 +182,25 @@
         {:operation :validate/shacl :status :executed
          :output-digest (execution/digest report) :metrics {:violations 0}}]})))
 
+(defn acquire-lease
+  "Acquire or renew a durable outer-loop lease. A live lease held by another
+  worker is never stolen; an expired lease may be acquired by a new worker."
+  [state owner now-ms]
+  (when-not (= "https://mithril.fund/state/bot-run-v1" (:format state))
+    (fail! :mithril.bot/invalid-state "state is not a Mithril bot run" {}))
+  (when-not (and (string? owner) (not (str/blank? owner))
+                 (integer? now-ms) (not (neg? now-ms)))
+    (fail! :mithril.bot/invalid-lease "owner and non-negative clock are required" {}))
+  (let [lease (:lease state)
+        live? (and (map? lease) (integer? (:expires-at lease))
+                   (< now-ms (:expires-at lease)))]
+    (when (and live? (not= owner (:owner lease)))
+      (fail! :mithril.bot/lease-held "run lease is held by another worker"
+             {:owner (:owner lease) :expires-at (:expires-at lease)}))
+    (assoc state :lease {:owner owner
+                         :acquired-at now-ms
+                         :expires-at (+ now-ms (* 1000 (get-in state [:policy :lease-seconds])))})))
+
 (defn- lease-valid! [state owner now-ms]
   (when-not (and (= owner (get-in state [:lease :owner]))
                  (integer? now-ms) (< now-ms (get-in state [:lease :expires-at])))
@@ -189,6 +211,8 @@
     (->> (get-in state [:policy :actions])
          (map action-by-id)
          (filter #(every? facts (:requires %)))
+         (remove #(and (not= :agent/stop (:effect %))
+                       (every? facts (:produces %))))
          vec)))
 
 (defn prepare-request [state owner now-ms]

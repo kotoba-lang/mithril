@@ -5,10 +5,11 @@
             [mithril.graph-test]
             [mithril.app-test]
             [mithril.bot-test]
+            [mithril.hermes-test]
             [mithril.openrouter-jev-test]
             [mithril.desktop-test]))
 
-(let [result (t/run-tests 'mithril.compiler-test 'mithril.form-test 'mithril.graph-test 'mithril.app-test 'mithril.bot-test 'mithril.openrouter-jev-test)]
+(let [result (t/run-tests 'mithril.compiler-test 'mithril.form-test 'mithril.graph-test 'mithril.app-test 'mithril.bot-test 'mithril.hermes-test 'mithril.openrouter-jev-test)]
   (let [desktop-result (t/run-tests 'mithril.desktop-test)
         failures (+ (:fail result) (:error result) (:fail desktop-result) (:error desktop-result))]
   (when (pos? failures)

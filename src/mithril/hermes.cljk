@@ -1,0 +1,71 @@
+(ns mithril.hermes
+  "Hermes host adapter for one governed, read-only Mithril effect.
+
+  The adapter deliberately has no generic shell or text-generation escape
+  hatch. It returns the exact receipt consumed by `mithril.bot/apply-receipt`
+  plus a bounded audit summary that never contains command output or paths."
+  (:require [mithril.bot :as bot]
+            [mithril.execution :as execution]))
+
+(def adapter-format "https://mithril.fund/adapter/hermes-read-only-v1")
+(def read-only-effects #{:workspace/read :git/status :agent/stop})
+
+(defn- fail! [code detail data]
+  (throw (ex-info detail (merge {:mithril/error code :detail detail} data))))
+
+(defn- completed [effect output audit]
+  {:receipt {:format bot/receipt-format
+             :effect-id (:id effect)
+             :status :completed
+             :output-digest (execution/digest output)}
+   :audit (merge {:adapter adapter-format :operation (:operation effect)} audit)})
+
+(defn- failed [effect code]
+  {:receipt {:format bot/receipt-format
+             :effect-id (:id effect)
+             :status :failed
+             :output-digest (execution/digest {:error code})}
+   :audit {:adapter adapter-format :operation (:operation effect) :error code}})
+
+(defn execute-effect
+  "Execute one closed read-only host effect. Host functions are injectable so
+  the Governor/executor contract is testable without touching a workspace."
+  ([effect] (execute-effect effect
+                            {:stat-fn (fn [path] (.statSync (js/require "node:fs") path))
+                             :list-fn (fn [path] (.readdirSync (js/require "node:fs") path))
+                             :git-fn (fn [path]
+                                       (.execFileSync (js/require "node:child_process") "git"
+                                                      #js ["status" "--porcelain=v1" "--branch"]
+                                                      #js {:cwd path :encoding "utf8"
+                                                           :stdio #js ["ignore" "pipe" "ignore"]}))}))
+  ([effect {:keys [stat-fn list-fn git-fn]}]
+   (when-not (and (map? effect)
+                  (= "https://mithril.fund/effect/bot-action-v1" (:format effect))
+                  (string? (:id effect))
+                  (contains? read-only-effects (:operation effect)))
+     (fail! :mithril.hermes/effect-denied
+            "Hermes canary admits only workspace/read, git/status and agent/stop" {}))
+   (try
+     (case (:operation effect)
+       :workspace/read
+       (let [stat (stat-fn (:workspace effect))]
+         (when-not (.isDirectory stat)
+           (fail! :mithril.hermes/not-directory "workspace is not a directory" {}))
+         (let [entries (list-fn (:workspace effect))
+               output {:kind :directory :entry-count (count entries)}]
+           (completed effect output output)))
+
+       :git/status
+       (let [lines (->> (.split (git-fn (:workspace effect)) "\n")
+                        (remove empty?) vec)
+             output {:repository true
+                     :changed-lines (max 0 (dec (count lines)))
+                     :branch-observed (boolean (seq lines))}]
+         (completed effect output output))
+
+       :agent/stop
+       (completed effect {:stopped true} {:stopped true}))
+     (catch :default error
+       (if (:mithril/error (ex-data error))
+         (throw error)
+         (failed effect :host-read-failed))))))
