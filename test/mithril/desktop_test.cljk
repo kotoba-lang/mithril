@@ -20,6 +20,8 @@
            (get-in artifact [:desktop-ir :loop :actions])))
     (is (str/includes? plugin "from '@hermes/plugin-sdk'"))
     (is (str/includes? plugin "host.request('prompt.submit'"))
+    (is (str/includes? plugin "\"navLabel\":\"Mithril\""))
+    (is (str/includes? plugin "\"maxPolls\":60"))
     (is (str/includes? plugin "area:ROUTES_AREA"))
     (is (not (str/includes? plugin "eval(")))))
 
