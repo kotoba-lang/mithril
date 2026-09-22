@@ -78,7 +78,7 @@
                     :sources (mapv (fn [source] {:url (get source "url") :media-type (get source "mediaType")}) sources)}}))))
 
 (defn compile-text [path text library-artifacts]
-  (compile-document path (compiler/parse-json text) library-artifacts))
+  (compile-document path (compiler/parse-source text) library-artifacts))
 
 (defn prepare-tick [artifact]
   (when-not (= graph-format (:format artifact))

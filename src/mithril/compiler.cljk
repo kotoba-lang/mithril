@@ -2,15 +2,22 @@
   (:require [clojure.string :as str]
             [json-ld-api.core :as jsonld]
             [json-ld-api.to-rdf :as to-rdf]
-            [rdf-canon.core :as rdf-canon]))
+            [rdf-canon.core :as rdf-canon]
+            [mithril.form :as form]))
 
 (def context-uri "https://mithril.fund/context/v1")
 (def media-type "application/ld+json")
+(def form-media-type form/media-type)
 (def source-extensions #{"mith" "mithril"})
 
 (def context-document
   {"@context"
    {"mith" "https://mithril.fund/ns/v1#"
+    "rdf" "http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+    "rdfs" "http://www.w3.org/2000/01/rdf-schema#"
+    "owl" "http://www.w3.org/2002/07/owl#"
+    "sh" "http://www.w3.org/ns/shacl#"
+    "xsd" "http://www.w3.org/2001/XMLSchema#"
     "Program" "mith:Program"
     "Library" "mith:Library"
     "WebApplication" "mith:WebApplication"
@@ -18,6 +25,21 @@
     "SynthesizeWebPipelineApplication" "mith:SynthesizeWebPipelineApplication"
     "GraphAgentApplication" "mith:GraphAgentApplication"
     "AppAgentApplication" "mith:AppAgentApplication"
+    "Ontology" "owl:Ontology"
+    "profile" {"@id" "mith:profile" "@type" "@id" "@container" "@set"}
+    "subClassOf" {"@id" "rdfs:subClassOf" "@type" "@id"}
+    "subPropertyOf" {"@id" "rdfs:subPropertyOf" "@type" "@id"}
+    "domain" {"@id" "rdfs:domain" "@type" "@id"}
+    "range" {"@id" "rdfs:range" "@type" "@id"}
+    "equivalentClass" {"@id" "owl:equivalentClass" "@type" "@id"}
+    "inverseOf" {"@id" "owl:inverseOf" "@type" "@id"}
+    "targetClass" {"@id" "sh:targetClass" "@type" "@id"}
+    "property" {"@id" "sh:property" "@container" "@set"}
+    "propertyPath" {"@id" "sh:path" "@type" "@id"}
+    "minCount" {"@id" "sh:minCount" "@type" "xsd:integer"}
+    "maxCount" {"@id" "sh:maxCount" "@type" "xsd:integer"}
+    "valueClass" {"@id" "sh:class" "@type" "@id"}
+    "datatype" {"@id" "sh:datatype" "@type" "@id"}
     "routerIntent" "mith:routerIntent"
     "handlerIntent" "mith:handlerIntent"
     "viewIntent" "mith:viewIntent"
@@ -120,6 +142,11 @@
   #?(:cljs (js->clj (js/JSON.parse text))
      :clj (fail! :mithril/json-host-unavailable
                  "JSON parsing is provided by the kbb/CLJS compiler host")))
+
+(defn parse-source [text]
+  (if (form/source? text)
+    (form/parse text)
+    (parse-json text)))
 
 (defn- require-source! [path doc]
   (when-not (source-path? path)
@@ -346,13 +373,36 @@
                   :routes routes}}))))
 
 (defn compile-text [path text]
-  (compile-document path (parse-json text)))
+  (compile-document path (parse-source text)))
 
 (defn compile-library-text [path text]
-  (compile-library-document path (parse-json text)))
+  (compile-library-document path (parse-source text)))
 
 (defn compile-web-text [path text library-artifacts]
-  (compile-web-document path (parse-json text) library-artifacts))
+  (compile-web-document path (parse-source text) library-artifacts))
+
+(def ontology-keys #{"@context" "@id" "@type" "profile" "@graph"})
+(def ontology-profiles
+  #{"https://www.w3.org/TR/rdf11-concepts/"
+    "https://www.w3.org/TR/owl2-profiles/#OWL_2_RL"
+    "https://www.w3.org/TR/shacl/"})
+
+(defn compile-ontology-document [path doc]
+  (require-base-source! path doc "Ontology" ontology-keys)
+  (require-iri! (get doc "@id") "ontology @id")
+  (when-not (= ontology-profiles (set (get doc "profile")))
+    (fail! :mithril/invalid-ontology-profile
+           "ontology must declare the RDF 1.1, OWL 2 RL and SHACL profiles"))
+  (when-not (and (vector? (get doc "@graph")) (seq (get doc "@graph")))
+    (fail! :mithril/empty-ontology "ontology graph must contain at least one node"))
+  {:format "https://mithril.fund/artifact/ontology-v1"
+   :media-type form-media-type
+   :jsonld-media-type media-type
+   :graph-digest (graph-digest doc)
+   :rdf-dataset doc})
+
+(defn compile-ontology-text [path text]
+  (compile-ontology-document path (parse-source text)))
 
 (defn semantic-projection [artifact]
   (select-keys artifact [:format :media-type :graph-digest :transaction]))

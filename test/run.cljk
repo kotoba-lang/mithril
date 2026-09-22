@@ -1,9 +1,10 @@
 (ns test.run
   (:require [cljs.test :as t]
             [mithril.compiler-test]
+            [mithril.form-test]
             [mithril.graph-test]
             [mithril.app-test]))
 
-(let [result (t/run-tests 'mithril.compiler-test 'mithril.graph-test 'mithril.app-test)]
+(let [result (t/run-tests 'mithril.compiler-test 'mithril.form-test 'mithril.graph-test 'mithril.app-test)]
   (when (pos? (+ (:fail result) (:error result)))
     (js/process.exit 1)))

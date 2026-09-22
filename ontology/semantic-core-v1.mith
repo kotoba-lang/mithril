@@ -1,0 +1,26 @@
+(mithril/ontology
+  :id "https://mithril.fund/ontology/semantic-core-v1"
+  :profile
+  ["https://www.w3.org/TR/rdf11-concepts/"
+   "https://www.w3.org/TR/owl2-profiles/#OWL_2_RL"
+   "https://www.w3.org/TR/shacl/"]
+  :graph
+  [(owl/class
+     :id "https://mithril.fund/id/class/SemanticState")
+   (owl/class
+     :id "https://mithril.fund/id/class/SemanticAction")
+   (owl/class
+     :id "https://mithril.fund/id/class/AssertAction"
+     :rdfs/sub-class-of "https://mithril.fund/id/class/SemanticAction")
+   (owl/object-property
+     :id "https://mithril.fund/id/property/inputState"
+     :rdfs/domain "https://mithril.fund/id/class/SemanticAction"
+     :rdfs/range "https://mithril.fund/id/class/SemanticState")
+   (shacl/node-shape
+     :id "https://mithril.fund/id/shape/SemanticAction"
+     :sh/target-class "https://mithril.fund/id/class/SemanticAction"
+     :sh/property
+     [(shacl/property-shape
+        :sh/path "https://mithril.fund/id/property/inputState"
+        :sh/min-count 1
+        :sh/max-count 1)])])

@@ -5,6 +5,7 @@
 (defn- usage! []
   (println "usage:")
   (println "  mithril compile <program.mith|program.mithril>")
+  (println "  mithril compile-ontology <ontology.mith|ontology.mithril>")
   (println "  mithril compile-library <library.mith|library.mithril>")
   (println "  mithril compile-web <app.mith|app.mithril> <library.mith>...")
   (println "  mithril request <app.mith|app.mithril> <library.mith> <METHOD> <PATH>")
@@ -41,6 +42,11 @@
       "compile"
       (if (and path (empty? args))
         (print-json (compiler/compile-text path (read-text path)))
+        (usage!))
+
+      "compile-ontology"
+      (if (and path (empty? args))
+        (print-json (compiler/compile-ontology-text path (read-text path)))
         (usage!))
 
       "compile-library"

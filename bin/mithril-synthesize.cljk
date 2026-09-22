@@ -93,7 +93,7 @@
     (println "  mithril-synthesize request <app.mith> <library.mith> <METHOD> <PATH>")
     (.exit js/process 2))
   (try
-    (let [app-doc (compiler/parse-json (read-text app-path))
+    (let [app-doc (compiler/parse-source (read-text app-path))
           library (compiler/compile-library-text library-path (read-text library-path))
           prepared (synthesis/prepare-request app-path app-doc [library])
           result (model-forward (:request prepared))
