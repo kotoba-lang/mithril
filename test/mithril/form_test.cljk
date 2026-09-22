@@ -1,0 +1,43 @@
+(ns mithril.form-test
+  (:require [cljs.test :refer [deftest is testing]]
+            [mithril.app :as app]
+            [mithril.compiler :as compiler]))
+
+(defn read-text [path] (.readFileSync (js/require "fs") path "utf8"))
+(defn error-code [f] (try (f) nil (catch :default e (:mithril/error (ex-data e)))))
+
+(deftest kotoba-form-and-jsonld-have-one-semantic-identity
+  (let [library (compiler/compile-library-text
+                  "lib/app/agent-loop-v1.mith"
+                  (read-text "lib/app/agent-loop-v1.mith"))
+        json-artifact (app/compile-text
+                        "examples/mithril-app-agent.mith"
+                        (read-text "examples/mithril-app-agent.mith") [library])
+        form-artifact (app/compile-text
+                        "examples/mithril-app-agent-form.mith"
+                        (read-text "examples/mithril-app-agent-form.mith") [library])]
+    (is (= json-artifact form-artifact))
+    (is (= "sha256:1c86338ecd2ef591cc62bb9d6d1dae850fcdbee54ad40b16faba4207dd77d66a"
+           (:graph-digest form-artifact)))))
+
+(deftest owl-rdf-shacl-form-compiles-to-jsonld-rdf-dataset
+  (let [artifact (compiler/compile-ontology-text
+                   "ontology/semantic-core-v1.mith"
+                   (read-text "ontology/semantic-core-v1.mith"))]
+    (is (= "https://mithril.fund/artifact/ontology-v1" (:format artifact)))
+    (is (= "application/vnd.mithril.form" (:media-type artifact)))
+    (is (= "application/ld+json" (:jsonld-media-type artifact)))
+    (is (= 5 (count (get-in artifact [:rdf-dataset "@graph"]))))
+    (is (re-matches #"sha256:[0-9a-f]{64}" (:graph-digest artifact)))))
+
+(deftest form-reader-is-inert-and-fail-closed
+  (testing "a second form is observable"
+    (is (= :mithril.form/form-count
+           (error-code #(compiler/parse-source
+                          "(mithril/program :id \"https://mithril.fund/id/a\")\n(mithril/program :id \"https://mithril.fund/id/b\")")))))
+  (testing "unknown tags cannot call host code"
+    (is (= :mithril.form/unknown-tag
+           (error-code #(compiler/parse-source "(js/eval :source \"alert(1)\")")))))
+  (testing "duplicate fields are rejected"
+    (is (= :mithril.form/duplicate-field
+           (error-code #(compiler/parse-source "(mithril/app :name \"a\" :name \"b\")"))))))

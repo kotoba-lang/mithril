@@ -90,7 +90,7 @@
                   :effects [:render/static-document :deploy/self-contained-url]}}))))
 
 (defn compile-text [path text library-artifacts]
-  (compile-document path (compiler/parse-json text) library-artifacts))
+  (compile-document path (compiler/parse-source text) library-artifacts))
 
 (defn prepare-run [artifact]
   (when-not (= app-format (:format artifact))

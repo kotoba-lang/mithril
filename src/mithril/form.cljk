@@ -1,0 +1,119 @@
+(ns mithril.form
+  "Fail-closed Kotoba-shaped S-expression surface for Mithril.
+
+  Forms are inert data. They lower to the same pinned JSON-LD document used by
+  the compatibility reader; no form is evaluated and no host namespace is
+  resolved."
+  (:require [cljs.reader :as reader]
+            [clojure.string :as str]))
+
+(def media-type "application/vnd.mithril.form")
+
+(def ^:private top-level-tags
+  {'mithril/program "Program"
+   'mithril/library "Library"
+   'mithril/web-application "WebApplication"
+   'mithril/synthesize-web-application "SynthesizeWebApplication"
+   'mithril/synthesize-web-pipeline-application "SynthesizeWebPipelineApplication"
+   'mithril/graph-agent "GraphAgentApplication"
+   'mithril/app-agent "AppAgentApplication"
+   'mithril/ontology "Ontology"})
+
+(def ^:private nested-tags
+  #{'mithril/choice 'mithril/export 'mithril/import 'mithril/route
+    'mithril/source 'mithril/loop 'mithril/app 'rdf/node})
+
+(def ^:private typed-node-tags
+  {'owl/class "owl:Class"
+   'owl/object-property "owl:ObjectProperty"
+   'owl/datatype-property "owl:DatatypeProperty"
+   'shacl/node-shape "sh:NodeShape"
+   'shacl/property-shape "sh:PropertyShape"})
+
+(def ^:private key-names
+  {:id "@id"
+   :type "@type"
+   :graph "@graph"
+   :data-shape "dataShape"
+   :content-type "contentType"
+   :confidence-floor "confidenceFloor"
+   :max-steps "maxSteps"
+   :max-sources "maxSources"
+   :max-bytes-per-source "maxBytesPerSource"
+   :rdf/type "@type"
+   :rdfs/sub-class-of "subClassOf"
+   :rdfs/sub-property-of "subPropertyOf"
+   :rdfs/domain "domain"
+   :rdfs/range "range"
+   :owl/equivalent-class "equivalentClass"
+   :owl/inverse-of "inverseOf"
+   :sh/target-class "targetClass"
+   :sh/property "property"
+   :sh/path "propertyPath"
+   :sh/min-count "minCount"
+   :sh/max-count "maxCount"
+   :sh/class "valueClass"
+   :sh/datatype "datatype"})
+
+(defn- fail! [code detail]
+  (throw (ex-info detail {:mithril/error code :detail detail})))
+
+(defn source? [text]
+  (str/starts-with? (str/triml (or text "")) "("))
+
+(defn- key-name [k]
+  (when-not (keyword? k)
+    (fail! :mithril.form/non-keyword-field "Mithril form fields must be keywords"))
+  (or (get key-names k)
+      (when-not (namespace k) (name k))
+      (fail! :mithril.form/unknown-field (str "unknown namespaced field: " k))))
+
+(declare lower-form)
+
+(defn- lower-value [value]
+  (cond
+    (list? value) (lower-form value)
+    (vector? value) (mapv lower-value value)
+    (or (string? value) (integer? value) (boolean? value) (nil? value)) value
+    :else (fail! :mithril.form/unsupported-value
+                 (str "unsupported Mithril form value: " (pr-str value)))))
+
+(defn- fields [xs]
+  (when (odd? (count xs))
+    (fail! :mithril.form/field-arity "Mithril forms require keyword/value pairs"))
+  (let [pairs (partition 2 xs)
+        names (map (comp key-name first) pairs)]
+    (when-not (= (count names) (count (set names)))
+      (fail! :mithril.form/duplicate-field "Mithril form fields must be unique"))
+    (into {} (map (fn [[k v]] [(key-name k) (lower-value v)]) pairs))))
+
+(defn lower-form [form]
+  (when-not (and (list? form) (symbol? (first form)))
+    (fail! :mithril.form/invalid-form "Mithril source must be one tagged S-expression"))
+  (let [tag (first form)
+        body (fields (rest form))]
+    (cond
+      (contains? top-level-tags tag)
+      (assoc body "@context" "https://mithril.fund/context/v1"
+                  "@type" (get top-level-tags tag))
+
+      (contains? nested-tags tag) body
+
+      (contains? typed-node-tags tag)
+      (assoc body "@type" (get typed-node-tags tag))
+
+      :else (fail! :mithril.form/unknown-tag (str "unknown Mithril form tag: " tag)))))
+
+(defn parse
+  "Read exactly one inert Mithril form and lower it to the JSON-LD document
+  model. Wrapping in a vector makes trailing second forms observable."
+  [text]
+  (try
+    (let [forms (reader/read-string (str "[" text "\n]"))]
+      (when-not (= 1 (count forms))
+        (fail! :mithril.form/form-count "Mithril source must contain exactly one form"))
+      (lower-form (first forms)))
+    (catch :default error
+      (if (:mithril/error (ex-data error))
+        (throw error)
+        (fail! :mithril.form/read-error (or (.-message error) "invalid Mithril form"))))))

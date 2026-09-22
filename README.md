@@ -4,9 +4,12 @@ The name is a metaphor: mithril is the imagined metal, used here for a source
 surface whose graph semantics stay inspectable through compilation. It does
 not name Tolkien's work or imply compatibility with another Mithril project.
 
-Mithril is an ontology-based programming language whose implementation files
-are JSON-LD. Both `.mith` and `.mithril` have exactly the same syntax and
-semantics: JSON-LD 1.1 with media type `application/ld+json`.
+Mithril is an ontology-based programming language with a canonical,
+Kotoba-shaped typed S-expression surface. Both `.mith` and `.mithril` are
+aliases. New source uses `application/vnd.mithril.form`; the compiler also
+accepts the existing JSON-LD 1.1 spelling (`application/ld+json`) without a
+migration flag. Both lower to one pinned JSON-LD projection and therefore one
+canonical RDF Dataset identity.
 
 Mithril is not a prose-to-code generator. A source document names a goal,
 ontology identity and finite typed choices. The compiler expands it to an RDF
@@ -15,8 +18,9 @@ and emits an OaK transaction. OaK derives and revalidates Execution IR; Kotoba
 and Amu provide the typed, capability-bounded runtime and Wasm compiler.
 
 ```text
-program.mith / program.mithril (JSON-LD)
-  -> pinned-context expansion
+program.mith / program.mithril
+  -> inert Mithril Form reader OR compatible JSON-LD reader
+  -> one pinned JSON-LD projection
   -> canonical RDF Dataset digest
   -> Mithril vocabulary and shape admission
   -> :oak.transaction/v1
@@ -24,9 +28,41 @@ program.mith / program.mithril (JSON-LD)
   -> Kotoba / Amu / Wasm
 ```
 
-JSON-LD is the source notation, not the query engine, reasoner, SHACL engine or
-runtime. Those responsibilities remain explicit: `org-w3-json-ld-api`,
+JSON-LD is the RDF interchange projection, not the query engine, reasoner,
+SHACL engine or runtime. Those responsibilities remain explicit: `org-w3-json-ld-api`,
 `org-w3-rdf-canon`, OaK's OWL/SPARQL/SHACL adapters, and Kotoba/Amu.
+
+## Semantic core and execution core
+
+Mithril does not make RDF the program-execution IR and does not put OWL inside
+Osaho. The boundaries are:
+
+```text
+Mithril Form                    compact typed semantic/action syntax
+  -> JSON-LD / RDF Dataset      facts, OWL 2 RL and SHACL interoperability
+  -> typed semantic delta       assert / retract / query / infer / compile / stop
+  -> deterministic executor     validates and applies the delta
+  -> Kotoba HIR -> Osaho        checked executable semantics and DefCID
+  -> Amu -> backend             weaving, lowering and verified artifacts
+  -> IPLD / CID                 shared identity and physical value plane
+```
+
+Osaho remains the canonical checked executable KIR and definition-identity
+contract. Amu remains the compiler/orchestrator. Mithril owns declarative world
+semantics and their RDF projection. The two meet only at typed compile/call
+actions and content identities.
+
+The agent-facing contract is asymmetric by design: prefill is a bounded
+semantic projection; decode is a smaller typed action/delta. A model never
+rewrites the complete graph and never needs to emit prose. A Jev-like policy
+may eventually select the operation and arguments directly; the same action
+schema remains valid without a text decoder.
+
+[`ontology/semantic-core-v1.mith`](ontology/semantic-core-v1.mith) demonstrates
+native RDF, OWL 2 RL and SHACL forms. The compiler lowers it to JSON-LD and
+canonicalizes the resulting RDF Dataset. [`examples/mithril-app-agent-form.mith`](examples/mithril-app-agent-form.mith)
+is semantically identical to the compatibility JSON-LD app source and compiles
+to the same graph digest and App IR.
 
 ## Published Mithril code and libraries
 
@@ -175,7 +211,13 @@ kbb --backend sci --classpath src bin/mithril-run.cljk \
 
 ## Source contract
 
-- `.mith` and `.mithril` are aliases. The suffix never enters semantic identity.
+- `.mith` and `.mithril` are aliases. The suffix and surface syntax never enter
+  semantic identity.
+- A source beginning with `(` is read as one inert Mithril Form. No form is
+  evaluated; unknown tags, fields, duplicate fields and trailing forms fail
+  closed.
+- Existing JSON-LD documents remain accepted. JSON-LD and Form sources that
+  denote the same graph compile to the same canonical RDF Dataset digest.
 - Remote contexts are never fetched. The v1 context is pinned by the compiler.
 - Semantic identity is the SHA-256 digest of the canonical RDF Dataset, not the
   original JSON byte order or compacted spelling.
@@ -189,6 +231,7 @@ kbb --backend sci --classpath src bin/mithril-run.cljk \
 ```sh
 CP=src:../org-w3-json-ld-api/src:../org-w3-rdf-canon/src:../org-w3-nquads/src:../io-multiformats/src:../text/src:../org-nist-sha2/src
 kbb --backend sci --classpath "$CP" bin/mithril.cljk compile examples/tender.mith
+kbb --backend sci --classpath "$CP" bin/mithril.cljk compile-ontology ontology/semantic-core-v1.mith
 kbb --backend sci --classpath "$CP" bin/mithril.cljk compile-library lib/web/v1.mith
 kbb --backend sci --classpath "$CP" bin/mithril.cljk compile-web examples/hello-web.mith lib/web/v1.mith
 kbb --backend sci --classpath "$CP" bin/mithril.cljk request examples/hello-web.mith lib/web/v1.mith GET /hello
