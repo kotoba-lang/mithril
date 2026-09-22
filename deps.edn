@@ -19,4 +19,7 @@
          :git/sha "2392927cd595ab2eb4264e09e989f2a396962a7d"}
         io.github.kotoba-lang/sparql
         {:git/url "https://github.com/kotoba-lang/sparql.git"
-         :git/sha "8809be30fa48eb9a7e11c9a9cb054ea60740001e"}}}
+         :git/sha "8809be30fa48eb9a7e11c9a9cb054ea60740001e"}
+        io.github.kotoba-lang/org-nist-sha2
+        {:git/url "https://github.com/kotoba-lang/org-nist-sha2.git"
+         :git/sha "ad98470c672d40f207992890dac6bf0473b52199"}}}
