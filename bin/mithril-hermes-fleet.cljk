@@ -87,7 +87,10 @@
       "profileName" profile-name "profileRoot" root
       "configDigest" (file-digest (.join path root "config.yaml"))
       "soulDigest" (file-digest (.join path root "SOUL.md"))
-      "jobsDigest" (file-digest jobs-file)
+      ;; The scheduler rewrites operational fields such as last_run_at and
+      ;; failure_streak after every tick.  Identity is the executable
+      ;; declaration, not that mutable telemetry projection.
+      "jobsDigest" (when jobs-doc (execution/digest jobs))
       "jobs" jobs})))
 
 (defn- build-fleet [profiles-root]
