@@ -1,4 +1,4 @@
-{:paths ["src" "test" "resources" "lib" "examples"
+{:paths ["src" "test" "resources" "lib" "examples" "ontology"
          "../org-w3-json-ld-api/src"
          "../org-w3-rdf-canon/src"
          "../org-w3-nquads/src"
