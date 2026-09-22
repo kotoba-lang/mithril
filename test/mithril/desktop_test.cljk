@@ -34,6 +34,8 @@
     (is (str/includes? plugin "ctx.rest('/kanban/tasks'"))
     (is (str/includes? plugin "ctx.rest('/kanban/dispatch?max='"))
     (is (str/includes? plugin "typed-action-only"))
+    (is (str/includes? plugin "JSON.stringify(IR.actor.protocol)"))
+    (is (str/includes? plugin "JSON.stringify(IR.actor.governor)"))
     (is (str/includes? plugin "crypto.subtle.digest('SHA-256'"))
     (is (str/includes? plugin "max_retries:IR.bot.maxRetries"))
     (is (str/includes? plugin "active-job budget is exhausted"))

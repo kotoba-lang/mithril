@@ -191,7 +191,7 @@
      "import {ROUTES_AREA,SIDEBAR_NAV_AREA,Button,Input,Textarea,Badge,StatusDot,ScrollArea,host} from '@hermes/plugin-sdk';\n"
      "const IR=" data ";\n"
      "const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));\n"
-     "const semanticRequest=(kind,text,workspace)=>'('+kind+' :protocol '+IR.actor.protocol+' :workspace '+JSON.stringify(workspace)+' :input '+JSON.stringify(text)+' :governor '+IR.actor.governor+' :decision-output typed-action-only :generated-text false :action-candidates '+JSON.stringify(IR.bot.actions)+' :effect-catalog '+JSON.stringify(IR.bot.effects)+' :output mithril/bot-effect-receipt)';\n"
+     "const semanticRequest=(kind,text,workspace)=>'('+kind+' :protocol '+JSON.stringify(IR.actor.protocol)+' :workspace '+JSON.stringify(workspace)+' :input '+JSON.stringify(text)+' :governor '+JSON.stringify(IR.actor.governor)+' :decision-output typed-action-only :generated-text false :action-candidates '+JSON.stringify(IR.bot.actions)+' :effect-catalog '+JSON.stringify(IR.bot.effects)+' :output mithril/bot-effect-receipt)';\n"
      "const absolutePath=value=>value.startsWith('/')||/^[A-Za-z]:[\\\\/]/.test(value);\n"
      "const errorText=error=>String(error?.message||error);\n"
      "async function stableKey(value){const bytes=new TextEncoder().encode(value);const hash=await crypto.subtle.digest('SHA-256',bytes);return Array.from(new Uint8Array(hash)).map(x=>x.toString(16).padStart(2,'0')).join('');}\n"

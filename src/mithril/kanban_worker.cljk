@@ -1,0 +1,106 @@
+(ns mithril.kanban-worker
+  "Strict adapter between Hermes Kanban cards and one Mithril bot tick.
+
+  A card is one semantic operation.  A successful non-terminal tick produces
+  one child card that carries the next expected step.  The durable Mithril
+  checkpoint remains the execution authority; Kanban is the work queue and
+  append-only handoff ledger."
+  (:require [cljs.reader :as reader]
+            [clojure.string :as str]
+            [mithril.bot :as bot]
+            [mithril.execution :as execution]))
+
+(def operation 'mithril/kanban-task)
+(def protocol "https://mithril.fund/id/protocol/hermes-coding-agent-v1")
+(def governor "https://mithril.fund/id/governor/user-commit-v1")
+(def required-keys
+  #{:protocol :workspace :input :governor :decision-output :generated-text
+    :action-candidates :effect-catalog :output})
+(def optional-keys #{:expected-step :root-id})
+
+(defn- fail! [code message data]
+  (throw (ex-info message (assoc data :mithril/error code))))
+
+(defn- absolute-path? [value]
+  (and (string? value)
+       (or (str/starts-with? value "/")
+           (boolean (re-matches #"[A-Za-z]:[\\\\/].+" value)))))
+
+(defn parse-card-body [body]
+  (let [form (try (reader/read-string body)
+                  (catch :default error
+                    (fail! :mithril.kanban/invalid-body
+                           "card body is not one Mithril form" {:cause (.-message error)})))]
+    (when-not (and (seq? form) (= operation (first form))
+                   (even? (count (rest form))))
+      (fail! :mithril.kanban/invalid-body
+             "card body must be one mithril/kanban-task property form" {}))
+    (let [properties (apply hash-map (rest form))
+          keys* (set (keys properties))
+          actions (mapv :id bot/action-catalog)
+          effects (mapv (comp #(str (namespace %) "/" (name %)) :effect)
+                        bot/action-catalog)]
+      (when-not (and (= required-keys (set (filter required-keys keys*)))
+                     (empty? (remove (into required-keys optional-keys) keys*)))
+        (fail! :mithril.kanban/invalid-body
+               "card has an unknown or missing semantic property" {:keys keys*}))
+      (when-not (= protocol (str (:protocol properties)))
+        (fail! :mithril.kanban/invalid-protocol "card protocol is not admitted" {}))
+      (when-not (= governor (str (:governor properties)))
+        (fail! :mithril.kanban/invalid-governor "card governor is not admitted" {}))
+      (when-not (and (= 'typed-action-only (:decision-output properties))
+                     (false? (:generated-text properties))
+                     (= 'mithril/bot-effect-receipt (:output properties)))
+        (fail! :mithril.kanban/generated-text-forbidden
+               "card must request typed actions and bot effect receipts only" {}))
+      (when-not (and (= actions (:action-candidates properties))
+                     (= effects (:effect-catalog properties)))
+        (fail! :mithril.kanban/catalog-mismatch
+               "card action/effect catalogs do not match the runtime" {}))
+      (when-not (absolute-path? (:workspace properties))
+        (fail! :mithril.kanban/invalid-workspace "card workspace must be absolute" {}))
+      (when-not (and (string? (:input properties))
+                     (<= 1 (count (:input properties)) 4096))
+        (fail! :mithril.kanban/invalid-goal "card input must contain 1..4096 characters" {}))
+      (when-let [step (:expected-step properties)]
+        (when-not (and (integer? step) (not (neg? step)))
+          (fail! :mithril.kanban/invalid-step "expected-step must be non-negative" {})))
+      properties)))
+
+(defn semantic-task [properties tool-profile-digest]
+  (let [identity-input (select-keys properties
+                                    [:protocol :workspace :input :governor
+                                     :action-candidates :effect-catalog])]
+    {:id (str "mithril:" (subs (execution/digest identity-input) 7))
+     :workspace (:workspace properties)
+     :goal (:input properties)
+     :tool-profile-digest tool-profile-digest}))
+
+(defn state-key [properties]
+  (subs (execution/digest
+         (select-keys properties [:protocol :workspace :input :governor])) 7))
+
+(def property-order
+  [:protocol :workspace :input :governor :decision-output :generated-text
+   :action-candidates :effect-catalog :output :expected-step :root-id])
+
+(defn continuation-body [properties next-step root-id]
+  (let [next-properties (assoc properties :expected-step next-step :root-id root-id)]
+    (pr-str (apply list operation
+                   (mapcat (fn [key] (when (contains? next-properties key)
+                                       [key (get next-properties key)]))
+                           property-order)))))
+
+(defn reconcile-step
+  "Classify delivery before executing.  :execute means this card owns the
+  current checkpoint step; :handoff means its effect was checkpointed before
+  the Kanban handoff committed; :refuse prevents skipped or stale cards."
+  [expected-step state]
+  (let [actual (if state (:step state) 0)
+        expected (or expected-step 0)]
+    (cond
+      (= actual expected) :execute
+      (= actual (inc expected)) :handoff
+      :else (fail! :mithril.kanban/step-mismatch
+                   "card expected-step does not match the durable checkpoint"
+                   {:expected expected :actual actual}))))
