@@ -1,0 +1,38 @@
+(ns mithril.hermes-cli-integration-test
+  (:require [cljs.test :refer [deftest is]]
+            [mithril.bot :as bot]))
+
+(def fs (js/require "node:fs"))
+(def cp (js/require "node:child_process"))
+
+(deftest terminal-redelivery-crosses-the-real-cli-boundary
+  (let [dir (.mkdtempSync fs "/tmp/mithril-cli-test-")
+        task {:id "cli-task" :workspace dir :goal "Observe one terminal delivery"}
+        artifact (bot/compile-text "examples/governed-coding-bot.mith"
+                                   (.readFileSync fs "examples/governed-coding-bot.mith" "utf8"))
+        state (assoc (bot/start-run artifact task "cli-test" 1000) :status :completed)
+        task-path (str dir "/task.json")
+        state-path (str dir "/state.edn")]
+    (try
+      (.writeFileSync fs task-path (.stringify js/JSON (clj->js task)) "utf8")
+      (.writeFileSync fs state-path (pr-str state) "utf8")
+      (let [before (.readFileSync fs state-path "utf8")
+            output (.execFileSync
+                    cp "kbb"
+                    #js ["--backend" "sci" "bin/mithril-hermes.cljk" "tick"
+                         "examples/governed-coding-bot.mith" task-path state-path
+                         "cli-test" "workspace/read,git/status,agent/stop" "execute"]
+                    #js {:cwd (.cwd js/process) :encoding "utf8"
+                         :stdio #js ["ignore" "pipe" "pipe"]})
+            result (js->clj (js/JSON.parse output) :keywordize-keys true)
+            audit-lines (-> (.readFileSync fs (str state-path ".audit.jsonl") "utf8")
+                            (.trim)
+                            (.split "\n"))]
+        (is (= "idempotent-terminal" (:status result)))
+        (is (= "completed" (:run-status result)))
+        (is (= before (.readFileSync fs state-path "utf8"))
+            "terminal delivery must not rewrite the durable checkpoint")
+        (is (= 1 (alength audit-lines))
+            "the CLI must record exactly one delivery receipt"))
+      (finally
+        (.rmSync fs dir #js {:recursive true :force true})))))
