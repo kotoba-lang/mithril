@@ -23,7 +23,7 @@
 (def ^:private nested-tags
   #{'mithril/choice 'mithril/export 'mithril/import 'mithril/route
     'mithril/source 'mithril/loop 'mithril/app 'mithril/page
-    'mithril/agent-loop 'rdf/node})
+    'mithril/agent-loop 'mithril/actor 'rdf/node})
 
 (def ^:private typed-node-tags
   {'owl/class "owl:Class"
@@ -46,6 +46,9 @@
    :session-title "sessionTitle"
    :max-polls "maxPolls"
    :poll-interval-ms "pollIntervalMs"
+   :receipt-policy "receiptPolicy"
+   :workspace-policy "workspacePolicy"
+   :max-goal-chars "maxGoalChars"
    :rdf/type "@type"
    :rdfs/sub-class-of "subClassOf"
    :rdfs/sub-property-of "subPropertyOf"

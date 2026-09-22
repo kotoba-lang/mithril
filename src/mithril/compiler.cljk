@@ -64,6 +64,11 @@
     "maxSteps" {"@id" "mith:maxSteps" "@type" "http://www.w3.org/2001/XMLSchema#integer"}
     "maxPolls" {"@id" "mith:maxPolls" "@type" "http://www.w3.org/2001/XMLSchema#integer"}
     "pollIntervalMs" {"@id" "mith:pollIntervalMs" "@type" "http://www.w3.org/2001/XMLSchema#integer"}
+    "actor" "mith:actor"
+    "protocol" {"@id" "mith:protocol" "@type" "@id"}
+    "receiptPolicy" {"@id" "mith:receiptPolicy" "@type" "@id"}
+    "workspacePolicy" {"@id" "mith:workspacePolicy" "@type" "@id"}
+    "maxGoalChars" {"@id" "mith:maxGoalChars" "@type" "http://www.w3.org/2001/XMLSchema#integer"}
     "page" "mith:page"
     "actions" {"@id" "mith:action" "@type" "@id" "@container" "@list"}
     "navLabel" "mith:navLabel"

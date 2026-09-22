@@ -8,15 +8,26 @@
 
 (def artifact-format "https://mithril.fund/artifact/desktop-application-v1")
 (def goal "https://mithril.fund/id/goal/hermes-agent-loop")
-(def source-keys #{"@context" "@id" "@type" "goal" "page" "loop"})
+(def source-keys #{"@context" "@id" "@type" "goal" "page" "loop" "actor"})
 (def page-keys #{"name" "description" "headline" "summary" "path" "navLabel" "codicon"})
 (def loop-keys #{"maxSteps" "maxPolls" "pollIntervalMs" "sessionTitle" "actions"})
+(def actor-keys #{"protocol" "governor" "receiptPolicy" "workspacePolicy" "maxGoalChars"})
 (def required-actions
-  ["https://mithril.fund/id/action/session-create"
+  ["https://mithril.fund/id/action/profiles-list"
+   "https://mithril.fund/id/action/session-list"
+   "https://mithril.fund/id/action/session-create"
+   "https://mithril.fund/id/action/session-resume"
    "https://mithril.fund/id/action/prompt-submit"
    "https://mithril.fund/id/action/session-status"
    "https://mithril.fund/id/action/session-history"
+   "https://mithril.fund/id/action/session-interrupt"
    "https://mithril.fund/id/action/stop"])
+
+(def actor-contract
+  {"protocol" "https://mithril.fund/id/protocol/hermes-coding-agent-v1"
+   "governor" "https://mithril.fund/id/governor/user-commit-v1"
+   "receiptPolicy" "https://mithril.fund/id/receipt/append-only-v1"
+   "workspacePolicy" "https://mithril.fund/id/workspace/user-selected-local-v1"})
 
 (defn- fail! [code detail]
   (throw (ex-info detail {:mithril/error code :detail detail})))
@@ -37,7 +48,7 @@
     (fail! :mithril/unknown-source-key "desktop source has an unknown or missing key"))
   (when-not (= goal (get doc "goal"))
     (fail! :mithril/unknown-goal "desktop goal is outside the closed catalog"))
-  (let [page (get doc "page") loop-spec (get doc "loop")]
+  (let [page (get doc "page") loop-spec (get doc "loop") actor (get doc "actor")]
     (when-not (= page-keys (set (keys page)))
       (fail! :mithril.desktop/invalid-page "desktop page has an unknown or missing key"))
     (doseq [[field ceiling] [["name" 80] ["description" 240] ["headline" 120]
@@ -49,14 +60,21 @@
       (fail! :mithril.desktop/invalid-loop "desktop loop has an unknown or missing key"))
     (when-not (= required-actions (get loop-spec "actions"))
       (fail! :mithril.desktop/invalid-actions "desktop v1 requires the closed five-action state machine"))
-    (when-not (= 5 (get loop-spec "maxSteps"))
-      (fail! :mithril.desktop/invalid-budget "desktop v1 requires exactly five semantic steps"))
+    (when-not (= 9 (get loop-spec "maxSteps"))
+      (fail! :mithril.desktop/invalid-budget "desktop v1 requires exactly nine admitted actions"))
     (let [max-polls (get loop-spec "maxPolls") poll-ms (get loop-spec "pollIntervalMs")]
       (when-not (and (integer? max-polls) (<= 1 max-polls 300))
         (fail! :mithril.desktop/invalid-budget "maxPolls must be 1 through 300"))
       (when-not (and (integer? poll-ms) (<= 250 poll-ms 10000))
         (fail! :mithril.desktop/invalid-budget "pollIntervalMs must be 250 through 10000")))
     (bounded-text! (get loop-spec "sessionTitle") "sessionTitle" 80)
+    (when-not (= actor-keys (set (keys actor)))
+      (fail! :mithril.desktop/invalid-actor "desktop actor has an unknown or missing key"))
+    (doseq [[field expected] actor-contract]
+      (when-not (= expected (get actor field))
+        (fail! :mithril.desktop/invalid-actor (str field " is outside the closed actor catalog"))))
+    (when-not (= 4096 (get actor "maxGoalChars"))
+      (fail! :mithril.desktop/invalid-actor "desktop v1 maxGoalChars must be 4096"))
     {:format artifact-format
      :media-type compiler/media-type
      :graph-digest (compiler/graph-digest doc)
@@ -66,13 +84,21 @@
                          :headline (get page "headline") :summary (get page "summary")
                          :path (get page "path") :nav-label (get page "navLabel")
                          :codicon (get page "codicon")}
-                  :loop {:max-steps 5 :max-polls (get loop-spec "maxPolls")
+                  :loop {:max-steps 9 :max-polls (get loop-spec "maxPolls")
                          :poll-interval-ms (get loop-spec "pollIntervalMs")
                          :session-title (get loop-spec "sessionTitle")
-                         :actions [:session/create :prompt/submit :session/status
-                                   :session/history :stop]}
-                  :capabilities [:hermes/session-create :hermes/prompt-submit
-                                 :hermes/session-read :plugin/storage]}}))
+                         :actions [:profiles/list :session/list :session/create
+                                   :session/resume :prompt/submit :session/status
+                                   :session/history :session/interrupt :stop]}
+                  :actor {:protocol (get actor "protocol")
+                          :governor (get actor "governor")
+                          :receipt-policy (get actor "receiptPolicy")
+                          :workspace-policy (get actor "workspacePolicy")
+                          :max-goal-chars 4096}
+                  :capabilities [:hermes/profile-read :hermes/session-create
+                                 :hermes/session-resume :hermes/session-read
+                                 :hermes/session-interrupt :hermes/prompt-submit
+                                 :plugin/storage]}}))
 
 (defn compile-text [path text]
   (compile-document path (compiler/parse-source text)))
@@ -90,6 +116,7 @@
   (let [ir (:desktop-ir artifact)
         page (:page ir)
         loop-spec (:loop ir)
+        actor (:actor ir)
         data (json {"version" "mithril.desktop/v1"
                     "graphDigest" (:graph-digest artifact)
                     "page" {"name" (:name page) "description" (:description page)
@@ -99,21 +126,42 @@
                     "loop" {"maxSteps" (:max-steps loop-spec)
                             "maxPolls" (:max-polls loop-spec)
                             "pollIntervalMs" (:poll-interval-ms loop-spec)
-                            "sessionTitle" (:session-title loop-spec)}})]
+                            "sessionTitle" (:session-title loop-spec)}
+                    "actor" {"protocol" (:protocol actor)
+                             "governor" (:governor actor)
+                             "receiptPolicy" (:receipt-policy actor)
+                             "workspacePolicy" (:workspace-policy actor)
+                             "maxGoalChars" (:max-goal-chars actor)}})]
     (str
      "// Generated by mithril.desktop/v1. Do not edit.\n"
-     "import React,{useState} from 'react';\n"
+     "import React,{useEffect,useState} from 'react';\n"
      "import {jsx,jsxs} from 'react/jsx-runtime';\n"
-     "import {ROUTES_AREA,SIDEBAR_NAV_AREA,Button,Textarea,Badge,StatusDot,ScrollArea,host} from '@hermes/plugin-sdk';\n"
+     "import {ROUTES_AREA,SIDEBAR_NAV_AREA,Button,Input,Textarea,Badge,StatusDot,ScrollArea,host} from '@hermes/plugin-sdk';\n"
      "const IR=" data ";\n"
      "const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));\n"
-     "const semanticPrompt=goal=>'(mithril/agent-request :protocol https://mithril.fund/id/protocol/hermes-agent-v1 :goal '+JSON.stringify(goal)+' :output mithril/agent-receipt)';\n"
-     "async function execute(goal,setState){\n"
-     " const receipts=[]; const record=(action,status,detail)=>{const r={step:receipts.length+1,action,status,detail};receipts.push(r);setState({phase:status,receipts:[...receipts]});};\n"
-     " if(!goal.trim()||goal.length>4096)throw new Error('Goal must be 1 through 4096 characters');\n"
-     " record('session/create','running',null);const created=await host.request('session.create',{title:IR.loop.sessionTitle,source:'mithril-desktop',hidden:false});const sid=created.session_id;record('session/create','executed',{session_id:sid});\n"
-     " record('prompt/submit','running',null);await host.request('prompt.submit',{session_id:sid,text:semanticPrompt(goal),surface:'mithril-desktop'});record('prompt/submit','executed',null);\n"
-     " for(let poll=1;poll<=IR.loop.maxPolls;poll++){const status=await host.request('session.status',{session_id:sid});record('session/status','executed',{poll,output:status.output});const history=await host.request('session.history',{session_id:sid});const answer=[...(history.messages||[])].reverse().find(m=>m.role==='assistant'&&m.text);record('session/history','executed',{poll,count:history.count});if(answer){record('stop','executed',{reason:'assistant-complete',session_id:sid,answer:answer.text});return receipts;}await sleep(IR.loop.pollIntervalMs);}\n"
-     " record('stop','refused',{reason:'poll-budget-exhausted',session_id:sid});return receipts;}\n"
-     "function App(){const [goal,setGoal]=useState('Implement and verify the next bounded Mithril application change.');const [state,setState]=useState({phase:'idle',receipts:[]});const running=state.phase==='running';const run=async()=>{setState({phase:'running',receipts:[]});try{const receipts=await execute(goal,setState);setState({phase:receipts.at(-1)?.status||'executed',receipts});}catch(error){setState(s=>({phase:'refused',receipts:[...s.receipts,{step:s.receipts.length+1,action:'stop',status:'refused',detail:{reason:String(error?.message||error)}}]}));}};return jsxs('main',{style:{padding:'24px',height:'100%',display:'grid',gridTemplateRows:'auto auto 1fr',gap:'16px',color:'var(--ui-text-primary)'},children:[jsxs('header',{children:[jsx(Badge,{children:'Mithril Desktop IR'}),jsx('h1',{style:{fontSize:'24px',margin:'10px 0 4px'},children:IR.page.headline}),jsx('p',{style:{color:'var(--ui-text-secondary)',maxWidth:'760px'},children:IR.page.summary})]}),jsxs('section',{style:{display:'grid',gap:'10px'},children:[jsx(Textarea,{value:goal,onChange:e=>setGoal(e.target.value),rows:4,'aria-label':'Agent goal'}),jsxs('div',{style:{display:'flex',alignItems:'center',gap:'10px'},children:[jsx(Button,{onClick:run,disabled:running,children:running?'Running…':'Run agent loop'}),jsx(StatusDot,{status:state.phase==='executed'?'online':state.phase==='refused'?'error':'idle'}),jsx('span',{style:{color:'var(--ui-text-secondary)'},children:state.phase})]})]}),jsx(ScrollArea,{children:jsx('ol',{style:{margin:0,padding:'0 0 0 24px'},children:state.receipts.map((r,i)=>jsxs('li',{style:{padding:'8px',borderBottom:'1px solid var(--ui-stroke-secondary)'},children:[jsx('strong',{children:r.action}),jsxs('span',{style:{marginLeft:'8px',color:'var(--ui-text-secondary)'},children:['— ',r.status]}),r.detail&&jsx('pre',{style:{whiteSpace:'pre-wrap',fontSize:'12px',color:'var(--ui-text-tertiary)'},children:JSON.stringify(r.detail,null,2)})]},i))})})]});}\n"
-     "export default {id:'mithril-app',name:IR.page.name,description:IR.page.description,defaultEnabled:true,register(ctx){ctx.registerMany([{id:'page',area:ROUTES_AREA,data:{path:IR.page.path},render:()=>jsx(App,{})},{id:'nav',area:SIDEBAR_NAV_AREA,data:{path:IR.page.path,label:IR.page.navLabel,codicon:IR.page.codicon}}]);}};\n")))
+     "const semanticRequest=(kind,text,workspace)=>'('+kind+' :protocol '+IR.actor.protocol+' :workspace '+JSON.stringify(workspace)+' :input '+JSON.stringify(text)+' :governor '+IR.actor.governor+' :output mithril/agent-receipt)';\n"
+     "const absolutePath=value=>value.startsWith('/')||/^[A-Za-z]:[\\\\/]/.test(value);\n"
+     "const errorText=error=>String(error?.message||error);\n"
+     "function appendReceipt(ctx,receipt){const all=ctx.storage.get('receipts-v1',[]);ctx.storage.set('receipts-v1',[...all,receipt]);}\n"
+     "function govern({text,workspace,profile,profiles}){if(!text.trim()||text.length>IR.actor.maxGoalChars)throw new Error('Input must be 1 through '+IR.actor.maxGoalChars+' characters');if(!workspace.trim()||workspace.length>1024||!absolutePath(workspace))throw new Error('Workspace must be an absolute local path');if(profile&&!profiles.some(p=>p.name===profile))throw new Error('Selected bot/profile is not in the live catalog');}\n"
+     "async function runTurn(input,ctx,update){const receipts=[];const record=(action,status,detail)=>{const receipt={id:Date.now()+'-'+(receipts.length+1),at:new Date().toISOString(),action,status,detail};receipts.push(receipt);appendReceipt(ctx,receipt);update({phase:status,receipts:[...receipts]});return receipt;};govern(input);let active=input.session;try{if(!active?.runtimeId){record('session/create','running',{workspace:input.workspace,profile:input.profile||null});const created=await host.request('session.create',{title:IR.loop.sessionTitle,source:'mithril-desktop',cwd:input.workspace,profile:input.profile||null,hidden:false,follow_profile_config:true});active={runtimeId:created.session_id,storedId:created.stored_session_id||created.info?.stored_session_id||created.session_id,title:created.info?.title||IR.loop.sessionTitle};record('session/create','executed',{session_id:active.runtimeId,stored_session_id:active.storedId});update({session:active,messages:created.messages||[]});}const before=await host.request('session.history',{session_id:active.runtimeId,profile:input.profile||null});const baseline=before.count||0;record('prompt/submit','running',{kind:input.kind,baseline});await host.request('prompt.submit',{session_id:active.runtimeId,profile:input.profile||null,text:semanticRequest(input.kind,input.text,input.workspace),surface:'mithril-desktop',title_preview:input.text.slice(0,80)});record('prompt/submit','executed',null);for(let poll=1;poll<=IR.loop.maxPolls;poll++){const status=await host.request('session.status',{session_id:active.runtimeId,profile:input.profile||null});const history=await host.request('session.history',{session_id:active.runtimeId,profile:input.profile||null});const fresh=(history.messages||[]).slice(baseline);const answer=[...fresh].reverse().find(m=>m.role==='assistant'&&m.text);update({messages:history.messages||[],session:active});if(answer){record('session/status','executed',{poll,output:status.output});record('session/history','executed',{poll,count:history.count});record('stop','committed',{reason:'assistant-complete',session_id:active.runtimeId});return {receipts,session:active,messages:history.messages||[]};}await sleep(IR.loop.pollIntervalMs);}record('stop','held',{reason:'poll-budget-exhausted',session_id:active.runtimeId});return {receipts,session:active,messages:[]};}catch(error){record('stop','refused',{reason:errorText(error)});throw error;}}\n"
+     "const tabStyle=active=>({padding:'7px 12px',border:'1px solid var(--ui-stroke-secondary)',borderRadius:'6px',background:active?'var(--ui-bg-secondary)':'transparent',color:'var(--ui-text-primary)',cursor:'pointer'});\n"
+     "const cardStyle={padding:'12px',border:'1px solid var(--ui-stroke-secondary)',borderRadius:'8px',background:'var(--ui-bg-secondary)'};\n"
+     "function App({ctx}){const [tab,setTab]=useState('coding');const [workspace,setWorkspace]=useState(()=>ctx.storage.get('workspace',''));const [goal,setGoal]=useState('Implement and verify one bounded change in this workspace.');const [chat,setChat]=useState('');const [profiles,setProfiles]=useState([]);const [profile,setProfile]=useState(()=>ctx.storage.get('profile',''));const [sessions,setSessions]=useState([]);const [session,setSession]=useState(null);const [messages,setMessages]=useState([]);const [state,setState]=useState({phase:'idle',receipts:ctx.storage.get('receipts-v1',[]).slice(-100)});const running=state.phase==='running';const update=patch=>setState(current=>({...current,...patch}));\n"
+     " const refreshProfiles=async()=>{const result=await host.request('profiles.list',{include_sessions:true});const rows=result.profiles||[];setProfiles(rows);if(!profile){const chosen=rows.find(p=>p.is_default)?.name||rows[0]?.name||'';setProfile(chosen);ctx.storage.set('profile',chosen);}return rows;};\n"
+     " const refreshSessions=async(selected=profile)=>{const result=await host.request('session.list',{profile:selected||null,limit:100,include_hidden:false});setSessions(result.sessions||[]);};\n"
+     " useEffect(()=>{refreshProfiles().then(rows=>refreshSessions(profile||rows.find(p=>p.is_default)?.name||rows[0]?.name||'')).catch(error=>update({phase:'refused',error:errorText(error)}));},[]);\n"
+     " const chooseProfile=value=>{setProfile(value);ctx.storage.set('profile',value);setSession(null);setMessages([]);refreshSessions(value).catch(error=>update({phase:'refused',error:errorText(error)}));};\n"
+     " const chooseWorkspace=value=>{setWorkspace(value);ctx.storage.set('workspace',value);};\n"
+     " const resume=async row=>{update({phase:'running',error:null});try{const result=await host.request('session.resume',{session_id:row.id,profile:profile||null,eager_build:true});const active={runtimeId:result.session_id,storedId:result.stored_session_id||row.id,title:row.title||result.info?.title||''};setSession(active);setMessages(result.messages||[]);update({phase:'executed'});setTab('chat');}catch(error){update({phase:'refused',error:errorText(error)});}};\n"
+     " const submit=async(kind,text,clear)=>{update({phase:'running',receipts:[],error:null});try{const result=await runTurn({kind,text,workspace,profile,profiles,session},ctx,patch=>{if(patch.session)setSession(patch.session);if(patch.messages)setMessages(patch.messages);update(patch);});setSession(result.session);setMessages(result.messages);update({phase:result.receipts.at(-1)?.status||'executed',receipts:result.receipts});if(clear)setChat('');refreshSessions(profile);}catch(error){update({phase:'refused',error:errorText(error)});}};\n"
+     " const interrupt=async()=>{if(!session?.runtimeId)return;try{await host.request('session.interrupt',{session_id:session.runtimeId,profile:profile||null});update({phase:'held'});}catch(error){update({phase:'refused',error:errorText(error)});}};\n"
+     " const header=jsxs('header',{children:[jsx(Badge,{children:'Mithril governed coding'}),jsx('h1',{style:{fontSize:'24px',margin:'10px 0 4px'},children:IR.page.headline}),jsx('p',{style:{color:'var(--ui-text-secondary)',maxWidth:'820px'},children:IR.page.summary}),jsxs('div',{style:{display:'flex',gap:'8px',marginTop:'12px',flexWrap:'wrap'},children:['coding','chat','sessions','bots'].map(name=>jsx('button',{style:tabStyle(tab===name),onClick:()=>setTab(name),children:name[0].toUpperCase()+name.slice(1)},name))})]});\n"
+     " const controls=jsxs('section',{style:{display:'grid',gridTemplateColumns:'minmax(260px,1fr) minmax(180px,280px)',gap:'10px'},children:[jsx(Input,{value:workspace,onChange:e=>chooseWorkspace(e.target.value),placeholder:'/absolute/path/to/workspace','aria-label':'Coding workspace'}),jsx('select',{value:profile,onChange:e=>chooseProfile(e.target.value),style:{padding:'8px',borderRadius:'6px',background:'var(--ui-bg-secondary)',color:'var(--ui-text-primary)',border:'1px solid var(--ui-stroke-secondary)'},'aria-label':'Bot profile',children:profiles.map(p=>jsx('option',{value:p.name,children:(p.display_name||p.name)+(p.model?' — '+p.model:'')},p.name))})]});\n"
+     " const coding=jsxs('section',{style:{display:'grid',gap:'10px'},children:[jsx(Textarea,{value:goal,onChange:e=>setGoal(e.target.value),rows:6,'aria-label':'Coding goal'}),jsxs('div',{style:{display:'flex',gap:'10px',alignItems:'center'},children:[jsx(Button,{onClick:()=>submit('mithril/coding-request',goal,false),disabled:running,children:running?'Coding…':session?'Continue coding session':'Run coding agent'}),session&&jsx(Button,{variant:'secondary',onClick:()=>{setSession(null);setMessages([]);},disabled:running,children:'New session'}),jsx(StatusDot,{status:state.phase==='committed'||state.phase==='executed'?'online':state.phase==='refused'?'error':'idle'}),jsx('span',{style:{color:'var(--ui-text-secondary)'},children:state.phase})]}),state.error&&jsx('p',{style:{color:'var(--ui-danger-foreground)'},children:state.error}),jsx('p',{style:{color:'var(--ui-text-tertiary)',fontSize:'12px'},children:'The user commits the task. The model proposes changes; Hermes tools and checks execute them inside the selected workspace. Every transition is receipted.'})]});\n"
+     " const chatView=jsxs('section',{style:{display:'grid',gridTemplateRows:'1fr auto',gap:'12px',minHeight:0},children:[jsx(ScrollArea,{children:jsx('div',{style:{display:'grid',gap:'10px'},children:messages.map((m,i)=>jsxs('article',{style:cardStyle,children:[jsx('strong',{children:m.role+(m.name?' · '+m.name:'')}),jsx('pre',{style:{whiteSpace:'pre-wrap',fontFamily:'inherit',margin:'6px 0 0'},children:m.text||m.context||''})]},m.row_id||i))})}),jsxs('div',{style:{display:'grid',gap:'8px'},children:[jsx(Textarea,{value:chat,onChange:e=>setChat(e.target.value),rows:3,placeholder:session?'Continue this session…':'A session will be created on send.','aria-label':'Chat message'}),jsxs('div',{style:{display:'flex',gap:'8px'},children:[jsx(Button,{onClick:()=>submit('mithril/chat-message',chat,true),disabled:running||!chat.trim(),children:'Send'}),jsx(Button,{variant:'secondary',onClick:interrupt,disabled:!running||!session,children:'Interrupt'})]})]})]});\n"
+     " const sessionView=jsx(ScrollArea,{children:jsx('div',{style:{display:'grid',gap:'8px'},children:sessions.map(row=>jsxs('button',{onClick:()=>resume(row),style:{...cardStyle,textAlign:'left',color:'var(--ui-text-primary)',cursor:'pointer'},children:[jsx('strong',{children:row.title||row.id}),jsx('p',{style:{margin:'4px 0',color:'var(--ui-text-secondary)'},children:row.preview||'No preview'}),jsx('small',{children:(row.message_count||0)+' messages · '+(row.source||'unknown source')})]},row.id))})});\n"
+     " const botView=jsx(ScrollArea,{children:jsx('div',{style:{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(220px,1fr))',gap:'10px'},children:profiles.map(p=>jsxs('button',{onClick:()=>{chooseProfile(p.name);setTab('coding');},style:{...cardStyle,textAlign:'left',color:'var(--ui-text-primary)',cursor:'pointer'},children:[jsx('strong',{children:p.display_name||p.name}),jsx('p',{style:{color:'var(--ui-text-secondary)'},children:p.description||'Hermes profile'}),jsx('small',{children:(p.model||'configured model')+' · '+p.skill_count+' skills'})]},p.name))})});\n"
+     " const receiptView=jsx('details',{children:[jsx('summary',{children:'Execution receipts ('+state.receipts.length+')'}),jsx('ol',{children:state.receipts.slice(-20).map(r=>jsxs('li',{children:[jsx('strong',{children:r.action}),jsx('span',{children:' — '+r.status})]},r.id))})]});\n"
+     " return jsxs('main',{style:{padding:'24px',height:'100%',display:'grid',gridTemplateRows:'auto auto minmax(0,1fr) auto',gap:'16px',color:'var(--ui-text-primary)'},children:[header,controls,tab==='coding'?coding:tab==='chat'?chatView:tab==='sessions'?sessionView:botView,receiptView]});}\n"
+     "export default {id:'mithril-app',name:IR.page.name,description:IR.page.description,defaultEnabled:true,register(ctx){ctx.registerMany([{id:'page',area:ROUTES_AREA,data:{path:IR.page.path},render:()=>jsx(App,{ctx})},{id:'nav',area:SIDEBAR_NAV_AREA,data:{path:IR.page.path,label:IR.page.navLabel,codicon:IR.page.codicon}}]);}};\n")))
