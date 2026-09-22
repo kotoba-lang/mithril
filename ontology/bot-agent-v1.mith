@@ -1,0 +1,15 @@
+{
+  "@context": "https://mithril.fund/context/v1",
+  "@id": "https://mithril.fund/ontology/bot-agent-v1",
+  "@type": "http://www.w3.org/2002/07/owl#Ontology",
+  "@graph": [
+    {"@id": "https://mithril.fund/ns/v1#BotProfile", "@type": "http://www.w3.org/2002/07/owl#Class"},
+    {"@id": "https://mithril.fund/ns/v1#BotTask", "@type": "http://www.w3.org/2002/07/owl#Class"},
+    {"@id": "https://mithril.fund/ns/v1#BotAction", "@type": "http://www.w3.org/2002/07/owl#Class"},
+    {"@id": "https://mithril.fund/ns/v1#CodingAction", "@type": "http://www.w3.org/2002/07/owl#Class", "http://www.w3.org/2000/01/rdf-schema#subClassOf": {"@id": "https://mithril.fund/ns/v1#BotAction"}},
+    {"@id": "https://mithril.fund/ns/v1#ToolAction", "@type": "http://www.w3.org/2002/07/owl#Class", "http://www.w3.org/2000/01/rdf-schema#subClassOf": {"@id": "https://mithril.fund/ns/v1#BotAction"}},
+    {"@id": "https://mithril.fund/ns/v1#requiresFact", "@type": "http://www.w3.org/2002/07/owl#ObjectProperty"},
+    {"@id": "https://mithril.fund/ns/v1#producesFact", "@type": "http://www.w3.org/2002/07/owl#ObjectProperty"},
+    {"@id": "https://mithril.fund/ns/v1#requiresCapability", "@type": "http://www.w3.org/2002/07/owl#ObjectProperty"}
+  ]
+}

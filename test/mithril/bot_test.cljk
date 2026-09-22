@@ -1,0 +1,100 @@
+(ns mithril.bot-test
+  (:require [cljs.test :refer [deftest is testing]]
+            [mithril.bot :as bot]
+            [mithril.compiler :as compiler]
+            [mithril.execution :as execution]))
+
+(defn read-text [path] (.readFileSync (js/require "fs") path "utf8"))
+(defn profile [] (bot/compile-text "examples/governed-coding-bot.mith"
+                                  (read-text "examples/governed-coding-bot.mith")))
+(defn task [] {:id "task-1" :workspace "/tmp/work" :goal "Implement one checked change"})
+(defn error-code [f] (try (f) nil (catch :default e (:mithril/error (ex-data e)))))
+
+(defn model-result [state choice confidence]
+  (let [candidates (:candidates (bot/prepare-request state "worker-1" 1001))
+        labels (mapv :label candidates)
+        rest-labels (remove #{choice} labels)
+        other (/ (- 1 confidence) (count rest-labels))]
+    {:kind bot/model-kind :generated_text false :model {:name "open-jev"}
+     :artifact {:repo_or_dir "kotoba-lang/typed-decisions"
+                :revision "0123456789abcdef0123456789abcdef01234567"}
+     :decisions [{:choice choice :confidence confidence
+                  :probabilities (into {choice confidence}
+                                       (map (fn [label] [label other]) rest-labels))}]}))
+
+(defn complete [state admitted now]
+  (let [{:keys [state effect]} (bot/request-effect state admitted
+                                                    (get-in state [:policy :effects])
+                                                    "worker-1" now)]
+    (bot/apply-receipt state
+                       {:format bot/receipt-format :effect-id (:id effect)
+                        :status :completed :output-digest (execution/digest effect)}
+                       "worker-1" (inc now))))
+
+(deftest profile-compiles-and-discovers-actions
+  (let [artifact (profile) actions (bot/discover-actions artifact)
+        state (bot/start-run artifact (task) "worker-1" 1000)
+        ontology (compiler/parse-json (read-text "ontology/bot-agent-v1.mith"))]
+    (is (= bot/artifact-format (:format artifact)))
+    (is (= 7 (count actions)))
+    (is (= [:infer/owl2-rl :query/sparql :validate/shacl]
+           (mapv :operation (:semantic-receipts state))))
+    (is (= 0 (get-in state [:semantic-receipts 2 :metrics :violations])))
+    (is (= (subs (compiler/graph-digest ontology) 7)
+           (get-in artifact [:bot-ir :ontology])))
+    (is (= #{"workspace-inspect" "git-status" "stop"}
+           (set (map :label (bot/available-actions state)))))))
+
+(deftest jev-choice-is-closed-and-governed
+  (let [state (bot/start-run (profile) (task) "worker-1" 1000)
+        admitted (bot/admit-decision state (model-result state "workspace-inspect" 0.8)
+                                     "worker-1" 1001)]
+    (is (= :workspace/read (get-in admitted [:action :effect])))
+    (is (= :mithril.bot/capability-denied
+           (error-code #(bot/request-effect state admitted #{:git/status} "worker-1" 1002))))
+    (is (= :mithril.bot/outside-candidate-set
+           (error-code #(bot/admit-decision
+                         state
+                         (assoc-in (model-result state "workspace-inspect" 0.8)
+                                   [:decisions 0 :choice] "shell-exec")
+                         "worker-1" 1001))))))
+
+(deftest completed-receipts-advance-prerequisites
+  (let [s0 (bot/start-run (profile) (task) "worker-1" 1000)
+        s1 (complete s0 (bot/admit-decision s0 (model-result s0 "workspace-inspect" 0.8)
+                                            "worker-1" 1001) 1002)
+        s2 (complete s1 (bot/admit-decision s1 (model-result s1 "code-propose" 0.8)
+                                            "worker-1" 1004) 1005)]
+    (is (contains? (:facts s1) :workspace/inspected))
+    (is (contains? (:facts s2) :proposal/ready))
+    (is (some #(= "patch-apply" (:label %)) (bot/available-actions s2)))
+    (is (= 2 (:step s2)))
+    (is (= 2 (count (:receipts s2))))))
+
+(deftest idempotency-lease-and-retry-fail-closed
+  (let [s0 (bot/start-run (profile) (task) "worker-1" 1000)
+        admitted (bot/admit-decision s0 (model-result s0 "workspace-inspect" 0.8)
+                                     "worker-1" 1001)
+        r1 (bot/request-effect s0 admitted (get-in s0 [:policy :effects]) "worker-1" 1002)
+        r2 (bot/request-effect s0 admitted (get-in s0 [:policy :effects]) "worker-1" 1002)
+        effect (:effect r1)
+        failed {:format bot/receipt-format :effect-id (:id effect) :status :failed
+                :output-digest (execution/digest :failed)}
+        s1 (bot/apply-receipt (:state r1) failed "worker-1" 1003)]
+    (is (= (get-in r1 [:effect :id]) (get-in r2 [:effect :id])))
+    (is (= 1 (get-in s1 [:retries "https://mithril.fund/id/action/workspace-inspect"])))
+    (is (= :mithril.bot/lease-not-held
+           (error-code #(bot/prepare-request s1 "other-worker" 1004))))
+    (is (= :mithril.bot/duplicate-receipt
+           (error-code #(bot/apply-receipt s1 failed "worker-1" 1004))))))
+
+(deftest generated-text-and-low-confidence-are-refused
+  (let [state (bot/start-run (profile) (task) "worker-1" 1000)]
+    (is (= :mithril.bot/generated-text-forbidden
+           (error-code #(bot/admit-decision state
+                                             (assoc (model-result state "stop" 0.8)
+                                                    :generated_text true)
+                                             "worker-1" 1001))))
+    (is (= :mithril.bot/model-confidence-below-floor
+           (error-code #(bot/admit-decision state (model-result state "stop" 0.5)
+                                             "worker-1" 1001))))))

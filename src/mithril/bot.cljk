@@ -1,0 +1,296 @@
+(ns mithril.bot
+  "Ontology-closed bot policy and durable, one-effect-at-a-time runtime.
+
+  OpenJev may choose only an OWL/SPARQL-discovered action label. The Governor
+  converts an admitted choice to one typed effect. A host receipt is the only
+  event that advances state; retries, leases and total steps are bounded."
+  (:require [clojure.string :as str]
+            [mithril.compiler :as compiler]
+            [mithril.execution :as execution]
+            [oak.semantic :as oak]))
+
+(def artifact-format "https://mithril.fund/artifact/bot-profile-v1")
+(def receipt-format "https://mithril.fund/receipt/bot-effect-v1")
+(def goal "https://mithril.fund/id/goal/governed-coding-task")
+(def model-kind "typed-decisions/open-jev-v1")
+
+(def source-keys #{"@context" "@id" "@type" "goal" "ontology" "policy"})
+(def policy-keys #{"maxSteps" "maxRetries" "leaseSeconds" "confidenceFloor"
+                   "actions" "effects"})
+
+(def action-catalog
+  [{:id "https://mithril.fund/id/action/workspace-inspect"
+    :label "workspace-inspect" :effect :workspace/read
+    :requires #{:semantic/prefix-valid} :produces #{:workspace/inspected}}
+   {:id "https://mithril.fund/id/action/code-propose"
+    :label "code-propose" :effect :llm/propose-patch
+    :requires #{:workspace/inspected} :produces #{:proposal/ready}}
+   {:id "https://mithril.fund/id/action/patch-apply"
+    :label "patch-apply" :effect :workspace/apply-patch
+    :requires #{:proposal/ready} :produces #{:workspace/changed}}
+   {:id "https://mithril.fund/id/action/amu-compile"
+    :label "amu-compile" :effect :amu/compile
+    :requires #{:workspace/changed} :produces #{:artifact/compiled}}
+   {:id "https://mithril.fund/id/action/test-run"
+    :label "test-run" :effect :test/run
+    :requires #{:artifact/compiled} :produces #{:tests/passed}}
+   {:id "https://mithril.fund/id/action/git-status"
+    :label "git-status" :effect :git/status
+    :requires #{:semantic/prefix-valid} :produces #{:git/observed}}
+   {:id "https://mithril.fund/id/action/stop"
+    :label "stop" :effect :agent/stop
+    :requires #{:semantic/prefix-valid} :produces #{:run/stopped}}])
+
+(def action-by-id (into {} (map (juxt :id identity) action-catalog)))
+(def action-by-label (into {} (map (juxt :label identity) action-catalog)))
+(def admitted-effects (set (map :effect action-catalog)))
+
+(defn- fail! [code detail data]
+  (throw (ex-info detail (merge {:mithril/error code :detail detail} data))))
+
+(defn- sha256? [value]
+  (and (string? value) (boolean (re-matches #"[0-9a-f]{64}" value))))
+
+(defn- revision? [value]
+  (and (string? value) (boolean (re-matches #"[0-9a-f]{40}" value))))
+
+(defn- repository? [value]
+  (and (string? value) (boolean (re-matches #"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+" value))))
+
+(defn compile-document [path doc]
+  (when-not (compiler/source-path? path)
+    (fail! :mithril/unsupported-extension "bot profile must end in .mith or .mithril" {}))
+  (when-not (= compiler/context-uri (get doc "@context"))
+    (fail! :mithril/unpinned-context "bot profile must use the pinned context" {}))
+  (when-not (= "BotProfile" (get doc "@type"))
+    (fail! :mithril/unexpected-source-type "@type must be BotProfile" {}))
+  (when-not (= source-keys (set (keys doc)))
+    (fail! :mithril/unknown-source-key "bot profile has an unknown or missing key" {}))
+  (when-not (= goal (get doc "goal"))
+    (fail! :mithril/unknown-goal "bot goal is outside the closed catalog" {}))
+  (when-not (sha256? (get doc "ontology"))
+    (fail! :mithril/invalid-ontology "ontology must be a 64-character SHA-256 identity" {}))
+  (let [policy (get doc "policy")]
+    (when-not (= policy-keys (set (keys policy)))
+      (fail! :mithril.bot/invalid-policy "bot policy has an unknown or missing key" {}))
+    (let [max-steps (get policy "maxSteps")
+          max-retries (get policy "maxRetries")
+          lease-seconds (get policy "leaseSeconds")
+          floor (get policy "confidenceFloor")
+          actions (get policy "actions")
+          effects (get policy "effects")]
+      (when-not (and (integer? max-steps) (<= 1 max-steps 64)
+                     (integer? max-retries) (<= 0 max-retries 5)
+                     (integer? lease-seconds) (<= 30 lease-seconds 3600)
+                     (integer? floor) (<= 0 floor 10000))
+        (fail! :mithril.bot/invalid-budget "bot budgets are outside v1 bounds" {}))
+      (when-not (and (vector? actions) (<= 2 (count actions) (count action-catalog))
+                     (= (count actions) (count (set actions)))
+                     (every? action-by-id actions)
+                     (some #{"https://mithril.fund/id/action/stop"} actions))
+        (fail! :mithril.bot/invalid-actions "actions must be a unique closed subset including stop" {}))
+      (let [required-effects (set (map (comp :effect action-by-id) actions))]
+        (when-not (and (vector? effects)
+                       (= (count effects) (count (set effects)))
+                       (= required-effects (set (map keyword effects)))
+                       (every? admitted-effects (map keyword effects)))
+          (fail! :mithril.bot/invalid-effects
+                 "effects must exactly cover the selected action capabilities" {})))
+      {:format artifact-format
+       :media-type compiler/media-type
+       :graph-digest (compiler/graph-digest doc)
+       :bot-ir {:version :mithril.bot/v1
+                :goal :goal/governed-coding-task
+                :ontology (get doc "ontology")
+                :policy {:max-steps max-steps :max-retries max-retries
+                         :lease-seconds lease-seconds :confidence-floor floor
+                         :actions actions :effects (mapv keyword effects)}}})))
+
+(defn compile-text [path text]
+  (compile-document path (compiler/parse-source text)))
+
+(defn- action-ontology [artifact]
+  (mapcat (fn [id]
+            [[:component id :action]
+             [:permits :goal/governed-coding-task :action id]])
+          (get-in artifact [:bot-ir :policy :actions])))
+
+(defn discover-actions
+  "Run the same OWL 2 RL + SPARQL candidate mechanism used by synthesis."
+  [artifact]
+  (let [discovered (oak/candidates-for-role (vec (action-ontology artifact))
+                                             :goal/governed-coding-task :action)
+        permitted (->> discovered (filter :permitted?) (map :id) set)]
+    (->> (get-in artifact [:bot-ir :policy :actions])
+         (filter permitted)
+         (map action-by-id)
+         (remove nil?)
+         vec)))
+
+(def task-shape
+  {:shacl/type :node-shape
+   :target-class :mithril/BotTask
+   :property [{:path :id :datatype :string :min-count 1 :max-count 1}
+              {:path :workspace :datatype :string :min-count 1 :max-count 1}
+              {:path :goal :datatype :string :min-count 1 :max-count 1}]})
+
+(defn start-run [artifact task owner now-ms]
+  (when-not (= artifact-format (:format artifact))
+    (fail! :mithril.bot/invalid-artifact "artifact is not a bot profile" {}))
+  (when-not (and (map? task) (= #{:id :workspace :goal} (set (keys task)))
+                 (every? #(and (string? %) (not (str/blank? %))) (vals task)))
+    (fail! :mithril.bot/invalid-task "task must contain non-empty id, workspace and goal" {}))
+  (when-not (and (string? owner) (not (str/blank? owner)) (integer? now-ms) (not (neg? now-ms)))
+    (fail! :mithril.bot/invalid-lease "owner and non-negative clock are required" {}))
+  (let [actions (discover-actions artifact)
+        report (execution/validate-shape task-shape task)]
+    (when-not (= (set (get-in artifact [:bot-ir :policy :actions])) (set (map :id actions)))
+      (fail! :mithril.bot/candidate-discovery-mismatch
+             "OWL/SPARQL did not return the exact policy action set" {}))
+    (when-not (:valid? report)
+      (fail! :mithril.bot/shacl-violation "task does not conform to the bot task shape"
+             {:report report}))
+    (let [run-id (execution/digest [(:graph-digest artifact) task owner now-ms])
+          lease-ms (* 1000 (get-in artifact [:bot-ir :policy :lease-seconds]))]
+      {:format "https://mithril.fund/state/bot-run-v1"
+       :run-id run-id :profile-digest (:graph-digest artifact) :task task
+       :status :running :step 0 :facts #{:semantic/prefix-valid}
+       :awaiting nil :seen-effects #{} :retries {} :receipts []
+       :lease {:owner owner :acquired-at now-ms :expires-at (+ now-ms lease-ms)}
+       :policy (get-in artifact [:bot-ir :policy])
+       :semantic-receipts
+       [{:operation :infer/owl2-rl :status :executed
+         :output-digest (execution/digest actions) :metrics {:candidates (count actions)}}
+        {:operation :query/sparql :status :executed
+         :output-digest (execution/digest (mapv :id actions)) :metrics {:rows (count actions)}}
+        {:operation :validate/shacl :status :executed
+         :output-digest (execution/digest report) :metrics {:violations 0}}]})))
+
+(defn- lease-valid! [state owner now-ms]
+  (when-not (and (= owner (get-in state [:lease :owner]))
+                 (integer? now-ms) (< now-ms (get-in state [:lease :expires-at])))
+    (fail! :mithril.bot/lease-not-held "run lease is absent, expired or owned elsewhere" {})))
+
+(defn available-actions [state]
+  (let [facts (:facts state)]
+    (->> (get-in state [:policy :actions])
+         (map action-by-id)
+         (filter #(every? facts (:requires %)))
+         vec)))
+
+(defn prepare-request [state owner now-ms]
+  (lease-valid! state owner now-ms)
+  (when-not (= :running (:status state))
+    (fail! :mithril.bot/not-running "only a running bot may request a decision" {}))
+  (when (:awaiting state)
+    (fail! :mithril.bot/effect-in-flight "one effect is already awaiting a receipt" {}))
+  (when (>= (:step state) (get-in state [:policy :max-steps]))
+    (fail! :mithril.bot/step-budget "bot step budget is exhausted" {}))
+  (let [candidates (available-actions state)]
+    (when (< (count candidates) 2)
+      (fail! :mithril.bot/insufficient-candidates "decision requires at least two admitted actions" {}))
+    {:state (str "Mithril bot run " (:run-id state) " step " (:step state)
+                 ". Select one admitted action; never generate source text.")
+     :questions [{:type "choice"
+                  :instructions (str "Advance task: " (get-in state [:task :goal]))
+                  :options (mapv :label candidates)}]
+     :candidates candidates}))
+
+(defn admit-decision [state model-result owner now-ms]
+  (let [{:keys [candidates]} (prepare-request state owner now-ms)
+        expected #{:kind :generated_text :model :decisions :artifact}]
+    (when-not (= expected (set (keys model-result)))
+      (fail! :mithril.bot/invalid-model-result "model result has an invalid field set" {}))
+    (when-not (= model-kind (:kind model-result))
+      (fail! :mithril.bot/invalid-model-result "model result is not OpenJev v1" {}))
+    (when-not (false? (:generated_text model-result))
+      (fail! :mithril.bot/generated-text-forbidden "bot policy accepts no generated text" {}))
+    (let [artifact (:artifact model-result)]
+      (when-not (and (= #{:repo_or_dir :revision} (set (keys artifact)))
+                     (repository? (:repo_or_dir artifact)) (revision? (:revision artifact)))
+        (fail! :mithril.bot/unpinned-model "model repository and immutable revision are required" {})))
+    (when-not (and (vector? (:decisions model-result)) (= 1 (count (:decisions model-result))))
+      (fail! :mithril.bot/model-cardinality "model must return exactly one decision" {}))
+    (let [decision (first (:decisions model-result))
+          labels (set (map :label candidates))
+          probabilities (:probabilities decision)
+          choice (:choice decision)
+          confidence (:confidence decision)]
+      (when-not (= #{:choice :probabilities :confidence} (set (keys decision)))
+        (fail! :mithril.bot/invalid-model-decision "decision field set is invalid" {}))
+      (when-not (and (map? probabilities) (= labels (set (keys probabilities)))
+                     (every? #(and (number? %) (<= 0 % 1)) (vals probabilities))
+                     (< (js/Math.abs (- 1 (reduce + (vals probabilities)))) 0.0001))
+        (fail! :mithril.bot/invalid-model-distribution
+               "probabilities must cover the exact candidates and sum to one" {}))
+      (let [candidate (get action-by-label choice)
+            winner (apply max (vals probabilities))
+            selected (get probabilities choice)
+            basis-points (when (number? confidence) (js/Math.round (* confidence 10000)))]
+        (when-not (and candidate (contains? labels choice))
+          (fail! :mithril.bot/outside-candidate-set "choice is outside the discovered actions" {}))
+        (when-not (and (number? confidence) (= selected confidence) (= winner confidence))
+          (fail! :mithril.bot/invalid-model-confidence "choice must be a distribution winner" {}))
+        (when (< basis-points (get-in state [:policy :confidence-floor]))
+          (fail! :mithril.bot/model-confidence-below-floor "choice is below the ontology floor"
+                 {:confidence basis-points}))
+         {:action candidate :confidence basis-points
+         :probabilities (into (sorted-map) probabilities)
+         :model (select-keys model-result [:model :artifact])}))))
+
+(defn request-effect [state admitted grants owner now-ms]
+  (lease-valid! state owner now-ms)
+  (when (:awaiting state)
+    (fail! :mithril.bot/effect-in-flight "one effect is already awaiting a receipt" {}))
+  (let [action (:action admitted) effect (:effect action) grants (set grants)]
+    (when-not (contains? (set (get-in state [:policy :actions])) (:id action))
+      (fail! :mithril.bot/action-not-admitted "action is outside the compiled policy" {}))
+    (when-not (every? (:facts state) (:requires action))
+      (fail! :mithril.bot/prerequisite "action prerequisites are not satisfied" {}))
+    (when-not (contains? grants effect)
+      (fail! :mithril.bot/capability-denied "Governor did not grant the selected effect"
+             {:effect effect}))
+    (let [effect-id (execution/digest [(:run-id state) (:step state) (:id action)])
+          request {:format "https://mithril.fund/effect/bot-action-v1"
+                   :id effect-id :run-id (:run-id state) :step (:step state)
+                   :action (:id action) :operation effect
+                   :workspace (get-in state [:task :workspace])
+                   :task-id (get-in state [:task :id])}]
+      {:state (assoc state :awaiting request)
+       :effect request})))
+
+(defn apply-receipt [state receipt owner now-ms]
+  (lease-valid! state owner now-ms)
+  (when (contains? (:seen-effects state) (:effect-id receipt))
+    (fail! :mithril.bot/duplicate-receipt "effect receipt was already consumed" {}))
+  (let [awaiting (:awaiting state)]
+    (when-not awaiting
+      (fail! :mithril.bot/no-effect-in-flight "receipt has no matching requested effect" {}))
+    (when-not (= #{:format :effect-id :status :output-digest} (set (keys receipt)))
+      (fail! :mithril.bot/invalid-receipt "receipt field set is invalid" {}))
+    (when-not (= receipt-format (:format receipt))
+      (fail! :mithril.bot/invalid-receipt "receipt format is invalid" {}))
+    (when-not (= (:id awaiting) (:effect-id receipt))
+      (fail! :mithril.bot/receipt-mismatch "receipt does not match the in-flight effect" {}))
+    (when-not (contains? #{:completed :failed} (:status receipt))
+      (fail! :mithril.bot/invalid-receipt-status "receipt status must be completed or failed" {}))
+    (when-not (and (string? (:output-digest receipt))
+                   (boolean (re-matches #"sha256:[0-9a-f]{64}" (:output-digest receipt))))
+      (fail! :mithril.bot/invalid-receipt "receipt output digest must be a SHA-256 identity" {}))
+    (let [action (action-by-id (:action awaiting))
+          completed? (= :completed (:status receipt))
+          retries (get-in state [:retries (:id action)] 0)
+          retry? (and (not completed?) (< retries (get-in state [:policy :max-retries])))
+          stopped? (and completed? (= :agent/stop (:effect action)))
+          next-state (-> state
+                         (assoc :awaiting nil)
+                         (update :step inc)
+                         (update :seen-effects conj (:effect-id receipt))
+                         (update :receipts conj receipt)
+                         (cond-> completed? (update :facts into (:produces action)))
+                         (cond-> (not completed?) (assoc-in [:retries (:id action)] (inc retries))))]
+      (cond
+        stopped? (assoc next-state :status :completed)
+        retry? next-state
+        completed? next-state
+        :else (assoc next-state :status :held :hold-reason :retry-budget-exhausted)))))
