@@ -1,7 +1,7 @@
 {
   "@context": "https://mithril.fund/context/v1",
-  "@id": "https://mithril.fund/app/hello-web",
-  "@type": "WebApplication",
+  "@id": "https://mithril.fund/app/hello-web-synthesis",
+  "@type": "SynthesizeWebApplication",
   "goal": "https://mithril.fund/id/goal/web-application",
   "ontology": "f6371c58ffa5d9587867f9f7ae33aa62fabf99b354070c2ad6da5323d5c85ceb",
   "imports": [
@@ -14,18 +14,10 @@
     {
       "method": "GET",
       "path": "/hello",
-      "operation": "https://mithril.fund/lib/web/v1/handler/static-response",
+      "intent": "Return the authored static greeting as a successful plain text response.",
       "status": 200,
       "contentType": "text/plain; charset=utf-8",
-      "body": "Hello from a .mith application."
-    },
-    {
-      "method": "HEAD",
-      "path": "/hello",
-      "operation": "https://mithril.fund/lib/web/v1/handler/static-response",
-      "status": 200,
-      "contentType": "text/plain; charset=utf-8",
-      "body": "Hello from a .mith application."
+      "body": "Hello from an OpenJev-selected .mith application."
     }
   ]
 }

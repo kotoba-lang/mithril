@@ -67,9 +67,9 @@
         library (compiler/compile-library-document "lib/web/v1.mith" library-doc)
         app (compiler/compile-web-document "examples/hello-web.mith" app-doc [library])]
     (is (= compiler/context-document published-context))
-    (is (= "sha256:9e9b848b995eb565aaf7f85ce6661c2012b4534ac1729acc9fd7fdefa24b1c9e"
+    (is (= "sha256:8d0f7c9356a99d1b0ef2ea4ab02cce508e841502f5aea91278e92b7d21bdbc91"
            (:graph-digest library)))
-    (is (= "sha256:c9125761017d55a90a6abc3464ad8757995e5a57fe71407e368fd8f8fc3bbc09"
+    (is (= "sha256:fb682d0c687c9d1284015ebf469fbeb4d240c2d4fa7315b567c7fff3ef42b5c1"
            (:graph-digest app)))
     (is (= {:status 200
             :headers {"content-type" "text/plain; charset=utf-8"}

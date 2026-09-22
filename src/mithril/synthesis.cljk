@@ -1,0 +1,237 @@
+(ns mithril.synthesis
+  "Jev-shaped candidate selection for Mithril web applications.
+
+  Candidate discovery is real OWL 2 RL materialization followed by the SPARQL
+  engine through oak.semantic. The model receives only finite labels. Its
+  result is revalidated and sealed into the ordinary deterministic Web IR."
+  (:require [clojure.string :as str]
+            [mithril.compiler :as compiler]
+            [oak.semantic :as semantic]))
+
+(def source-keys #{"@context" "@id" "@type" "goal" "ontology" "imports" "routes"})
+(def route-keys #{"method" "path" "intent" "status" "contentType" "body"})
+(def model-kind "typed-decisions/open-jev-v1")
+(def web-goal "https://mithril.fund/id/goal/web-application")
+(def web-methods #{"GET" "HEAD"})
+(def model-result-keys #{:kind :generated_text :model :decisions :artifact})
+
+(defn- fail! [code detail]
+  (throw (ex-info detail {:mithril/error code :detail detail})))
+
+(defn- sha256? [value]
+  (and (string? value) (boolean (re-matches #"sha256:[0-9a-f]{64}" value))))
+
+(defn- revision? [value]
+  (and (string? value) (boolean (re-matches #"[0-9a-f]{40}" value))))
+
+(defn- mithril-iri? [value]
+  (and (string? value)
+       (boolean
+        (re-matches #"https://mithril\.fund/[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]+"
+                    value))))
+
+(defn- model-repository? [value]
+  (and (string? value)
+       (boolean (re-matches #"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+" value))))
+
+(defn- valid-path? [value]
+  (and (string? value)
+       (boolean (re-matches #"/(?:[A-Za-z0-9._~-]+(?:/[A-Za-z0-9._~-]+)*)?" value))))
+
+(defn- validate-route! [route]
+  (when-not (= route-keys (set (keys route)))
+    (fail! :mithril/invalid-route "synthesis route has an unknown or missing key"))
+  (when-not (contains? web-methods (get route "method"))
+    (fail! :mithril/unsupported-method "v1 routes admit only GET and HEAD"))
+  (when-not (valid-path? (get route "path"))
+    (fail! :mithril/invalid-path "v1 route path must be a static absolute path"))
+  (when-not (and (string? (get route "intent"))
+                 (not (str/blank? (get route "intent")))
+                 (<= (count (get route "intent")) 512))
+    (fail! :mithril/invalid-intent "route intent must be 1 through 512 characters"))
+  (when-not (and (integer? (get route "status")) (<= 100 (get route "status") 599))
+    (fail! :mithril/invalid-status "response status must be 100 through 599"))
+  (when-not (and (string? (get route "contentType"))
+                 (<= (count (get route "contentType")) 128))
+    (fail! :mithril/invalid-content-type
+           "contentType must be a string of at most 128 characters"))
+  (when-not (and (string? (get route "body")) (<= (count (get route "body")) 65536))
+    (fail! :mithril/invalid-body "body must be a string of at most 65536 characters")))
+
+(defn- imported-libraries [doc library-artifacts]
+  (let [available (into {} (map (fn [artifact]
+                                  [(get-in artifact [:library :id]) artifact])
+                                library-artifacts))
+        imports (get doc "imports")]
+    (when-not (and (vector? imports) (seq imports))
+      (fail! :mithril/missing-imports "synthesis imports must be a non-empty array"))
+    (let [resolved (mapv (fn [entry]
+            (when-not (= #{"library" "digest"} (set (keys entry)))
+              (fail! :mithril/invalid-import "synthesis import has an invalid field set"))
+            (let [id (get entry "library")
+                  digest (get entry "digest")
+                  artifact (get available id)]
+              (when-not (mithril-iri? id)
+                (fail! :mithril/invalid-identifier
+                       "import library must be a mithril.fund HTTPS IRI"))
+              (when-not (sha256? digest)
+                (fail! :mithril/invalid-import-digest "import digest must be a sha256 graph identity"))
+              (when-not artifact
+                (fail! :mithril/missing-library (str "library was not supplied: " id)))
+              (when-not (= digest (:graph-digest artifact))
+                (fail! :mithril/library-digest-mismatch (str "library digest mismatch: " id)))
+              artifact))
+          imports)
+          ids (mapv #(get-in % [:library :id]) resolved)]
+      (when-not (= (count ids) (count (set ids)))
+        (fail! :mithril/duplicate-import "each library may be imported exactly once"))
+      resolved)))
+
+(defn discover-handlers
+  "Discover imported handler candidates via OWL entailment and SPARQL."
+  [library-artifacts]
+  (let [exports (->> library-artifacts
+                     (mapcat #(get-in % [:library :exports]))
+                     (filter #(= :handler (:kind %)))
+                     vec)
+        ontology (vec (mapcat (fn [{:keys [symbol]}]
+                                [[:component symbol :handler]
+                                 [:permits :goal/web-application :role symbol]])
+                              exports))
+        discovered (semantic/candidates-for-role ontology :goal/web-application :handler)
+        by-id (into {} (map (juxt :symbol identity) exports))
+        candidates (->> discovered
+                        (filter :permitted?)
+                        (map (comp by-id :id))
+                        (remove nil?)
+                        (sort-by :symbol)
+                        vec)]
+    (when (< (count candidates) 2)
+      (fail! :mithril/insufficient-candidates
+             "model selection requires at least two OWL/SPARQL-discovered handlers"))
+    (when-not (= (count candidates) (count (set (map :label candidates))))
+      (fail! :mithril/duplicate-candidate-label "candidate labels must be unique"))
+    candidates))
+
+(defn prepare-request [path doc library-artifacts]
+  (when-not (compiler/source-path? path)
+    (fail! :mithril/unsupported-extension "Mithril source must end in .mith or .mithril"))
+  (when-not (= compiler/context-uri (get doc "@context"))
+    (fail! :mithril/unpinned-context "synthesis source must use the pinned context"))
+  (when-not (= "SynthesizeWebApplication" (get doc "@type"))
+    (fail! :mithril/unexpected-source-type "@type must be SynthesizeWebApplication"))
+  (when-not (= source-keys (set (keys doc)))
+    (fail! :mithril/unknown-source-key "synthesis source has an unknown or missing key"))
+  (when-not (mithril-iri? (get doc "@id"))
+    (fail! :mithril/invalid-identifier
+           "synthesis @id must be a mithril.fund HTTPS IRI"))
+  (when-not (= web-goal (get doc "goal"))
+    (fail! :mithril/unknown-goal "synthesis goal is outside the v1 catalog"))
+  (let [libraries (imported-libraries doc library-artifacts)
+        ontology (get doc "ontology")
+        routes (get doc "routes")]
+    (when-not (and (string? ontology) (boolean (re-matches #"[0-9a-f]{64}" ontology)))
+      (fail! :mithril/invalid-ontology "ontology must be a 64-character SHA-256 identity"))
+    (doseq [library libraries]
+      (when-not (= ontology (get-in library [:library :ontology]))
+        (fail! :mithril/ontology-mismatch "application and library ontology identities differ")))
+    (when-not (and (vector? routes) (seq routes))
+      (fail! :mithril/missing-routes "synthesis routes must be a non-empty array"))
+    (doseq [route routes]
+      (validate-route! route))
+    (let [identities (mapv (juxt #(get % "method") #(get % "path")) routes)]
+      (when-not (= (count identities) (count (set identities)))
+        (fail! :mithril/duplicate-route "method and path pairs must be unique")))
+    (let [candidates (discover-handlers libraries)
+          labels (mapv :label candidates)
+          questions (mapv (fn [route]
+                            {:type "choice"
+                             :instructions (str "Select the imported handler for "
+                                                (get route "method") " " (get route "path")
+                                                ". Intent: " (get route "intent"))
+                             :options labels})
+                          routes)]
+      {:request {:state (str "Mithril web application " (get doc "@id")
+                             ". Goal: web application. Select only ontology-discovered, "
+                             "imported handler implementations. No source text may be generated.")
+                 :questions questions}
+       :candidates candidates
+       :libraries libraries})))
+
+(defn- admitted-decision [decision candidates]
+  (when-not (= #{:choice :probabilities :confidence} (set (keys decision)))
+    (fail! :mithril/invalid-model-decision "model decision has an invalid field set"))
+  (let [by-label (into {} (map (juxt :label identity) candidates))
+        labels (set (keys by-label))
+        probabilities (:probabilities decision)
+        choice (:choice decision)
+        confidence (:confidence decision)]
+    (when-not (and (map? probabilities)
+                   (= labels (set (keys probabilities)))
+                   (every? #(and (number? %) (<= 0 % 1)) (vals probabilities))
+                   (< (js/Math.abs (- 1 (reduce + (vals probabilities)))) 0.0001))
+      (fail! :mithril/invalid-model-distribution
+             "model probabilities must cover the exact candidate labels and sum to one"))
+    (when-not (contains? labels choice)
+      (fail! :mithril/outside-candidate-set "model choice is outside the discovered candidates"))
+    (let [winner-probability (apply max (vals probabilities))
+          choice-probability (get probabilities choice)
+          candidate (get by-label choice)
+          basis-points (js/Math.round (* 10000 confidence))]
+      (when-not (and (number? confidence)
+                     (< (js/Math.abs (- confidence choice-probability)) 0.000001)
+                     (< (js/Math.abs (- confidence winner-probability)) 0.000001))
+        (fail! :mithril/invalid-model-confidence
+               "model choice must be a winner and confidence must equal its probability"))
+      (when (< basis-points (:confidence-floor candidate))
+        (fail! :mithril/model-confidence-below-floor
+               (str "model confidence is below the ontology floor for " (:symbol candidate))))
+      {:candidate candidate
+       :confidence basis-points
+       :probabilities (into (sorted-map)
+                            (map (fn [[label probability]]
+                                   [label (js/Math.round (* 10000 probability))])
+                                 probabilities))})))
+
+(defn compile-with-model [path doc library-artifacts model-result]
+  (let [{:keys [candidates]} (prepare-request path doc library-artifacts)]
+    (when-not (= model-result-keys (set (keys model-result)))
+      (fail! :mithril/invalid-model-result "model result has an invalid field set"))
+    (when-not (= model-kind (:kind model-result))
+      (fail! :mithril/invalid-model-result "model result kind is not OpenJev v1"))
+    (when-not (false? (:generated_text model-result))
+      (fail! :mithril/generated-text-forbidden "model result must declare generated_text false"))
+    (when-not (map? (:model model-result))
+      (fail! :mithril/invalid-model-result "model provenance must be an object"))
+    (let [artifact (:artifact model-result)]
+      (when-not (and (= #{:repo_or_dir :revision} (set (keys artifact)))
+                     (model-repository? (:repo_or_dir artifact))
+                     (revision? (:revision artifact)))
+        (fail! :mithril/unpinned-model
+               "model repository and 40-character revision are required")))
+    (let [routes (get doc "routes")
+          decisions (:decisions model-result)]
+      (when-not (= (count routes) (count decisions))
+        (fail! :mithril/model-cardinality "model must answer exactly one question per route"))
+      (let [admitted (mapv #(admitted-decision % candidates) decisions)
+            compiled-routes (mapv (fn [route {:keys [candidate]}]
+                                    (-> route
+                                        (dissoc "intent")
+                                        (assoc "operation" (:symbol candidate))))
+                                  routes admitted)
+            explicit-doc (-> doc
+                             (assoc "@type" "WebApplication" "routes" compiled-routes))
+            artifact (compiler/compile-web-document path explicit-doc library-artifacts)
+            provenance (select-keys model-result [:kind :generated_text :artifact :model])]
+        (-> artifact
+            (assoc :source-graph-digest (compiler/graph-digest doc)
+                   :synthesis provenance)
+            (update-in [:web-ir :routes]
+                       (fn [compiled]
+                         (mapv (fn [route decision]
+                                 (assoc route :decision
+                                        {:kind :choice
+                                         :candidate (get-in decision [:candidate :symbol])
+                                         :confidence (:confidence decision)
+                                         :probabilities (:probabilities decision)}))
+                               compiled admitted))))))))

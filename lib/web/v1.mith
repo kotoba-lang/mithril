@@ -5,9 +5,10 @@
   "ontology": "f6371c58ffa5d9587867f9f7ae33aa62fabf99b354070c2ad6da5323d5c85ceb",
   "version": 1,
   "exports": [
-    {"symbol": "https://mithril.fund/lib/web/v1/router/exact", "kind": "mith:router"},
-    {"symbol": "https://mithril.fund/lib/web/v1/handler/static-response", "kind": "mith:handler"},
-    {"symbol": "https://mithril.fund/lib/web/v1/view/text", "kind": "mith:view"},
-    {"symbol": "https://mithril.fund/lib/web/v1/effect/http-response", "kind": "mith:effect"}
+    {"symbol": "https://mithril.fund/lib/web/v1/router/exact", "kind": "mith:router", "label": "exact path router", "confidenceFloor": 6000},
+    {"symbol": "https://mithril.fund/lib/web/v1/handler/static-response", "kind": "mith:handler", "label": "return the authored static response", "confidenceFloor": 6000},
+    {"symbol": "https://mithril.fund/lib/web/v1/handler/not-found", "kind": "mith:handler", "label": "return a not found response", "confidenceFloor": 6000},
+    {"symbol": "https://mithril.fund/lib/web/v1/view/text", "kind": "mith:view", "label": "render a plain text body", "confidenceFloor": 6000},
+    {"symbol": "https://mithril.fund/lib/web/v1/effect/http-response", "kind": "mith:effect", "label": "emit a typed HTTP response", "confidenceFloor": 6000}
   ]
 }

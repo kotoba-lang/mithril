@@ -14,6 +14,7 @@
     "Program" "mith:Program"
     "Library" "mith:Library"
     "WebApplication" "mith:WebApplication"
+    "SynthesizeWebApplication" "mith:SynthesizeWebApplication"
     "goal" {"@id" "mith:goal" "@type" "@id"}
     "ontology" "mith:ontologyDigest"
     "choices" {"@id" "mith:choice" "@container" "@set"}
@@ -26,6 +27,9 @@
     "exports" {"@id" "mith:export" "@container" "@set"}
     "symbol" {"@id" "mith:symbol" "@type" "@id"}
     "kind" {"@id" "mith:kind" "@type" "@vocab"}
+    "label" "mith:label"
+    "confidenceFloor" {"@id" "mith:confidenceFloor"
+                       "@type" "http://www.w3.org/2001/XMLSchema#integer"}
     "imports" {"@id" "mith:import" "@container" "@set"}
     "library" {"@id" "mith:library" "@type" "@id"}
     "digest" "mith:digest"
@@ -33,6 +37,7 @@
     "method" "mith:method"
     "path" "mith:path"
     "operation" {"@id" "mith:operation" "@type" "@id"}
+    "intent" "mith:intent"
     "status" {"@id" "mith:status"
               "@type" "http://www.w3.org/2001/XMLSchema#integer"}
     "contentType" "mith:contentType"
@@ -60,7 +65,7 @@
 (def choice-keys #{"role" "candidate" "confidence"})
 
 (def library-keys #{"@context" "@id" "@type" "ontology" "version" "exports"})
-(def export-keys #{"symbol" "kind"})
+(def export-keys #{"symbol" "kind" "label" "confidenceFloor"})
 (def web-app-keys #{"@context" "@id" "@type" "goal" "ontology" "imports" "routes"})
 (def import-keys #{"library" "digest"})
 (def route-keys #{"method" "path" "operation" "status" "contentType" "body"})
@@ -110,7 +115,7 @@
            (str expected-type " contains an unknown key")))
   doc)
 
-(defn- canonical-graph [doc]
+(defn graph-digest [doc]
   (let [expanded (jsonld/expand doc {:contexts {context-uri context-document}})
         dataset (to-rdf/to-rdf expanded)]
     (str "sha256:" (rdf-canon/canonical-hash dataset))))
@@ -187,10 +192,17 @@
   (when-not (and (map? entry) (= export-keys (set (keys entry))))
     (fail! :mithril/invalid-export "library export contains an unknown or missing key"))
   (let [symbol (require-iri! (get entry "symbol") "export symbol")
-        kind (get entry "kind")]
+        kind (get entry "kind")
+        label (get entry "label")
+        floor (get entry "confidenceFloor")]
     (when-not (contains? export-kinds kind)
       (fail! :mithril/unknown-export-kind (str "unknown export kind: " kind)))
-    {:symbol symbol :kind (keyword (subs kind 5))}))
+    (when-not (and (string? label) (not (str/blank? label)) (<= (count label) 128))
+      (fail! :mithril/invalid-export-label "export label must be 1 through 128 characters"))
+    (when-not (and (integer? floor) (<= 0 floor 10000))
+      (fail! :mithril/invalid-confidence-floor
+             "export confidenceFloor must be an integer from 0 through 10000"))
+    {:symbol symbol :kind (keyword (subs kind 5)) :label label :confidence-floor floor}))
 
 (defn compile-library-document [path doc]
   (require-base-source! path doc "Library" library-keys)
@@ -208,7 +220,7 @@
         (fail! :mithril/duplicate-export "library export symbols must be unique"))
       {:format "https://mithril.fund/artifact/library-v1"
        :media-type media-type
-       :graph-digest (canonical-graph doc)
+       :graph-digest (graph-digest doc)
        :library {:id library-id
                  :version version
                  :ontology ontology
@@ -292,7 +304,7 @@
           (fail! :mithril/duplicate-route "method and path pairs must be unique"))
         {:format "https://mithril.fund/artifact/web-application-v1"
          :media-type media-type
-         :graph-digest (canonical-graph doc)
+         :graph-digest (graph-digest doc)
          :web-ir {:version :mithril.web/v1
                   :goal :goal/web-application
                   :ontology ontology
