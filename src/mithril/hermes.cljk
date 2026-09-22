@@ -106,6 +106,7 @@
      :read-fn (fn [value] (.readFileSync fs value "utf8"))
      :lstat-fn (fn [value] (.lstatSync fs value))
      :realpath-fn (fn [value] (.realpathSync fs value))
+     :exists-fn (fn [value] (.existsSync fs value))
      :write-fn (fn [value content]
                  (.mkdirSync fs (.dirname path value) #js {:recursive true})
                  (let [temporary (str value ".tmp-" (.-pid js/process))]
@@ -156,6 +157,10 @@
   (join-fn (:artifact-dir profile)
            (str (str/replace (:run-id effect) ":" "_") ".proposal.edn")))
 
+(defn- proposal-workspace-path [profile effect join-fn]
+  (join-fn (:artifact-dir profile)
+           (str (str/replace (:run-id effect) ":" "_") ".workspace")))
+
 (defn- git! [ctx workspace & args]
   ((:exec-fn ctx) "/usr/bin/git" (vec args) workspace 30000))
 
@@ -184,19 +189,44 @@
       result)))
 
 (defn- proposal-prompt [effect files]
-  (str "You are a patch advisor with no tools. Return exactly one git unified diff and nothing else.\n"
-       "The diff may modify only the listed files. Do not rename, delete, chmod, add binaries, or add symlinks.\n"
+  (str "You are a patch advisor in an isolated disposable Git worktree. Use only relative paths and the file tools.\n"
+       "Read and edit only the listed files. Do not rename, delete, chmod, add files, add binaries, or add symlinks.\n"
+       "Apply the requested edit with the patch tool, verify by reading the changed lines, then answer DONE.\n"
        "Goal: " (:goal effect) "\n"
-       (str/join "\n" (map (fn [{:keys [path content]}]
-                               (str "<file path=\"" path "\">\n" content "\n</file>"))
+       (str/join "\n" (map (fn [{:keys [path]}]
+                               (str "<allowed-file>" path "</allowed-file>"))
                              files))))
 
 (defn- default-propose! [ctx profile effect files]
-  (let [{program :program proposer-profile :profile timeout-ms :timeout-ms} (:proposer profile)]
-    ((:exec-fn ctx) program
-     ["-p" proposer-profile "--ignore-rules" "-t" "none" "--in" (:workspace effect)
-      "-z" (proposal-prompt effect files)]
-     (:workspace effect) timeout-ms)))
+  (let [{program :program proposer-profile :profile timeout-ms :timeout-ms} (:proposer profile)
+        proposal-workspace (proposal-workspace-path profile effect (:join-fn ctx))]
+    (when-not ((:exists-fn ctx) proposal-workspace)
+      ((:exec-fn ctx) "/usr/bin/git"
+       ["worktree" "add" "--detach" proposal-workspace
+        (str/trim (git! ctx (:workspace profile) "rev-parse" "HEAD"))]
+       (:workspace profile) 30000))
+    (let [untracked (git! ctx proposal-workspace "ls-files" "--others" "--exclude-standard")
+          current-diff (git! ctx proposal-workspace "diff" "--binary" "--")]
+      (when (and (str/blank? current-diff) (str/blank? untracked))
+        (try
+          ((:exec-fn ctx) program
+           ["-p" proposer-profile "--ignore-rules" "-t" "file" "--in" proposal-workspace
+            "-z" (proposal-prompt effect files)]
+           proposal-workspace timeout-ms)
+          (catch :default _
+            (fail! :mithril.hermes/proposer-failed
+                   "Hermes proposer did not complete within its governed invocation" {}))))
+      (let [untracked-after (git! ctx proposal-workspace "ls-files" "--others" "--exclude-standard")
+            changed (->> (str/split-lines
+                          (git! ctx proposal-workspace "diff" "--name-only" "--"))
+                         (remove str/blank?) set)
+            patch (git! ctx proposal-workspace "diff" "--binary" "--")]
+        (when-not (and (str/blank? untracked-after)
+                       (seq changed)
+                       (every? (set (:allowed-paths profile)) changed))
+          (fail! :mithril.hermes/proposer-workspace-denied
+                 "proposer changed an untracked or non-allowlisted path" {}))
+        patch))))
 
 (defn- diff-paths! [profile patch]
   (when (or (str/blank? patch)

@@ -294,11 +294,13 @@ kbb --backend sci bin/mithril-hermes.cljk tick \
 
 The coding profile fixes an absolute isolated Git workspace, an exact file
 allowlist, byte/time budgets, one Hermes proposer profile, and exact argv for
-compile and test. The proposer is invoked with `-t none`: it receives only the
-goal and bounded allowlisted file snapshot and can return only a raw unified
-diff. It cannot call a tool. The host checks clean `HEAD`, profile and patch
-digests, path/mode/binary constraints, then runs `git apply --check` before the
-write. Compile and test use `execFile` with the profile's argv and no shell;
+compile and test. The host creates a detached disposable Git worktree at the
+bound base `HEAD`, then invokes the Hermes proposer with only the `file`
+toolset. The proposer may read and patch that scratch worktree, never the target
+workspace. The host ignores prose, rejects untracked/non-allowlisted changes,
+and extracts the proposal from `git diff`. It then checks profile and patch
+digests plus path/mode/binary constraints before running `git apply --check`
+and writing the target. Compile and test use `execFile` with the profile's argv and no shell;
 neither Jev nor the proposing model can invent a command or argument. Patch
 text and tool output stay in the private artifact directory and are represented
 in state/audit only by digests and bounded counts.
