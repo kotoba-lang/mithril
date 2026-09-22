@@ -8,10 +8,11 @@
 
 (def artifact-format "https://mithril.fund/artifact/desktop-application-v1")
 (def goal "https://mithril.fund/id/goal/hermes-agent-loop")
-(def source-keys #{"@context" "@id" "@type" "goal" "page" "loop" "actor"})
+(def source-keys #{"@context" "@id" "@type" "goal" "page" "loop" "actor" "activity"})
 (def page-keys #{"name" "description" "headline" "summary" "path" "navLabel" "codicon"})
 (def loop-keys #{"maxSteps" "maxPolls" "pollIntervalMs" "sessionTitle" "actions"})
 (def actor-keys #{"protocol" "governor" "receiptPolicy" "workspacePolicy" "maxGoalChars"})
+(def activity-keys #{"schedulerPolicy" "boardPolicy" "maxActiveJobs" "maxDispatchTasks"})
 (def required-actions
   ["https://mithril.fund/id/action/profiles-list"
    "https://mithril.fund/id/action/session-list"
@@ -21,6 +22,14 @@
    "https://mithril.fund/id/action/session-status"
    "https://mithril.fund/id/action/session-history"
    "https://mithril.fund/id/action/session-interrupt"
+   "https://mithril.fund/id/action/cron-list"
+   "https://mithril.fund/id/action/cron-add"
+   "https://mithril.fund/id/action/cron-pause"
+   "https://mithril.fund/id/action/cron-resume"
+   "https://mithril.fund/id/action/cron-remove"
+   "https://mithril.fund/id/action/kanban-board-read"
+   "https://mithril.fund/id/action/kanban-task-create"
+   "https://mithril.fund/id/action/kanban-dispatch"
    "https://mithril.fund/id/action/stop"])
 
 (def actor-contract
@@ -28,6 +37,10 @@
    "governor" "https://mithril.fund/id/governor/user-commit-v1"
    "receiptPolicy" "https://mithril.fund/id/receipt/append-only-v1"
    "workspacePolicy" "https://mithril.fund/id/workspace/user-selected-local-v1"})
+
+(def activity-contract
+  {"schedulerPolicy" "https://mithril.fund/id/scheduler/hermes-profile-cron-v1"
+   "boardPolicy" "https://mithril.fund/id/board/hermes-kanban-v1"})
 
 (defn- fail! [code detail]
   (throw (ex-info detail {:mithril/error code :detail detail})))
@@ -48,7 +61,8 @@
     (fail! :mithril/unknown-source-key "desktop source has an unknown or missing key"))
   (when-not (= goal (get doc "goal"))
     (fail! :mithril/unknown-goal "desktop goal is outside the closed catalog"))
-  (let [page (get doc "page") loop-spec (get doc "loop") actor (get doc "actor")]
+  (let [page (get doc "page") loop-spec (get doc "loop") actor (get doc "actor")
+        activity (get doc "activity")]
     (when-not (= page-keys (set (keys page)))
       (fail! :mithril.desktop/invalid-page "desktop page has an unknown or missing key"))
     (doseq [[field ceiling] [["name" 80] ["description" 240] ["headline" 120]
@@ -59,9 +73,9 @@
     (when-not (= loop-keys (set (keys loop-spec)))
       (fail! :mithril.desktop/invalid-loop "desktop loop has an unknown or missing key"))
     (when-not (= required-actions (get loop-spec "actions"))
-      (fail! :mithril.desktop/invalid-actions "desktop v1 requires the closed five-action state machine"))
-    (when-not (= 9 (get loop-spec "maxSteps"))
-      (fail! :mithril.desktop/invalid-budget "desktop v1 requires exactly nine admitted actions"))
+      (fail! :mithril.desktop/invalid-actions "desktop v1 requires the closed seventeen-action state machine"))
+    (when-not (= 17 (get loop-spec "maxSteps"))
+      (fail! :mithril.desktop/invalid-budget "desktop v1 requires exactly seventeen admitted actions"))
     (let [max-polls (get loop-spec "maxPolls") poll-ms (get loop-spec "pollIntervalMs")]
       (when-not (and (integer? max-polls) (<= 1 max-polls 300))
         (fail! :mithril.desktop/invalid-budget "maxPolls must be 1 through 300"))
@@ -75,6 +89,17 @@
         (fail! :mithril.desktop/invalid-actor (str field " is outside the closed actor catalog"))))
     (when-not (= 4096 (get actor "maxGoalChars"))
       (fail! :mithril.desktop/invalid-actor "desktop v1 maxGoalChars must be 4096"))
+    (when-not (= activity-keys (set (keys activity)))
+      (fail! :mithril.desktop/invalid-activity "desktop activity has an unknown or missing key"))
+    (doseq [[field expected] activity-contract]
+      (when-not (= expected (get activity field))
+        (fail! :mithril.desktop/invalid-activity (str field " is outside the closed activity catalog"))))
+    (when-not (and (integer? (get activity "maxActiveJobs"))
+                   (<= 1 (get activity "maxActiveJobs") 64))
+      (fail! :mithril.desktop/invalid-activity "maxActiveJobs must be 1 through 64"))
+    (when-not (and (integer? (get activity "maxDispatchTasks"))
+                   (<= 1 (get activity "maxDispatchTasks") 16))
+      (fail! :mithril.desktop/invalid-activity "maxDispatchTasks must be 1 through 16"))
     {:format artifact-format
      :media-type compiler/media-type
      :graph-digest (compiler/graph-digest doc)
@@ -84,20 +109,28 @@
                          :headline (get page "headline") :summary (get page "summary")
                          :path (get page "path") :nav-label (get page "navLabel")
                          :codicon (get page "codicon")}
-                  :loop {:max-steps 9 :max-polls (get loop-spec "maxPolls")
+                  :loop {:max-steps 17 :max-polls (get loop-spec "maxPolls")
                          :poll-interval-ms (get loop-spec "pollIntervalMs")
                          :session-title (get loop-spec "sessionTitle")
                          :actions [:profiles/list :session/list :session/create
                                    :session/resume :prompt/submit :session/status
-                                   :session/history :session/interrupt :stop]}
+                                   :session/history :session/interrupt
+                                   :cron/list :cron/add :cron/pause :cron/resume :cron/remove
+                                   :kanban/board-read :kanban/task-create :kanban/dispatch :stop]}
                   :actor {:protocol (get actor "protocol")
                           :governor (get actor "governor")
                           :receipt-policy (get actor "receiptPolicy")
                           :workspace-policy (get actor "workspacePolicy")
                           :max-goal-chars 4096}
+                  :activity {:scheduler-policy (get activity "schedulerPolicy")
+                             :board-policy (get activity "boardPolicy")
+                             :max-active-jobs (get activity "maxActiveJobs")
+                             :max-dispatch-tasks (get activity "maxDispatchTasks")}
                   :capabilities [:hermes/profile-read :hermes/session-create
                                  :hermes/session-resume :hermes/session-read
                                  :hermes/session-interrupt :hermes/prompt-submit
+                                 :hermes/cron-manage :hermes/kanban-read
+                                 :hermes/kanban-task-create :hermes/kanban-dispatch
                                  :plugin/storage]}}))
 
 (defn compile-text [path text]
@@ -117,6 +150,7 @@
         page (:page ir)
         loop-spec (:loop ir)
         actor (:actor ir)
+        activity (:activity ir)
         data (json {"version" "mithril.desktop/v1"
                     "graphDigest" (:graph-digest artifact)
                     "page" {"name" (:name page) "description" (:description page)
@@ -131,7 +165,11 @@
                              "governor" (:governor actor)
                              "receiptPolicy" (:receipt-policy actor)
                              "workspacePolicy" (:workspace-policy actor)
-                             "maxGoalChars" (:max-goal-chars actor)}})]
+                             "maxGoalChars" (:max-goal-chars actor)}
+                    "activity" {"schedulerPolicy" (:scheduler-policy activity)
+                                "boardPolicy" (:board-policy activity)
+                                "maxActiveJobs" (:max-active-jobs activity)
+                                "maxDispatchTasks" (:max-dispatch-tasks activity)}})]
     (str
      "// Generated by mithril.desktop/v1. Do not edit.\n"
      "import React,{useEffect,useState} from 'react';\n"
@@ -143,25 +181,31 @@
      "const absolutePath=value=>value.startsWith('/')||/^[A-Za-z]:[\\\\/]/.test(value);\n"
      "const errorText=error=>String(error?.message||error);\n"
      "function appendReceipt(ctx,receipt){const all=ctx.storage.get('receipts-v1',[]);ctx.storage.set('receipts-v1',[...all,receipt]);}\n"
+     "function activityReceipt(ctx,update,action,status,detail){const receipt={id:Date.now()+'-'+action,at:new Date().toISOString(),action,status,detail};appendReceipt(ctx,receipt);update(current=>({...current,phase:status,receipts:[...current.receipts.slice(-99),receipt]}));return receipt;}\n"
      "function govern({text,workspace,profile,profiles}){if(!text.trim()||text.length>IR.actor.maxGoalChars)throw new Error('Input must be 1 through '+IR.actor.maxGoalChars+' characters');if(!workspace.trim()||workspace.length>1024||!absolutePath(workspace))throw new Error('Workspace must be an absolute local path');if(profile&&!profiles.some(p=>p.name===profile))throw new Error('Selected bot/profile is not in the live catalog');}\n"
      "async function runTurn(input,ctx,update){const receipts=[];const record=(action,status,detail)=>{const receipt={id:Date.now()+'-'+(receipts.length+1),at:new Date().toISOString(),action,status,detail};receipts.push(receipt);appendReceipt(ctx,receipt);update({phase:status,receipts:[...receipts]});return receipt;};govern(input);let active=input.session;try{if(!active?.runtimeId){record('session/create','running',{workspace:input.workspace,profile:input.profile||null});const created=await host.request('session.create',{title:IR.loop.sessionTitle,source:'mithril-desktop',cwd:input.workspace,profile:input.profile||null,hidden:false,follow_profile_config:true});active={runtimeId:created.session_id,storedId:created.stored_session_id||created.info?.stored_session_id||created.session_id,title:created.info?.title||IR.loop.sessionTitle};record('session/create','executed',{session_id:active.runtimeId,stored_session_id:active.storedId});update({session:active,messages:created.messages||[]});}const before=await host.request('session.history',{session_id:active.runtimeId,profile:input.profile||null});const baseline=before.count||0;record('prompt/submit','running',{kind:input.kind,baseline});await host.request('prompt.submit',{session_id:active.runtimeId,profile:input.profile||null,text:semanticRequest(input.kind,input.text,input.workspace),surface:'mithril-desktop',title_preview:input.text.slice(0,80)});record('prompt/submit','executed',null);for(let poll=1;poll<=IR.loop.maxPolls;poll++){const status=await host.request('session.status',{session_id:active.runtimeId,profile:input.profile||null});const history=await host.request('session.history',{session_id:active.runtimeId,profile:input.profile||null});const fresh=(history.messages||[]).slice(baseline);const answer=[...fresh].reverse().find(m=>m.role==='assistant'&&m.text);update({messages:history.messages||[],session:active});if(answer){record('session/status','executed',{poll,output:status.output});record('session/history','executed',{poll,count:history.count});record('stop','committed',{reason:'assistant-complete',session_id:active.runtimeId});return {receipts,session:active,messages:history.messages||[]};}await sleep(IR.loop.pollIntervalMs);}record('stop','held',{reason:'poll-budget-exhausted',session_id:active.runtimeId});return {receipts,session:active,messages:[]};}catch(error){record('stop','refused',{reason:errorText(error)});throw error;}}\n"
      "const tabStyle=active=>({padding:'7px 12px',border:'1px solid var(--ui-stroke-secondary)',borderRadius:'6px',background:active?'var(--ui-bg-secondary)':'transparent',color:'var(--ui-text-primary)',cursor:'pointer'});\n"
      "const cardStyle={padding:'12px',border:'1px solid var(--ui-stroke-secondary)',borderRadius:'8px',background:'var(--ui-bg-secondary)'};\n"
-     "function App({ctx}){const [tab,setTab]=useState('coding');const [workspace,setWorkspace]=useState(()=>ctx.storage.get('workspace',''));const [goal,setGoal]=useState('Implement and verify one bounded change in this workspace.');const [chat,setChat]=useState('');const [profiles,setProfiles]=useState([]);const [profile,setProfile]=useState(()=>ctx.storage.get('profile',''));const [sessions,setSessions]=useState([]);const [session,setSession]=useState(null);const [messages,setMessages]=useState([]);const [state,setState]=useState({phase:'idle',receipts:ctx.storage.get('receipts-v1',[]).slice(-100)});const running=state.phase==='running';const update=patch=>setState(current=>({...current,...patch}));\n"
+     "function App({ctx}){const [tab,setTab]=useState('coding');const [workspace,setWorkspace]=useState(()=>ctx.storage.get('workspace',''));const [goal,setGoal]=useState('Implement and verify one bounded change in this workspace.');const [chat,setChat]=useState('');const [profiles,setProfiles]=useState([]);const [profile,setProfile]=useState(()=>ctx.storage.get('profile',''));const [sessions,setSessions]=useState([]);const [session,setSession]=useState(null);const [messages,setMessages]=useState([]);const [busy,setBusy]=useState(false);const [cronJobs,setCronJobs]=useState([]);const [board,setBoard]=useState({columns:[]});const [routine,setRoutine]=useState({name:'Mithril routine',schedule:'every 1h',prompt:'Inspect the selected workspace and complete one bounded, verified improvement.'});const [card,setCard]=useState({title:'Mithril coding task',body:'Complete one bounded change and verify it.'});const [state,setState]=useState({phase:'idle',receipts:ctx.storage.get('receipts-v1',[]).slice(-100)});const running=busy;const update=patch=>setState(current=>({...current,...patch}));\n"
      " const refreshProfiles=async()=>{const result=await host.request('profiles.list',{include_sessions:true});const rows=result.profiles||[];setProfiles(rows);if(!profile){const chosen=rows.find(p=>p.is_default)?.name||rows[0]?.name||'';setProfile(chosen);ctx.storage.set('profile',chosen);}return rows;};\n"
      " const refreshSessions=async(selected=profile)=>{const result=await host.request('session.list',{profile:selected||null,limit:100,include_hidden:false});setSessions(result.sessions||[]);};\n"
-     " useEffect(()=>{refreshProfiles().then(rows=>refreshSessions(profile||rows.find(p=>p.is_default)?.name||rows[0]?.name||'')).catch(error=>update({phase:'refused',error:errorText(error)}));},[]);\n"
+     " const refreshCron=async(selected=profile)=>{const result=await host.request('cron.manage',{action:'list',include_disabled:true,profile:selected||null});setCronJobs((result.jobs||result.crons||[]).slice(0,IR.activity.maxActiveJobs));return result;};\n"
+     " const refreshBoard=async()=>{const result=await ctx.rest('/kanban/board');setBoard(result||{columns:[]});return result;};\n"
+     " useEffect(()=>{refreshProfiles().then(rows=>{const selected=profile||rows.find(p=>p.is_default)?.name||rows[0]?.name||'';return Promise.all([refreshSessions(selected),refreshCron(selected),refreshBoard()]);}).catch(error=>update({phase:'refused',error:errorText(error)}));},[]);\n"
      " const chooseProfile=value=>{setProfile(value);ctx.storage.set('profile',value);setSession(null);setMessages([]);refreshSessions(value).catch(error=>update({phase:'refused',error:errorText(error)}));};\n"
      " const chooseWorkspace=value=>{setWorkspace(value);ctx.storage.set('workspace',value);};\n"
-     " const resume=async row=>{update({phase:'running',error:null});try{const result=await host.request('session.resume',{session_id:row.id,profile:profile||null,eager_build:true});const active={runtimeId:result.session_id,storedId:result.stored_session_id||row.id,title:row.title||result.info?.title||''};setSession(active);setMessages(result.messages||[]);update({phase:'executed'});setTab('chat');}catch(error){update({phase:'refused',error:errorText(error)});}};\n"
-     " const submit=async(kind,text,clear)=>{update({phase:'running',receipts:[],error:null});try{const result=await runTurn({kind,text,workspace,profile,profiles,session},ctx,patch=>{if(patch.session)setSession(patch.session);if(patch.messages)setMessages(patch.messages);update(patch);});setSession(result.session);setMessages(result.messages);update({phase:result.receipts.at(-1)?.status||'executed',receipts:result.receipts});if(clear)setChat('');refreshSessions(profile);}catch(error){update({phase:'refused',error:errorText(error)});}};\n"
+     " const resume=async row=>{setBusy(true);update({phase:'running',error:null});try{const result=await host.request('session.resume',{session_id:row.id,profile:profile||null,eager_build:true});const active={runtimeId:result.session_id,storedId:result.stored_session_id||row.id,title:row.title||result.info?.title||''};setSession(active);setMessages(result.messages||[]);update({phase:'executed'});setTab('chat');}catch(error){update({phase:'refused',error:errorText(error)});}finally{setBusy(false);}};\n"
+     " const submit=async(kind,text,clear)=>{setBusy(true);update({phase:'running',receipts:[],error:null});try{const result=await runTurn({kind,text,workspace,profile,profiles,session},ctx,patch=>{if(patch.session)setSession(patch.session);if(patch.messages)setMessages(patch.messages);update(patch);});setSession(result.session);setMessages(result.messages);update({phase:result.receipts.at(-1)?.status||'executed',receipts:result.receipts});if(clear)setChat('');refreshSessions(profile);}catch(error){update({phase:'refused',error:errorText(error)});}finally{setBusy(false);}};\n"
+     " const cronAction=async(action,job)=>{setBusy(true);activityReceipt(ctx,setState,'cron/'+action,'running',{profile,job:job?.id||null});try{const params={action,profile:profile||null};if(action==='add')Object.assign(params,{name:'[mithril:'+profile+'] '+routine.name,schedule:routine.schedule,prompt:semanticRequest('mithril/cron-task',routine.prompt,workspace),repeat:true,continuity:'new',deliver:false});else params.job_id=job.id;const result=await host.request('cron.manage',params);activityReceipt(ctx,setState,'cron/'+action,'committed',result);await refreshCron(profile);}catch(error){activityReceipt(ctx,setState,'cron/'+action,'refused',{reason:errorText(error)});}finally{setBusy(false);}};\n"
+     " const createCard=async()=>{setBusy(true);activityReceipt(ctx,setState,'kanban/task-create','running',{profile,workspace});try{govern({text:card.body,workspace,profile,profiles});const created=await ctx.rest('/kanban/tasks',{method:'POST',body:{title:card.title,body:semanticRequest('mithril/kanban-task',card.body,workspace),assignee:profile||null,workspace_kind:'dir',workspace_path:workspace,triage:false,idempotency_key:'mithril-'+Date.now(),max_runtime_seconds:900}});activityReceipt(ctx,setState,'kanban/task-create','committed',{task_id:created?.task?.id});const dispatched=await ctx.rest('/kanban/dispatch?max='+IR.activity.maxDispatchTasks,{method:'POST'});activityReceipt(ctx,setState,'kanban/dispatch','executed',dispatched);await refreshBoard();}catch(error){activityReceipt(ctx,setState,'kanban/task-create','refused',{reason:errorText(error)});}finally{setBusy(false);}};\n"
      " const interrupt=async()=>{if(!session?.runtimeId)return;try{await host.request('session.interrupt',{session_id:session.runtimeId,profile:profile||null});update({phase:'held'});}catch(error){update({phase:'refused',error:errorText(error)});}};\n"
-     " const header=jsxs('header',{children:[jsx(Badge,{children:'Mithril governed coding'}),jsx('h1',{style:{fontSize:'24px',margin:'10px 0 4px'},children:IR.page.headline}),jsx('p',{style:{color:'var(--ui-text-secondary)',maxWidth:'820px'},children:IR.page.summary}),jsxs('div',{style:{display:'flex',gap:'8px',marginTop:'12px',flexWrap:'wrap'},children:['coding','chat','sessions','bots'].map(name=>jsx('button',{style:tabStyle(tab===name),onClick:()=>setTab(name),children:name[0].toUpperCase()+name.slice(1)},name))})]});\n"
+     " const header=jsxs('header',{children:[jsx(Badge,{children:'Mithril governed coding'}),jsx('h1',{style:{fontSize:'24px',margin:'10px 0 4px'},children:IR.page.headline}),jsx('p',{style:{color:'var(--ui-text-secondary)',maxWidth:'820px'},children:IR.page.summary}),jsxs('div',{style:{display:'flex',gap:'8px',marginTop:'12px',flexWrap:'wrap'},children:['coding','chat','sessions','bots','activity'].map(name=>jsx('button',{style:tabStyle(tab===name),onClick:()=>setTab(name),children:name[0].toUpperCase()+name.slice(1)},name))})]});\n"
      " const controls=jsxs('section',{style:{display:'grid',gridTemplateColumns:'minmax(260px,1fr) minmax(180px,280px)',gap:'10px'},children:[jsx(Input,{value:workspace,onChange:e=>chooseWorkspace(e.target.value),placeholder:'/absolute/path/to/workspace','aria-label':'Coding workspace'}),jsx('select',{value:profile,onChange:e=>chooseProfile(e.target.value),style:{padding:'8px',borderRadius:'6px',background:'var(--ui-bg-secondary)',color:'var(--ui-text-primary)',border:'1px solid var(--ui-stroke-secondary)'},'aria-label':'Bot profile',children:profiles.map(p=>jsx('option',{value:p.name,children:(p.display_name||p.name)+(p.model?' — '+p.model:'')},p.name))})]});\n"
      " const coding=jsxs('section',{style:{display:'grid',gap:'10px'},children:[jsx(Textarea,{value:goal,onChange:e=>setGoal(e.target.value),rows:6,'aria-label':'Coding goal'}),jsxs('div',{style:{display:'flex',gap:'10px',alignItems:'center'},children:[jsx(Button,{onClick:()=>submit('mithril/coding-request',goal,false),disabled:running,children:running?'Coding…':session?'Continue coding session':'Run coding agent'}),session&&jsx(Button,{variant:'secondary',onClick:()=>{setSession(null);setMessages([]);},disabled:running,children:'New session'}),jsx(StatusDot,{status:state.phase==='committed'||state.phase==='executed'?'online':state.phase==='refused'?'error':'idle'}),jsx('span',{style:{color:'var(--ui-text-secondary)'},children:state.phase})]}),state.error&&jsx('p',{style:{color:'var(--ui-danger-foreground)'},children:state.error}),jsx('p',{style:{color:'var(--ui-text-tertiary)',fontSize:'12px'},children:'The user commits the task. The model proposes changes; Hermes tools and checks execute them inside the selected workspace. Every transition is receipted.'})]});\n"
      " const chatView=jsxs('section',{style:{display:'grid',gridTemplateRows:'1fr auto',gap:'12px',minHeight:0},children:[jsx(ScrollArea,{children:jsx('div',{style:{display:'grid',gap:'10px'},children:messages.map((m,i)=>jsxs('article',{style:cardStyle,children:[jsx('strong',{children:m.role+(m.name?' · '+m.name:'')}),jsx('pre',{style:{whiteSpace:'pre-wrap',fontFamily:'inherit',margin:'6px 0 0'},children:m.text||m.context||''})]},m.row_id||i))})}),jsxs('div',{style:{display:'grid',gap:'8px'},children:[jsx(Textarea,{value:chat,onChange:e=>setChat(e.target.value),rows:3,placeholder:session?'Continue this session…':'A session will be created on send.','aria-label':'Chat message'}),jsxs('div',{style:{display:'flex',gap:'8px'},children:[jsx(Button,{onClick:()=>submit('mithril/chat-message',chat,true),disabled:running||!chat.trim(),children:'Send'}),jsx(Button,{variant:'secondary',onClick:interrupt,disabled:!running||!session,children:'Interrupt'})]})]})]});\n"
      " const sessionView=jsx(ScrollArea,{children:jsx('div',{style:{display:'grid',gap:'8px'},children:sessions.map(row=>jsxs('button',{onClick:()=>resume(row),style:{...cardStyle,textAlign:'left',color:'var(--ui-text-primary)',cursor:'pointer'},children:[jsx('strong',{children:row.title||row.id}),jsx('p',{style:{margin:'4px 0',color:'var(--ui-text-secondary)'},children:row.preview||'No preview'}),jsx('small',{children:(row.message_count||0)+' messages · '+(row.source||'unknown source')})]},row.id))})});\n"
      " const botView=jsx(ScrollArea,{children:jsx('div',{style:{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(220px,1fr))',gap:'10px'},children:profiles.map(p=>jsxs('button',{onClick:()=>{chooseProfile(p.name);setTab('coding');},style:{...cardStyle,textAlign:'left',color:'var(--ui-text-primary)',cursor:'pointer'},children:[jsx('strong',{children:p.display_name||p.name}),jsx('p',{style:{color:'var(--ui-text-secondary)'},children:p.description||'Hermes profile'}),jsx('small',{children:(p.model||'configured model')+' · '+p.skill_count+' skills'})]},p.name))})});\n"
+     " const activityView=jsx(ScrollArea,{children:jsxs('div',{style:{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(320px,1fr))',gap:'12px'},children:[jsxs('section',{style:cardStyle,children:[jsx('h2',{children:'Cron routines'}),jsx(Input,{value:routine.name,onChange:e=>setRoutine({...routine,name:e.target.value}),placeholder:'Routine name','aria-label':'Routine name'}),jsx(Input,{value:routine.schedule,onChange:e=>setRoutine({...routine,schedule:e.target.value}),placeholder:'every 1h','aria-label':'Cron schedule'}),jsx(Textarea,{value:routine.prompt,onChange:e=>setRoutine({...routine,prompt:e.target.value}),rows:4,'aria-label':'Routine prompt'}),jsx(Button,{onClick:()=>cronAction('add'),disabled:busy,children:'Schedule bot'}),...cronJobs.map(job=>jsxs('article',{style:{...cardStyle,marginTop:'8px'},children:[jsx('strong',{children:job.name||job.id}),jsx('p',{children:job.schedule||job.cron||'scheduled'}),jsxs('div',{style:{display:'flex',gap:'6px'},children:[jsx(Button,{variant:'secondary',onClick:()=>cronAction(job.enabled===false?'resume':'pause',job),disabled:busy,children:job.enabled===false?'Resume':'Pause'}),jsx(Button,{variant:'secondary',onClick:()=>cronAction('remove',job),disabled:busy,children:'Remove'})]})]},job.id))]}),jsxs('section',{style:cardStyle,children:[jsx('h2',{children:'Kanban activity'}),jsx(Input,{value:card.title,onChange:e=>setCard({...card,title:e.target.value}),placeholder:'Task title','aria-label':'Kanban task title'}),jsx(Textarea,{value:card.body,onChange:e=>setCard({...card,body:e.target.value}),rows:4,'aria-label':'Kanban task body'}),jsx(Button,{onClick:createCard,disabled:busy,children:'Create and dispatch'}),...(board.columns||[]).map(column=>jsxs('section',{style:{marginTop:'10px'},children:[jsx('strong',{children:column.name+' ('+(column.tasks||[]).length+')'}),...(column.tasks||[]).slice(0,8).map(task=>jsx('p',{style:{margin:'4px 0',color:'var(--ui-text-secondary)'},children:(task.assignee?'['+task.assignee+'] ':'')+task.title},task.id))]},column.name))]})]})});\n"
      " const receiptView=jsx('details',{children:[jsx('summary',{children:'Execution receipts ('+state.receipts.length+')'}),jsx('ol',{children:state.receipts.slice(-20).map(r=>jsxs('li',{children:[jsx('strong',{children:r.action}),jsx('span',{children:' — '+r.status})]},r.id))})]});\n"
-     " return jsxs('main',{style:{padding:'24px',height:'100%',display:'grid',gridTemplateRows:'auto auto minmax(0,1fr) auto',gap:'16px',color:'var(--ui-text-primary)'},children:[header,controls,tab==='coding'?coding:tab==='chat'?chatView:tab==='sessions'?sessionView:botView,receiptView]});}\n"
+     " return jsxs('main',{style:{padding:'24px',height:'100%',display:'grid',gridTemplateRows:'auto auto minmax(0,1fr) auto',gap:'16px',color:'var(--ui-text-primary)'},children:[header,controls,tab==='coding'?coding:tab==='chat'?chatView:tab==='sessions'?sessionView:tab==='bots'?botView:activityView,receiptView]});}\n"
      "export default {id:'mithril-app',name:IR.page.name,description:IR.page.description,defaultEnabled:true,register(ctx){ctx.registerMany([{id:'page',area:ROUTES_AREA,data:{path:IR.page.path},render:()=>jsx(App,{ctx})},{id:'nav',area:SIDEBAR_NAV_AREA,data:{path:IR.page.path,label:IR.page.navLabel,codicon:IR.page.codicon}}]);}};\n")))
