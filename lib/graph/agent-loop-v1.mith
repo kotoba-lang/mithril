@@ -1,0 +1,13 @@
+{
+  "@context": "https://mithril.fund/context/v1",
+  "@id": "https://mithril.fund/lib/graph/agent-loop-v1",
+  "@type": "Library",
+  "ontology": "f6371c58ffa5d9587867f9f7ae33aa62fabf99b354070c2ad6da5323d5c85ceb",
+  "version": 1,
+  "exports": [
+    {"symbol": "https://mithril.fund/lib/graph/agent-loop-v1/collector/http-jsonld", "kind": "mith:collector", "label": "collect bounded JSON-LD over HTTPS", "confidenceFloor": 10000},
+    {"symbol": "https://mithril.fund/lib/graph/agent-loop-v1/analyzer/graph-summary", "kind": "mith:analyzer", "label": "summarize JSON-LD graph documents", "confidenceFloor": 10000},
+    {"symbol": "https://mithril.fund/lib/graph/agent-loop-v1/store/kotobase-raw-block", "kind": "mith:store", "label": "store immutable receipt bytes in Kotobase", "confidenceFloor": 10000},
+    {"symbol": "https://mithril.fund/lib/graph/agent-loop-v1/governor/public-https", "kind": "mith:governor", "label": "admit only declared public HTTPS sources", "confidenceFloor": 10000}
+  ]
+}

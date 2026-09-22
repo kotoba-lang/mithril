@@ -1,0 +1,21 @@
+{
+  "@context": "https://mithril.fund/context/v1",
+  "@id": "https://mithril.fund/app/graph-agent",
+  "@type": "GraphAgentApplication",
+  "goal": "https://mithril.fund/id/goal/collect-analyze-preserve-graph",
+  "ontology": "f6371c58ffa5d9587867f9f7ae33aa62fabf99b354070c2ad6da5323d5c85ceb",
+  "imports": [{"library": "https://mithril.fund/lib/graph/agent-loop-v1", "digest": "sha256:5111889b429981b466e2530cb77bdeef6768e57e19c4be1c1c5d0cd16edd7a1a"}],
+  "loop": {
+    "maxSources": 4,
+    "maxBytesPerSource": 262144,
+    "collector": "https://mithril.fund/lib/graph/agent-loop-v1/collector/http-jsonld",
+    "analyzer": "https://mithril.fund/lib/graph/agent-loop-v1/analyzer/graph-summary",
+    "store": "https://mithril.fund/lib/graph/agent-loop-v1/store/kotobase-raw-block",
+    "governor": "https://mithril.fund/lib/graph/agent-loop-v1/governor/public-https"
+  },
+  "sources": [
+    {"url": "https://mithril.fund/context/v1", "mediaType": "application/ld+json"},
+    {"url": "https://mithril.fund/lib/web/pipeline-v1", "mediaType": "application/ld+json"},
+    {"url": "https://mithril.fund/examples/typed-call-dag-web-synthesis.mith", "mediaType": "application/ld+json"}
+  ]
+}

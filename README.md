@@ -136,6 +136,18 @@ deterministic tests exercise admitted call DAG construction and all runtime
 branches; a successful test fixture is not reported as learned-model
 qualification. New-role training and held-out calibration remain required.
 
+## Bounded graph agent loop
+
+[`lib/graph/agent-loop-v1.mith`](lib/graph/agent-loop-v1.mith) publishes the
+closed collector, analyzer, governor and store catalog used by
+[`examples/mithril-graph-agent.mith`](examples/mithril-graph-agent.mith).
+`mithril.graph` compiles that JSON-LD source to `mithril.graph-agent/v1`: an
+explicit source allowlist, byte/source budgets and four imported operations.
+One tick is finite: collect declared public JSON-LD, summarize it, govern the
+receipt, then store the immutable receipt as a Kotobase raw block. A durable
+outer scheduler may repeat ticks; the graph IR itself contains no unbounded
+internal loop and cannot invent a source URL or storage effect.
+
 `bin/mithril-run.cljk` executes a previously compiled Web IR artifact without
 loading OpenJev. Inference is therefore a compile-time policy input rather than
 ambient runtime authority:
