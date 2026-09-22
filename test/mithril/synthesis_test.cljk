@@ -6,6 +6,12 @@
 
 (def static-label "return the authored static response")
 (def not-found-label "return a not found response")
+(def exact-router-label "match only the exact request method and path")
+(def head-router-label "match HEAD to the corresponding GET path")
+(def text-label "render the body as plain text")
+(def json-label "render the body as JSON")
+(def http-label "emit the complete typed HTTP response")
+(def no-content-label "emit a no content response")
 (def revision (apply str (repeat 40 "a")))
 
 (defn read-text [path]
@@ -22,6 +28,39 @@
                  "lib/web/v1.mith" (read-text "lib/web/v1.mith"))
         app (compiler/parse-json (read-text "examples/multiroute-web-synthesis.mith"))]
     {:library library :app app}))
+
+(defn pipeline-fixture []
+  (let [library (compiler/compile-library-text
+                 "lib/web/pipeline-v1.mith" (read-text "lib/web/pipeline-v1.mith"))
+        app (compiler/parse-json
+             (read-text "examples/typed-call-dag-web-synthesis.mith"))]
+    {:library library :app app}))
+
+(defn choice [selected other confidence]
+  {:choice selected
+   :probabilities {selected confidence other (- 1 confidence)}
+   :confidence confidence})
+
+(defn pipeline-result []
+  {:kind "typed-decisions/open-jev-v1"
+   :generated_text false
+   :model {:base_model "test-fixture" :pool "mean" :temperature 1.0}
+   :decisions [(choice exact-router-label head-router-label 0.91)
+               (choice static-label not-found-label 0.92)
+               (choice json-label text-label 0.93)
+               (choice http-label no-content-label 0.94)
+
+               (choice head-router-label exact-router-label 0.91)
+               (choice static-label not-found-label 0.92)
+               (choice text-label json-label 0.93)
+               (choice no-content-label http-label 0.94)
+
+               (choice exact-router-label head-router-label 0.91)
+               (choice not-found-label static-label 0.92)
+               (choice text-label json-label 0.93)
+               (choice http-label no-content-label 0.94)]
+   :artifact {:repo_or_dir "com-kotobalabs/open-jev-deberta-v3-large"
+              :revision revision}})
 
 (defn result
   ([choice confidence]
@@ -67,7 +106,7 @@
            (set (map :symbol candidates))))
     (is (= "choice" (:type question)))
     (is (= [not-found-label static-label] (:options question)))
-    (is (re-find #"No source text may be generated" (get-in prepared [:request :state])))))
+    (is (re-find #"no generated text" (get-in prepared [:request :state])))))
 
 (deftest admitted-openjev-choice-is-sealed-and-executed
   (let [{:keys [library app]} (fixture)
@@ -115,6 +154,48 @@
             :headers {"content-type" "text/plain; charset=utf-8"}
             :body "Not Found"}
            (web/dispatch artifact {:method "GET" :path "/retired"})))))
+
+(deftest one-model-forward-builds-and-executes-a-typed-call-dag
+  (let [{:keys [library app]} (pipeline-fixture)
+        prepared (synthesis/prepare-request
+                  "examples/typed-call-dag-web-synthesis.mith" app [library])
+        artifact (synthesis/compile-with-model
+                  "examples/typed-call-dag-web-synthesis.mith" app [library]
+                  (pipeline-result))
+        routes (get-in artifact [:web-ir :routes])]
+    (is (= 12 (count (get-in prepared [:request :questions])))
+        "one OpenJev request carries four typed choices for each route")
+    (is (= (repeat 3 [:router :handler :view :effect])
+           (mapv vec (partition 4 (map :role (:question-plans prepared))))))
+    (doseq [route routes]
+      (is (= [:router :handler :view :effect]
+             (mapv :id (get-in route [:call-dag :nodes]))))
+      (is (= [[] [:router] [:handler] [:view]]
+             (mapv :depends-on (get-in route [:call-dag :nodes])))))
+    (is (= {:status 200
+            :headers {"content-type" "application/json; charset=utf-8"}
+            :body "{\"value\":\"ontology\"}"}
+           (web/dispatch artifact {:method "GET" :path "/data"})))
+    (is (= {:status 204 :headers {} :body ""}
+           (web/dispatch artifact {:method "HEAD" :path "/health"})))
+    (is (= {:status 404
+            :headers {"content-type" "text/plain; charset=utf-8"}
+            :body "Not Found"}
+           (web/dispatch artifact {:method "GET" :path "/retired"})))
+    (testing "a malformed DAG is refused before dispatch"
+      (is (= :mithril.web/invalid-call-dag
+             (error-code #(web/dispatch
+                           (assoc-in artifact
+                                     [:web-ir :routes 0 :call-dag :nodes 1 :depends-on]
+                                     [])
+                           {:method "GET" :path "/data"})))))
+    (testing "an unimplemented component identifier is refused"
+      (is (= :mithril.web/unknown-view
+             (error-code #(web/dispatch
+                           (assoc-in artifact
+                                     [:web-ir :routes 0 :call-dag :nodes 2 :operation]
+                                     "https://mithril.fund/lib/web/pipeline-v1/view/unknown")
+                           {:method "GET" :path "/data"})))))))
 
 (deftest synthesis-fails-closed-before-and-after-model-forward
   (let [{:keys [library app]} (fixture)]

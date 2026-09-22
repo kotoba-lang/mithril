@@ -14,6 +14,14 @@
 (def web-goal "https://mithril.fund/id/goal/web-application")
 (def web-methods #{"GET" "HEAD"})
 (def model-result-keys #{:kind :generated_text :model :decisions :artifact})
+(def pipeline-source-type "SynthesizeWebPipelineApplication")
+(def handler-source-type "SynthesizeWebApplication")
+(def pipeline-roles [:router :handler :view :effect])
+(def pipeline-intent-keys
+  {:router "routerIntent"
+   :handler "handlerIntent"
+   :view "viewIntent"
+   :effect "effectIntent"})
 
 (defn- fail! [code detail]
   (throw (ex-info detail {:mithril/error code :detail detail})))
@@ -38,17 +46,25 @@
   (and (string? value)
        (boolean (re-matches #"/(?:[A-Za-z0-9._~-]+(?:/[A-Za-z0-9._~-]+)*)?" value))))
 
-(defn- validate-route! [route]
+(defn- valid-intent? [value]
+  (and (string? value) (not (str/blank? value)) (<= (count value) 512)))
+
+(defn- validate-route! [route pipeline?]
   (when-not (= route-keys (set (keys route)))
     (fail! :mithril/invalid-route "synthesis route has an unknown or missing key"))
   (when-not (contains? web-methods (get route "method"))
     (fail! :mithril/unsupported-method "v1 routes admit only GET and HEAD"))
   (when-not (valid-path? (get route "path"))
     (fail! :mithril/invalid-path "v1 route path must be a static absolute path"))
-  (when-not (and (string? (get route "intent"))
-                 (not (str/blank? (get route "intent")))
-                 (<= (count (get route "intent")) 512))
-    (fail! :mithril/invalid-intent "route intent must be 1 through 512 characters"))
+  (let [intent (get route "intent")]
+    (if pipeline?
+      (when-not (and (map? intent)
+                     (= (set (vals pipeline-intent-keys)) (set (keys intent)))
+                     (every? valid-intent? (vals intent)))
+        (fail! :mithril/invalid-intent
+               "pipeline route intent must define router, handler, view and effect intents"))
+      (when-not (valid-intent? intent)
+        (fail! :mithril/invalid-intent "route intent must be 1 through 512 characters"))))
   (when-not (and (integer? (get route "status")) (<= 100 (get route "status") 599))
     (fail! :mithril/invalid-status "response status must be 100 through 599"))
   (when-not (and (string? (get route "contentType"))
@@ -87,18 +103,18 @@
         (fail! :mithril/duplicate-import "each library may be imported exactly once"))
       resolved)))
 
-(defn discover-handlers
-  "Discover imported handler candidates via OWL entailment and SPARQL."
-  [library-artifacts]
+(defn discover-components
+  "Discover imported role candidates via OWL entailment and SPARQL."
+  [library-artifacts role]
   (let [exports (->> library-artifacts
                      (mapcat #(get-in % [:library :exports]))
-                     (filter #(= :handler (:kind %)))
+                     (filter #(= role (:kind %)))
                      vec)
         ontology (vec (mapcat (fn [{:keys [symbol]}]
-                                [[:component symbol :handler]
+                                [[:component symbol role]
                                  [:permits :goal/web-application :role symbol]])
                               exports))
-        discovered (semantic/candidates-for-role ontology :goal/web-application :handler)
+        discovered (semantic/candidates-for-role ontology :goal/web-application role)
         by-id (into {} (map (juxt :symbol identity) exports))
         candidates (->> discovered
                         (filter :permitted?)
@@ -108,18 +124,37 @@
                         vec)]
     (when (< (count candidates) 2)
       (fail! :mithril/insufficient-candidates
-             "model selection requires at least two OWL/SPARQL-discovered handlers"))
+             (str "model selection requires at least two OWL/SPARQL-discovered "
+                  (name role) " components")))
     (when-not (= (count candidates) (count (set (map :label candidates))))
       (fail! :mithril/duplicate-candidate-label "candidate labels must be unique"))
     candidates))
+
+(defn discover-handlers [library-artifacts]
+  (discover-components library-artifacts :handler))
+
+(defn- question-plan [route-index role route candidates]
+  {:route-index route-index
+   :role role
+   :candidates candidates
+   :question {:type "choice"
+              :instructions (str "Select the imported " (name role) " for "
+                                 (get route "method") " " (get route "path")
+                                 ". Intent: "
+                                 (let [intent (get route "intent")]
+                                   (if (map? intent)
+                                     (get intent (get pipeline-intent-keys role))
+                                     intent)))
+              :options (mapv :label candidates)}})
 
 (defn prepare-request [path doc library-artifacts]
   (when-not (compiler/source-path? path)
     (fail! :mithril/unsupported-extension "Mithril source must end in .mith or .mithril"))
   (when-not (= compiler/context-uri (get doc "@context"))
     (fail! :mithril/unpinned-context "synthesis source must use the pinned context"))
-  (when-not (= "SynthesizeWebApplication" (get doc "@type"))
-    (fail! :mithril/unexpected-source-type "@type must be SynthesizeWebApplication"))
+  (when-not (contains? #{handler-source-type pipeline-source-type} (get doc "@type"))
+    (fail! :mithril/unexpected-source-type
+           "@type must be SynthesizeWebApplication or SynthesizeWebPipelineApplication"))
   (when-not (= source-keys (set (keys doc)))
     (fail! :mithril/unknown-source-key "synthesis source has an unknown or missing key"))
   (when-not (mithril-iri? (get doc "@id"))
@@ -127,7 +162,8 @@
            "synthesis @id must be a mithril.fund HTTPS IRI"))
   (when-not (= web-goal (get doc "goal"))
     (fail! :mithril/unknown-goal "synthesis goal is outside the v1 catalog"))
-  (let [libraries (imported-libraries doc library-artifacts)
+  (let [pipeline? (= pipeline-source-type (get doc "@type"))
+        libraries (imported-libraries doc library-artifacts)
         ontology (get doc "ontology")
         routes (get doc "routes")]
     (when-not (and (string? ontology) (boolean (re-matches #"[0-9a-f]{64}" ontology)))
@@ -138,24 +174,33 @@
     (when-not (and (vector? routes) (seq routes))
       (fail! :mithril/missing-routes "synthesis routes must be a non-empty array"))
     (doseq [route routes]
-      (validate-route! route))
+      (validate-route! route pipeline?))
     (let [identities (mapv (juxt #(get % "method") #(get % "path")) routes)]
       (when-not (= (count identities) (count (set identities)))
         (fail! :mithril/duplicate-route "method and path pairs must be unique")))
-    (let [candidates (discover-handlers libraries)
-          labels (mapv :label candidates)
-          questions (mapv (fn [route]
-                            {:type "choice"
-                             :instructions (str "Select the imported handler for "
-                                                (get route "method") " " (get route "path")
-                                                ". Intent: " (get route "intent"))
-                             :options labels})
-                          routes)]
-      {:request {:state (str "Mithril web application " (get doc "@id")
-                             ". Goal: web application. Select only ontology-discovered, "
-                             "imported handler implementations. No source text may be generated.")
-                 :questions questions}
-       :candidates candidates
+    (let [roles (if pipeline? pipeline-roles [:handler])
+          candidate-groups (into {} (map (fn [role]
+                                           [role (discover-components libraries role)])
+                                         roles))
+          plans (vec (mapcat (fn [[route-index route]]
+                               (mapv (fn [role]
+                                       (question-plan route-index role route
+                                                      (get candidate-groups role)))
+                                     roles))
+                             (map-indexed vector routes)))]
+      {:request {:state (str "Mithril typed web routes: "
+                             (str/join " "
+                                       (map-indexed
+                                        (fn [route-index route]
+                                          (str "[" route-index "] "
+                                               (get route "method") " "
+                                               (get route "path")))
+                                        routes))
+                             " Catalog choices only; no generated text.")
+                 :questions (mapv :question plans)}
+       :mode (if pipeline? :pipeline :handler)
+       :question-plans plans
+       :candidates (get candidate-groups :handler)
        :libraries libraries})))
 
 (defn- admitted-decision [decision candidates]
@@ -185,7 +230,9 @@
                "model choice must be a winner and confidence must equal its probability"))
       (when (< basis-points (:confidence-floor candidate))
         (fail! :mithril/model-confidence-below-floor
-               (str "model confidence is below the ontology floor for " (:symbol candidate))))
+               (str "model confidence " basis-points
+                    " is below ontology floor " (:confidence-floor candidate)
+                    " for " (:symbol candidate))))
       {:candidate candidate
        :confidence basis-points
        :probabilities (into (sorted-map)
@@ -193,8 +240,25 @@
                                    [label (js/Math.round (* 10000 probability))])
                                  probabilities))})))
 
+(defn- decision-evidence [decision]
+  {:kind :choice
+   :candidate (get-in decision [:candidate :symbol])
+   :confidence (:confidence decision)
+   :probabilities (:probabilities decision)})
+
+(defn- call-dag [decisions]
+  {:version "mithril.call-dag/v1"
+   :nodes (mapv (fn [role depends-on]
+                  (let [decision (get decisions role)]
+                    {:id role
+                     :operation (get-in decision [:candidate :symbol])
+                     :depends-on depends-on
+                     :decision (decision-evidence decision)}))
+                pipeline-roles
+                [[] [:router] [:handler] [:view]])})
+
 (defn compile-with-model [path doc library-artifacts model-result]
-  (let [{:keys [candidates]} (prepare-request path doc library-artifacts)]
+  (let [{:keys [mode question-plans]} (prepare-request path doc library-artifacts)]
     (when-not (= model-result-keys (set (keys model-result)))
       (fail! :mithril/invalid-model-result "model result has an invalid field set"))
     (when-not (= model-kind (:kind model-result))
@@ -211,14 +275,25 @@
                "model repository and 40-character revision are required")))
     (let [routes (get doc "routes")
           decisions (:decisions model-result)]
-      (when-not (= (count routes) (count decisions))
-        (fail! :mithril/model-cardinality "model must answer exactly one question per route"))
-      (let [admitted (mapv #(admitted-decision % candidates) decisions)
-            compiled-routes (mapv (fn [route {:keys [candidate]}]
-                                    (-> route
-                                        (dissoc "intent")
-                                        (assoc "operation" (:symbol candidate))))
-                                  routes admitted)
+      (when-not (= (count question-plans) (count decisions))
+        (fail! :mithril/model-cardinality "model must answer exactly one decision question"))
+      (let [admitted (mapv (fn [decision plan]
+                             (assoc (admitted-decision decision (:candidates plan))
+                                    :route-index (:route-index plan)
+                                    :role (:role plan)))
+                           decisions question-plans)
+            by-route (group-by :route-index admitted)
+            route-decisions (mapv (fn [route-index]
+                                    (into {} (map (juxt :role identity)
+                                                  (get by-route route-index))))
+                                  (range (count routes)))
+            compiled-routes (mapv (fn [route decisions-by-role]
+                                    (let [handler (get decisions-by-role :handler)]
+                                      (-> route
+                                          (dissoc "intent")
+                                          (assoc "operation"
+                                                 (get-in handler [:candidate :symbol])))))
+                                  routes route-decisions)
             explicit-doc (-> doc
                              (assoc "@type" "WebApplication" "routes" compiled-routes))
             artifact (compiler/compile-web-document path explicit-doc library-artifacts)
@@ -228,10 +303,10 @@
                    :synthesis provenance)
             (update-in [:web-ir :routes]
                        (fn [compiled]
-                         (mapv (fn [route decision]
-                                 (assoc route :decision
-                                        {:kind :choice
-                                         :candidate (get-in decision [:candidate :symbol])
-                                         :confidence (:confidence decision)
-                                         :probabilities (:probabilities decision)}))
-                               compiled admitted))))))))
+                         (mapv (fn [route decisions-by-role]
+                                 (if (= mode :pipeline)
+                                   (assoc route :call-dag (call-dag decisions-by-role))
+                                   (assoc route :decision
+                                          (decision-evidence
+                                           (get decisions-by-role :handler)))))
+                               compiled route-decisions))))))))

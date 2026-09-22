@@ -1,9 +1,79 @@
-(ns mithril.web)
+(ns mithril.web
+  (:require [clojure.string :as str]))
 
 (def web-format "https://mithril.fund/artifact/web-application-v1")
 
 (defn- fail! [code detail]
   (throw (ex-info detail {:mithril/error code :detail detail})))
+
+(def call-dag-roles [:router :handler :view :effect])
+
+(defn- dag-operations [route]
+  (when-let [dag (:call-dag route)]
+    (let [nodes (:nodes dag)
+          expected-dependencies [[] [:router] [:handler] [:view]]]
+      (when-not (and (= "mithril.call-dag/v1" (:version dag))
+                     (= call-dag-roles (mapv :id nodes))
+                     (= expected-dependencies (mapv :depends-on nodes))
+                     (every? string? (map :operation nodes)))
+        (fail! :mithril.web/invalid-call-dag
+               "call DAG roles, dependencies and operations must match v1"))
+      (into {} (map (juxt :id :operation) nodes)))))
+
+(defn- route-match? [route method path]
+  (if-let [operations (dag-operations route)]
+    (case (:router operations)
+      "https://mithril.fund/lib/web/pipeline-v1/router/exact"
+      (and (= method (:method route)) (= path (:path route)))
+
+      "https://mithril.fund/lib/web/pipeline-v1/router/head-fallback"
+      (and (= path (:path route))
+           (or (= method (:method route))
+               (and (= method "HEAD") (= "GET" (:method route)))))
+
+      (fail! :mithril.web/unknown-router "call DAG router is not admitted"))
+    (and (= method (:method route)) (= path (:path route)))))
+
+(defn- run-handler [route operation]
+  (cond
+    (contains? #{"https://mithril.fund/lib/web/v1/handler/static-response"
+                 "https://mithril.fund/lib/web/pipeline-v1/handler/static-response"}
+               operation)
+    (:response route)
+
+    (contains? #{"https://mithril.fund/lib/web/v1/handler/not-found"
+                 "https://mithril.fund/lib/web/pipeline-v1/handler/not-found"}
+               operation)
+    {:status 404
+     :headers {"content-type" "text/plain; charset=utf-8"}
+     :body "Not Found"}
+
+    :else
+    (fail! :mithril.web/unknown-operation
+           "route handler has no admitted runtime implementation")))
+
+(defn- run-view [response operation]
+  (case operation
+    "https://mithril.fund/lib/web/pipeline-v1/view/text"
+    response
+
+    "https://mithril.fund/lib/web/pipeline-v1/view/json"
+    (assoc response
+           :headers {"content-type" "application/json; charset=utf-8"}
+           :body #?(:cljs (.stringify js/JSON (clj->js {"value" (:body response)}))
+                    :clj (str "{\"value\":\"" (str/replace (:body response) "\"" "\\\"") "\"}")))
+
+    (fail! :mithril.web/unknown-view "call DAG view is not admitted")))
+
+(defn- run-effect [response operation]
+  (case operation
+    "https://mithril.fund/lib/web/pipeline-v1/effect/http-response"
+    response
+
+    "https://mithril.fund/lib/web/pipeline-v1/effect/no-content"
+    {:status 204 :headers {} :body ""}
+
+    (fail! :mithril.web/unknown-effect "call DAG effect is not admitted")))
 
 (defn dispatch
   "Execute the closed v1 web IR for one request. This reference runtime has no
@@ -16,20 +86,14 @@
         path (:path request)]
     (when-not (and (string? method) (string? path))
       (fail! :mithril.web/invalid-request "request method and path must be strings"))
-    (if-let [route (first (filter #(and (= method (:method %))
-                                        (= path (:path %)))
+    (if-let [route (first (filter #(route-match? % method path)
                                   (get-in artifact [:web-ir :routes])))]
-      (let [response (case (:operation route)
-                       "https://mithril.fund/lib/web/v1/handler/static-response"
-                       (:response route)
-
-                       "https://mithril.fund/lib/web/v1/handler/not-found"
-                       {:status 404
-                        :headers {"content-type" "text/plain; charset=utf-8"}
-                        :body "Not Found"}
-
-                       (fail! :mithril.web/unknown-operation
-                              "route operation has no admitted runtime implementation"))]
+      (let [operations (dag-operations route)
+            response (if operations
+                       (-> (run-handler route (:handler operations))
+                           (run-view (:view operations))
+                           (run-effect (:effect operations)))
+                       (run-handler route (:operation route)))]
         (cond-> response
           (= "HEAD" method) (assoc :body "")))
       {:status 404
