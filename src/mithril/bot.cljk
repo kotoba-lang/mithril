@@ -147,12 +147,24 @@
               {:path :workspace :datatype :string :min-count 1 :max-count 1}
               {:path :goal :datatype :string :min-count 1 :max-count 1}]})
 
+(def task-required-keys #{:id :workspace :goal})
+(def task-optional-keys #{:tool-profile-digest})
+
 (defn start-run [artifact task owner now-ms]
   (when-not (= artifact-format (:format artifact))
     (fail! :mithril.bot/invalid-artifact "artifact is not a bot profile" {}))
-  (when-not (and (map? task) (= #{:id :workspace :goal} (set (keys task)))
-                 (every? #(and (string? %) (not (str/blank? %))) (vals task)))
-    (fail! :mithril.bot/invalid-task "task must contain non-empty id, workspace and goal" {}))
+  (let [keys* (set (keys task))]
+    (when-not (and (map? task)
+                   (= task-required-keys (set (filter task-required-keys keys*)))
+                   (empty? (remove (into task-required-keys task-optional-keys) keys*))
+                   (every? #(and (string? %) (not (str/blank? %)))
+                           (map task task-required-keys)))
+      (fail! :mithril.bot/invalid-task
+             "task must contain non-empty id, workspace and goal plus only admitted optional keys" {})))
+  (when (contains? task :tool-profile-digest)
+    (when-not (and (string? (:tool-profile-digest task))
+                   (boolean (re-matches #"sha256:[0-9a-f]{64}" (:tool-profile-digest task))))
+      (fail! :mithril.bot/invalid-task "tool profile digest must be a SHA-256 identity" {})))
   (when-not (or (str/starts-with? (:workspace task) "/")
                 (boolean (re-matches #"[A-Za-z]:[\\\\/].+" (:workspace task))))
     (fail! :mithril.bot/invalid-workspace "task workspace must be an absolute path" {}))
@@ -294,7 +306,9 @@
                    :id effect-id :run-id (:run-id state) :step (:step state)
                    :action (:id action) :operation effect
                    :workspace (get-in state [:task :workspace])
-                   :task-id (get-in state [:task :id])}]
+                   :task-id (get-in state [:task :id])
+                   :goal (get-in state [:task :goal])
+                   :tool-profile-digest (get-in state [:task :tool-profile-digest])}]
       {:state (assoc state :awaiting request)
        :effect request})))
 
