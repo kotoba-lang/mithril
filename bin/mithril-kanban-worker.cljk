@@ -47,7 +47,8 @@
       (throw (ex-info "registered coding profile does not bind the card workspace"
                       {:mithril/error :mithril.kanban/profile-workspace-mismatch
                        :workspace workspace})))
-    profile))
+    {:profile profile
+     :profile-path (or profile-path config-path)}))
 
 (defn- block! [board task-id kind reason]
   (hermes! board ["block" "--kind" kind task-id reason]))
@@ -77,7 +78,8 @@
 
 (defn- tick-card! [board profile-path tool-profile-path state-dir owner grants mode card]
   (let [properties (worker/parse-card-body (:body card))
-        tool-profile (resolve-tool-profile tool-profile-path (:workspace properties))
+        resolved (resolve-tool-profile tool-profile-path (:workspace properties))
+        tool-profile (:profile resolved)
         tool-digest (mithril-hermes/tool-profile-digest tool-profile)
         task (worker/semantic-task properties tool-digest)
         key (worker/state-key properties)
@@ -90,7 +92,8 @@
     (write-json! task-path task)
     (when (= :execute disposition)
       (exec! "kbb" ["--backend" "sci" "bin/mithril-hermes.cljk" "tick"
-                     profile-path task-path state-path owner grants mode tool-profile-path]))
+                     profile-path task-path state-path owner grants mode
+                     (:profile-path resolved)]))
     (let [next-state (load-state state-path)
           run-status (:status next-state)
           next-step (:step next-state)
