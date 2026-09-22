@@ -332,12 +332,13 @@ kbb --backend sci bin/mithril-hermes.cljk tick \
   execute coding-tools.json
 ```
 
-The coding profile fixes an absolute isolated Git workspace, an exact file
-allowlist, byte/time budgets, one Hermes proposer profile, and exact argv for
+The coding profile fixes an absolute isolated Git workspace, disjoint exact
+read-only, editable, and creatable file lists, byte/time budgets, one Hermes proposer profile, and exact argv for
 compile and test. The host creates a detached disposable Git worktree at the
 bound base `HEAD`, then invokes the Hermes proposer with only the `file`
-toolset. The proposer may read and patch that scratch worktree, never the target
-workspace. The host ignores prose, rejects untracked/non-allowlisted changes,
+toolset. The proposer may inspect declared read-only context and patch only the
+editable/creatable paths in that scratch worktree, never the target workspace.
+The host ignores prose, rejects read-only, untracked/non-allowlisted changes,
 and extracts the proposal from `git diff`. It then checks profile and patch
 digests plus path/mode/binary constraints before running `git apply --check`
 and writing the target. Compile and test use `execFile` with the profile's argv and no shell;

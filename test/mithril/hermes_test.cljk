@@ -1,5 +1,6 @@
 (ns mithril.hermes-test
   (:require [cljs.test :refer [deftest is testing]]
+            [clojure.string :as str]
             [mithril.bot :as bot]
             [mithril.hermes :as hermes]))
 
@@ -136,7 +137,8 @@
       (exec! workspace "/usr/bin/git" "-c" "user.name=Mithril Test"
              "-c" "user.email=mithril@example.invalid" "commit" "-qm" "base")
       (let [profile (-> (coding-profile workspace artifacts)
-                        (assoc :allowed-paths [] :create-paths ["new.cljk"])
+                        (assoc :allowed-paths [] :read-paths ["README.md"]
+                               :create-paths ["new.cljk"])
                         (assoc-in [:tools :test/run]
                                   {:program "/usr/bin/grep" :args ["-q" "value 1" "new.cljk"]
                                    :timeout-ms 5000}))
@@ -148,15 +150,32 @@
                        "index 0000000..d00491f\n"
                        "--- /dev/null\n+++ b/new.cljk\n"
                        "@@ -0,0 +1 @@\n+value 1\n")
+            read-only-patch (str "diff --git a/README.md b/README.md\n"
+                                 "index df967b9..3e75765 100644\n"
+                                 "--- a/README.md\n+++ b/README.md\n"
+                                 "@@ -1 +1 @@\n-base\n+changed\n")
+            rejected (hermes/execute-effect
+                      (assoc effect :id "readonly-propose" :run-id "sha256:readonly-1"
+                             :operation :llm/propose-patch)
+                      {:profile profile :propose-fn (fn [_] read-only-patch)})
             proposed (hermes/execute-effect
                       (assoc effect :id "create-propose" :operation :llm/propose-patch)
-                      {:profile profile :propose-fn (fn [_] patch)})
+                      {:profile profile
+                       :propose-fn (fn [{:keys [files prompt]}]
+                                     (is (= #{{:path "README.md" :content "base\n" :read-only? true}
+                                              {:path "new.cljk" :content nil :create? true}}
+                                            (set files)))
+                                     (is (str/includes? prompt
+                                                        "<read-only-file>README.md</read-only-file>"))
+                                     patch)})
             applied (hermes/execute-effect
                      (assoc effect :id "create-apply" :operation :workspace/apply-patch)
                      {:profile profile})
             tested (hermes/execute-effect
                     (assoc effect :id "create-test" :operation :test/run)
                     {:profile profile})]
+        (is (= :failed (get-in rejected [:receipt :status])))
+        (is (= :mithril.hermes/path-denied (get-in rejected [:audit :error])))
         (is (= :completed (get-in proposed [:receipt :status])))
         (is (= :completed (get-in applied [:receipt :status])))
         (is (= :completed (get-in tested [:receipt :status])))
