@@ -1,0 +1,107 @@
+(ns mithril.desktop
+  "Closed Mithril Desktop IR and deterministic Hermes Desktop plugin emitter.
+
+  Source describes the application and bounded agent state machine. It cannot
+  inject JavaScript, CSS, RPC method names, or host capabilities."
+  (:require [clojure.string :as str]
+            [mithril.compiler :as compiler]))
+
+(def artifact-format "https://mithril.fund/artifact/desktop-application-v1")
+(def goal "https://mithril.fund/id/goal/hermes-agent-loop")
+(def source-keys #{"@context" "@id" "@type" "goal" "page" "loop"})
+(def page-keys #{"name" "description" "headline" "summary" "path" "navLabel" "codicon"})
+(def loop-keys #{"maxSteps" "maxPolls" "pollIntervalMs" "sessionTitle" "actions"})
+(def required-actions
+  ["https://mithril.fund/id/action/session-create"
+   "https://mithril.fund/id/action/prompt-submit"
+   "https://mithril.fund/id/action/session-status"
+   "https://mithril.fund/id/action/session-history"
+   "https://mithril.fund/id/action/stop"])
+
+(defn- fail! [code detail]
+  (throw (ex-info detail {:mithril/error code :detail detail})))
+
+(defn- bounded-text! [value label ceiling]
+  (when-not (and (string? value) (not (str/blank? value)) (<= (count value) ceiling))
+    (fail! :mithril.desktop/invalid-text (str label " must be 1 through " ceiling " characters")))
+  value)
+
+(defn compile-document [path doc]
+  (when-not (compiler/source-path? path)
+    (fail! :mithril/unsupported-extension "desktop source must end in .mith or .mithril"))
+  (when-not (= compiler/context-uri (get doc "@context"))
+    (fail! :mithril/unpinned-context "desktop source must use the pinned context"))
+  (when-not (= "DesktopApplication" (get doc "@type"))
+    (fail! :mithril/unexpected-source-type "@type must be DesktopApplication"))
+  (when-not (= source-keys (set (keys doc)))
+    (fail! :mithril/unknown-source-key "desktop source has an unknown or missing key"))
+  (when-not (= goal (get doc "goal"))
+    (fail! :mithril/unknown-goal "desktop goal is outside the closed catalog"))
+  (let [page (get doc "page") loop-spec (get doc "loop")]
+    (when-not (= page-keys (set (keys page)))
+      (fail! :mithril.desktop/invalid-page "desktop page has an unknown or missing key"))
+    (doseq [[field ceiling] [["name" 80] ["description" 240] ["headline" 120]
+                             ["summary" 480] ["navLabel" 32] ["codicon" 40]]]
+      (bounded-text! (get page field) field ceiling))
+    (when-not (boolean (re-matches #"/[a-z0-9-]+" (or (get page "path") "")))
+      (fail! :mithril.desktop/invalid-path "desktop route must be one lowercase path segment"))
+    (when-not (= loop-keys (set (keys loop-spec)))
+      (fail! :mithril.desktop/invalid-loop "desktop loop has an unknown or missing key"))
+    (when-not (= required-actions (get loop-spec "actions"))
+      (fail! :mithril.desktop/invalid-actions "desktop v1 requires the closed five-action state machine"))
+    (when-not (= 5 (get loop-spec "maxSteps"))
+      (fail! :mithril.desktop/invalid-budget "desktop v1 requires exactly five semantic steps"))
+    (let [max-polls (get loop-spec "maxPolls") poll-ms (get loop-spec "pollIntervalMs")]
+      (when-not (and (integer? max-polls) (<= 1 max-polls 300))
+        (fail! :mithril.desktop/invalid-budget "maxPolls must be 1 through 300"))
+      (when-not (and (integer? poll-ms) (<= 250 poll-ms 10000))
+        (fail! :mithril.desktop/invalid-budget "pollIntervalMs must be 250 through 10000")))
+    (bounded-text! (get loop-spec "sessionTitle") "sessionTitle" 80)
+    {:format artifact-format
+     :media-type compiler/media-type
+     :graph-digest (compiler/graph-digest doc)
+     :desktop-ir {:version :mithril.desktop/v1
+                  :host :hermes-desktop
+                  :page {:name (get page "name") :description (get page "description")
+                         :headline (get page "headline") :summary (get page "summary")
+                         :path (get page "path") :nav-label (get page "navLabel")
+                         :codicon (get page "codicon")}
+                  :loop {:max-steps 5 :max-polls (get loop-spec "maxPolls")
+                         :poll-interval-ms (get loop-spec "pollIntervalMs")
+                         :session-title (get loop-spec "sessionTitle")
+                         :actions [:session/create :prompt/submit :session/status
+                                   :session/history :stop]}
+                  :capabilities [:hermes/session-create :hermes/prompt-submit
+                                 :hermes/session-read :plugin/storage]}}))
+
+(defn compile-text [path text]
+  (compile-document path (compiler/parse-source text)))
+
+(defn- json [value]
+  #?(:cljs (js/JSON.stringify (clj->js value))
+     :clj (fail! :mithril.desktop/json-host-unavailable "plugin emission requires the kbb host")))
+
+(defn emit-plugin
+  "Emit the one-file Hermes Desktop plugin. All executable code is a pinned
+  compiler template; source values enter only as JSON data after validation."
+  [artifact]
+  (when-not (= artifact-format (:format artifact))
+    (fail! :mithril.desktop/invalid-artifact "artifact is not a desktop application"))
+  (let [ir (:desktop-ir artifact) data (json (assoc ir :graph-digest (:graph-digest artifact)))]
+    (str
+     "// Generated by mithril.desktop/v1. Do not edit.\n"
+     "import React,{useState} from 'react';\n"
+     "import {jsx,jsxs} from 'react/jsx-runtime';\n"
+     "import {ROUTES_AREA,SIDEBAR_NAV_AREA,Button,Textarea,Badge,StatusDot,ScrollArea,host} from '@hermes/plugin-sdk';\n"
+     "const IR=" data ";\n"
+     "const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));\n"
+     "const semanticPrompt=goal=>'(mithril/agent-request :protocol https://mithril.fund/id/protocol/hermes-agent-v1 :goal '+JSON.stringify(goal)+' :output mithril/agent-receipt)';\n"
+     "async function execute(goal,setState){\n"
+     " const receipts=[]; const record=(action,status,detail)=>{const r={step:receipts.length+1,action,status,detail};receipts.push(r);setState({phase:status,receipts:[...receipts]});};\n"
+     " if(!goal.trim()||goal.length>4096)throw new Error('Goal must be 1 through 4096 characters');\n"
+     " record('session/create','running',null);const created=await host.request('session.create',{title:IR.loop.sessionTitle,source:'mithril-desktop',hidden:false});const sid=created.session_id;record('session/create','executed',{session_id:sid});\n"
+     " record('prompt/submit','running',null);await host.request('prompt.submit',{session_id:sid,text:semanticPrompt(goal),surface:'mithril-desktop'});record('prompt/submit','executed',null);\n"
+     " for(let poll=1;poll<=IR.loop.maxPolls;poll++){const status=await host.request('session.status',{session_id:sid});record('session/status','executed',{poll,output:status.output});const history=await host.request('session.history',{session_id:sid});const answer=[...(history.messages||[])].reverse().find(m=>m.role==='assistant'&&m.text);record('session/history','executed',{poll,count:history.count});if(answer){record('stop','executed',{reason:'assistant-complete',session_id:sid,answer:answer.text});return receipts;}await sleep(IR.loop.pollIntervalMs);}\n"
+     " record('stop','refused',{reason:'poll-budget-exhausted',session_id:sid});return receipts;}\n"
+     "function App(){const [goal,setGoal]=useState('Implement and verify the next bounded Mithril application change.');const [state,setState]=useState({phase:'idle',receipts:[]});const running=state.phase==='running';const run=async()=>{setState({phase:'running',receipts:[]});try{const receipts=await execute(goal,setState);setState({phase:receipts.at(-1)?.status||'executed',receipts});}catch(error){setState(s=>({phase:'refused',receipts:[...s.receipts,{step:s.receipts.length+1,action:'stop',status:'refused',detail:{reason:String(error?.message||error)}}]}));}};return jsxs('main',{style:{padding:'24px',height:'100%',display:'grid',gridTemplateRows:'auto auto 1fr',gap:'16px',color:'var(--ui-text-primary)'},children:[jsxs('header',{children:[jsx(Badge,{children:'Mithril Desktop IR'}),jsx('h1',{style:{fontSize:'24px',margin:'10px 0 4px'},children:IR.page.headline}),jsx('p',{style:{color:'var(--ui-text-secondary)',maxWidth:'760px'},children:IR.page.summary})]}),jsxs('section',{style:{display:'grid',gap:'10px'},children:[jsx(Textarea,{value:goal,onChange:e=>setGoal(e.target.value),rows:4,'aria-label':'Agent goal'}),jsxs('div',{style:{display:'flex',alignItems:'center',gap:'10px'},children:[jsx(Button,{onClick:run,disabled:running,children:running?'Running…':'Run agent loop'}),jsx(StatusDot,{status:state.phase==='executed'?'online':state.phase==='refused'?'error':'idle'}),jsx('span',{style:{color:'var(--ui-text-secondary)'},children:state.phase})]})]}),jsx(ScrollArea,{children:jsx('ol',{style:{margin:0,padding:'0 0 0 24px'},children:state.receipts.map((r,i)=>jsxs('li',{style:{padding:'8px',borderBottom:'1px solid var(--ui-stroke-secondary)'},children:[jsx('strong',{children:r.action}),jsxs('span',{style:{marginLeft:'8px',color:'var(--ui-text-secondary)'},children:['— ',r.status]}),r.detail&&jsx('pre',{style:{whiteSpace:'pre-wrap',fontSize:'12px',color:'var(--ui-text-tertiary)'},children:JSON.stringify(r.detail,null,2)})]},i))})})]});}\n"
+     "export default {id:'mithril-app',name:IR.page.name,defaultEnabled:true,register(ctx){ctx.registerMany([{id:'page',area:ROUTES_AREA,data:{path:IR.page.path},render:()=>jsx(App,{})},{id:'nav',area:SIDEBAR_NAV_AREA,data:{path:IR.page.path,label:IR.page.navLabel,codicon:IR.page.codicon}}]);}};\n")))

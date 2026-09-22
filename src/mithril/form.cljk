@@ -17,11 +17,13 @@
    'mithril/synthesize-web-pipeline-application "SynthesizeWebPipelineApplication"
    'mithril/graph-agent "GraphAgentApplication"
    'mithril/app-agent "AppAgentApplication"
+   'mithril/desktop-application "DesktopApplication"
    'mithril/ontology "Ontology"})
 
 (def ^:private nested-tags
   #{'mithril/choice 'mithril/export 'mithril/import 'mithril/route
-    'mithril/source 'mithril/loop 'mithril/app 'rdf/node})
+    'mithril/source 'mithril/loop 'mithril/app 'mithril/page
+    'mithril/agent-loop 'rdf/node})
 
 (def ^:private typed-node-tags
   {'owl/class "owl:Class"
@@ -40,6 +42,10 @@
    :max-steps "maxSteps"
    :max-sources "maxSources"
    :max-bytes-per-source "maxBytesPerSource"
+   :nav-label "navLabel"
+   :session-title "sessionTitle"
+   :max-polls "maxPolls"
+   :poll-interval-ms "pollIntervalMs"
    :rdf/type "@type"
    :rdfs/sub-class-of "subClassOf"
    :rdfs/sub-property-of "subPropertyOf"

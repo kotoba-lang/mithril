@@ -3,8 +3,11 @@
             [mithril.compiler-test]
             [mithril.form-test]
             [mithril.graph-test]
-            [mithril.app-test]))
+            [mithril.app-test]
+            [mithril.desktop-test]))
 
 (let [result (t/run-tests 'mithril.compiler-test 'mithril.form-test 'mithril.graph-test 'mithril.app-test)]
-  (when (pos? (+ (:fail result) (:error result)))
-    (js/process.exit 1)))
+  (let [desktop-result (t/run-tests 'mithril.desktop-test)
+        failures (+ (:fail result) (:error result) (:fail desktop-result) (:error desktop-result))]
+  (when (pos? failures)
+    (js/process.exit 1))))
