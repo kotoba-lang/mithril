@@ -4,8 +4,4 @@
          :git/sha "0d0a19df6d68a092df0cec5e5571a2b4a354ea27"}
         io.github.kotoba-lang/org-w3-rdf-canon
         {:git/url "https://github.com/kotoba-lang/org-w3-rdf-canon.git"
-         :git/sha "e3e9223a48f162d07a1fcd8e2f01531b9c79d157"}}
- :aliases {:dev {:override-deps
-                 {io.github.kotoba-lang/org-w3-json-ld-api {:local/root "../org-w3-json-ld-api"}
-                  io.github.kotoba-lang/org-w3-rdf-canon {:local/root "../org-w3-rdf-canon"}}}}}
-
+         :git/sha "e3e9223a48f162d07a1fcd8e2f01531b9c79d157"}}}
