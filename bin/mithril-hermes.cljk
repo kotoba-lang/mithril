@@ -87,12 +87,30 @@
                 :model {:kind :deterministic/singleton}}
      :audit {:source "deterministic-singleton"}}))
 
-(defn- decide! [state owner now]
+(def coding-action-order
+  ["workspace-inspect" "code-propose" "patch-apply" "amu-compile"
+   "test-run" "git-status" "stop"])
+
+(defn- deterministic-coding [state]
+  (let [by-label (into {} (map (juxt :label identity) (bot/available-actions state)))
+        action (some by-label coding-action-order)]
+    (when-not action
+      (throw (ex-info "coding workflow has no admitted next action"
+                      {:mithril/error :mithril.hermes/no-coding-action})))
+    {:admitted {:action action :confidence 10000
+                :probabilities {(:label action) 1.0}
+                :model {:kind :deterministic/ontology-workflow}}
+     :audit {:source "deterministic-ontology-workflow"}}))
+
+(defn- decide! [state owner now coding?]
   (let [actions (bot/available-actions state)]
     (cond
       (empty? actions)
       (js/Promise.reject
        (ex-info "no action is available" {:mithril/error :mithril.hermes/no-action}))
+
+      coding?
+      (js/Promise.resolve (deterministic-coding state))
 
       (= 1 (count actions))
       (js/Promise.resolve (deterministic-stop state))
@@ -126,10 +144,18 @@
         (try
           (let [artifact (bot/compile-text profile-path (read-text profile-path))
                 task (js->clj (js/JSON.parse (read-text task-path)) :keywordize-keys true)
+                tool-profile (when tool-profile-path
+                               (js->clj (js/JSON.parse (read-text tool-profile-path))
+                                        :keywordize-keys true))
+                _ (when (and tool-profile
+                             (not= (:tool-profile-digest task)
+                                   (hermes/tool-profile-digest tool-profile)))
+                    (throw (ex-info "task does not bind the supplied coding tool profile"
+                                    {:mithril/error :mithril.hermes/tool-profile-mismatch})))
                 now (.now js/Date)
                 state (load-or-start artifact task state-path owner now)
                 grants (set (map keyword (remove str/blank? (str/split grants-csv #","))))]
-            (-> (decide! state owner now)
+            (-> (decide! state owner now (boolean tool-profile))
                 (.then
                  (fn [{:keys [admitted audit]}]
                    (let [action (:action admitted)
@@ -144,9 +170,6 @@
                                              :step (:step state) :run-status (:status state)})))
                        (let [{requested-state :state effect :effect}
                              (bot/request-effect state admitted grants owner (+ now 3))
-                             tool-profile (when tool-profile-path
-                                            (js->clj (js/JSON.parse (read-text tool-profile-path))
-                                                     :keywordize-keys true))
                              {:keys [receipt audit]}
                              (hermes/execute-effect effect (cond-> {}
                                                             tool-profile (assoc :profile tool-profile)))

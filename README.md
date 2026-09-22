@@ -303,6 +303,13 @@ neither Jev nor the proposing model can invent a command or argument. Patch
 text and tool output stay in the private artifact directory and are represented
 in state/audit only by digests and bounded counts.
 
+The linear coding prerequisites have exactly one useful next transition, so a
+coding-profile run advances them in ontology order rather than asking Jev to
+guess a mechanical workflow step. Jev remains the policy for genuine finite
+choices; it is not used as mutation authority when the action catalog has not
+been calibrated. The audit distinguishes `deterministic-ontology-workflow`
+from an OpenRouter Jev decision.
+
 The Hermes Desktop artifact embeds the same closed action/effect catalog. Cron
 creation refuses duplicate enabled routines and the configured active-job
 ceiling. Kanban task identity is SHA-256 derived from profile, workspace, title,
