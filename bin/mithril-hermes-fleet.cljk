@@ -1,0 +1,162 @@
+#!/usr/bin/env kbb
+(ns mithril.hermes-fleet-cli
+  (:require [clojure.string :as str]
+            [mithril.execution :as execution]
+            [mithril.hermes-fleet :as fleet]))
+
+(def fs (js/require "node:fs"))
+(def path (js/require "node:path"))
+(def crypto (js/require "node:crypto"))
+
+(defn- usage! []
+  (println "usage: mithril-hermes-fleet <sync|verify> <Hermes profiles root> <output directory>")
+  (js/process.exit 2))
+
+(defn- read-text [file] (.readFileSync fs file "utf8"))
+(defn- exists? [file] (.existsSync fs file))
+(defn- sha256-text [text]
+  (str "sha256:" (.digest (.update (.createHash crypto "sha256") text "utf8") "hex")))
+(defn- file-digest [file] (when (exists? file) (sha256-text (read-text file))))
+(defn- json [value] (.stringify js/JSON (clj->js value) nil 2))
+(defn- parse-json [text] (js->clj (js/JSON.parse text) :keywordize-keys true))
+
+(defn- profile-names [root]
+  (->> (.readdirSync fs root #js {:withFileTypes true})
+       array-seq
+       (filter #(.isDirectory %))
+       (map #(.-name %))
+       (remove #(str/starts-with? % "."))
+       sort
+       vec))
+
+(defn- resolve-script [profiles-root profile-root job]
+  (when-let [script (:script job)]
+    (let [candidates (remove nil?
+                             [(when (.isAbsolute path script) script)
+                              (.join path profile-root "scripts" script)
+                              (.join path profiles-root ".." "scripts" script)
+                              (when-let [workdir (:workdir job)] (.join path workdir script))])]
+      (some #(when (exists? %) %) candidates))))
+
+(defn- job-document [profiles-root profile-root job]
+  (let [script-ref (:script job)
+        script-path (resolve-script profiles-root profile-root job)
+        workdir (when-not (str/blank? (str (:workdir job))) (:workdir job))
+        base {"jobId" (str (:id job))
+              "name" (str (:name job))
+              "enabled" (true? (:enabled job))
+              "noAgent" (true? (:no_agent job))
+              "promptDigest" (sha256-text (str (:prompt job)))
+              "scriptDigest" (when script-ref
+                               (if script-path
+                                 (file-digest script-path)
+                                 (sha256-text (str "missing-script:" script-ref))))
+              "scriptPresent" (boolean script-path)
+              "scheduleDigest" (execution/digest (:schedule job))
+              "workdir" workdir}
+        with-effects (assoc base "effects" (fleet/expected-effects base))]
+    with-effects))
+
+(defn- source-form [doc]
+  (let [job-form (fn [job]
+                   (list 'mithril/hermes-job
+                         :job-id (get job "jobId") :name (get job "name")
+                         :enabled (get job "enabled") :no-agent (get job "noAgent")
+                         :prompt-digest (get job "promptDigest")
+                         :script-digest (get job "scriptDigest")
+                         :script-present (get job "scriptPresent")
+                         :schedule-digest (get job "scheduleDigest")
+                         :workdir (get job "workdir") :effects (get job "effects")))]
+    (str (pr-str
+          (list 'mithril/hermes-profile
+                :id (get doc "@id") :ontology (get doc "ontology")
+                :profile-name (get doc "profileName") :profile-root (get doc "profileRoot")
+                :config-digest (get doc "configDigest") :soul-digest (get doc "soulDigest")
+                :jobs-digest (get doc "jobsDigest")
+                :jobs (mapv job-form (get doc "jobs"))))
+         "\n")))
+
+(defn- profile-source [profiles-root profile-name]
+  (let [root (.join path profiles-root profile-name)
+        jobs-file (.join path root "cron" "jobs.json")
+        jobs-doc (when (exists? jobs-file) (parse-json (read-text jobs-file)))
+        jobs (mapv #(job-document profiles-root root %) (or (:jobs jobs-doc) []))]
+    (source-form
+     {"@id" (str "https://mithril.fund/id/hermes-profile/" profile-name)
+      "ontology" fleet/ontology-digest
+      "profileName" profile-name "profileRoot" root
+      "configDigest" (file-digest (.join path root "config.yaml"))
+      "soulDigest" (file-digest (.join path root "SOUL.md"))
+      "jobsDigest" (file-digest jobs-file)
+      "jobs" jobs})))
+
+(defn- build-fleet [profiles-root]
+  (let [entries
+        (mapv (fn [name]
+                (let [source (profile-source profiles-root name)
+                      filename (str name ".mith")
+                      artifact (fleet/compile-text filename source)]
+                  {:profile name :file filename :source source
+                   :graph-digest (:graph-digest artifact)
+                   :jobs (count (get-in artifact [:profile-ir :jobs]))
+                   :enabled-jobs (count (filter :enabled (get-in artifact [:profile-ir :jobs])))
+                   :missing-scripts (count (filter #(and (some #{:host/script-run} (:effects %))
+                                                         (not (:script-present %)))
+                                                   (get-in artifact [:profile-ir :jobs])))}))
+              (profile-names profiles-root))
+        index {:format "https://mithril.fund/registry/hermes-profile-fleet-v1"
+               :ontology fleet/ontology-digest
+               :profiles (mapv #(dissoc % :source) entries)}]
+    {:entries entries :index index :index-text (str (json index) "\n")}))
+
+(defn- write-fleet! [output {:keys [entries index-text]}]
+  (.mkdirSync fs output #js {:recursive true})
+  (doseq [{:keys [file source]} entries]
+    (.writeFileSync fs (.join path output file) source "utf8"))
+  (.writeFileSync fs (.join path output "index.json") index-text "utf8"))
+
+(defn- verify-fleet! [output {:keys [entries index-text]}]
+  (let [expected-files (set (conj (mapv :file entries) "index.json"))
+        actual-files (if (exists? output)
+                       (set (filter #(or (= % "index.json") (str/ends-with? % ".mith"))
+                                    (js->clj (.readdirSync fs output))))
+                       #{})
+        mismatches (concat
+                    (when-not (= expected-files actual-files)
+                      [{:kind :file-set :expected (count expected-files) :actual (count actual-files)}])
+                    (for [{:keys [profile file source]} entries
+                          :let [target (.join path output file)]
+                          :when (or (not (exists? target)) (not= source (read-text target)))]
+                      {:kind :profile-drift :profile profile})
+                    (let [target (.join path output "index.json")]
+                      (when (or (not (exists? target)) (not= index-text (read-text target)))
+                        [{:kind :index-drift}])))]
+    (if (seq mismatches)
+      (throw (ex-info "Hermes profile fleet differs from compiled Mith manifests"
+                      {:mithril/error :mithril.fleet/drift :mismatches (vec mismatches)}))
+      true)))
+
+(defn- summary [{:keys [entries index]}]
+  {:status "ok"
+   :profiles (count entries)
+   :jobs (reduce + (map :jobs entries))
+   :enabledJobs (reduce + (map :enabled-jobs entries))
+   :missingScripts (reduce + (map :missing-scripts entries))
+   :indexDigest (sha256-text (json index))})
+
+(let [[command profiles-root output & extra] *command-line-args*]
+  (if-not (and (contains? #{"sync" "verify"} command)
+               profiles-root output (empty? extra) (.isAbsolute path profiles-root)
+               (.isAbsolute path output))
+    (usage!)
+    (try
+      (let [fleet (build-fleet profiles-root)]
+        (case command
+          "sync" (write-fleet! output fleet)
+          "verify" (verify-fleet! output fleet))
+        (println (json (summary fleet))))
+      (catch :default error
+        (println (str "REFUSE\t" (or (some-> error ex-data :mithril/error name) "fleet-error")
+                      "\t" (.-message error)))
+        (when-let [data (ex-data error)] (println (json data)))
+        (js/process.exit 1)))))

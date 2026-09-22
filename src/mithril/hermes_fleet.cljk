@@ -1,0 +1,108 @@
+(ns mithril.hermes-fleet
+  "Typed, content-bound projection of a Hermes profile and its cron jobs.
+
+  This is the migration boundary: prompts remain evidence, never authority.
+  Runtime authority is the closed effect set derived from the observed job
+  shape.  Missing files remain explicit in the manifest rather than silently
+  becoming a successful empty profile."
+  (:require [clojure.string :as str]
+            [mithril.compiler :as compiler]
+            [mithril.execution :as execution]))
+
+(def artifact-format "https://mithril.fund/artifact/hermes-profile-v1")
+(def ontology-digest
+  "3539fef6d1f26c012d4305a55a3782902ff8de47e56901e619ea0cde30ece918")
+(def source-keys
+  #{"@context" "@id" "@type" "ontology" "profileName" "profileRoot"
+    "configDigest" "soulDigest" "jobsDigest" "jobs"})
+(def job-keys
+  #{"jobId" "name" "enabled" "noAgent" "promptDigest" "scriptDigest"
+    "scriptPresent" "scheduleDigest" "workdir" "effects"})
+(def effect-catalog
+  #{"scheduler/tick" "host/script-run" "llm/agent-turn" "agent/coding-turn"})
+
+(defn- fail! [code detail data]
+  (throw (ex-info detail (merge {:mithril/error code :detail detail} data))))
+
+(defn- digest? [value]
+  (and (string? value) (boolean (re-matches #"sha256:[0-9a-f]{64}" value))))
+
+(defn- absolute-path? [value]
+  (and (string? value)
+       (or (str/starts-with? value "/")
+           (boolean (re-matches #"[A-Za-z]:[\\\\/].+" value)))))
+
+(defn expected-effects [job]
+  (cond-> ["scheduler/tick"]
+    (some? (get job "scriptDigest")) (conj "host/script-run")
+    (not (get job "noAgent"))
+    (conj (if (some? (get job "workdir")) "agent/coding-turn" "llm/agent-turn"))))
+
+(defn compile-document [path doc]
+  (when-not (compiler/source-path? path)
+    (fail! :mithril/unsupported-extension "Hermes profile must end in .mith or .mithril" {}))
+  (when-not (= compiler/context-uri (get doc "@context"))
+    (fail! :mithril/unpinned-context "Hermes profile must use the pinned context" {}))
+  (when-not (= "HermesProfile" (get doc "@type"))
+    (fail! :mithril.fleet/unexpected-source-type "@type must be HermesProfile" {}))
+  (when-not (= source-keys (set (keys doc)))
+    (fail! :mithril.fleet/unknown-source-key "Hermes profile has an unknown or missing key" {}))
+  (let [profile-name (get doc "profileName")
+        profile-root (get doc "profileRoot")
+        jobs (get doc "jobs")]
+    (when-not (and (string? profile-name)
+                   (boolean (re-matches #"[A-Za-z0-9][A-Za-z0-9._-]*" profile-name)))
+      (fail! :mithril.fleet/invalid-profile-name "profileName is not a safe Hermes profile id" {}))
+    (when-not (and (absolute-path? profile-root)
+                   (= profile-name (last (str/split profile-root #"[\\\\/]"))))
+      (fail! :mithril.fleet/invalid-profile-root "profileRoot must be absolute and end in profileName" {}))
+    (when-not (= ontology-digest (get doc "ontology"))
+      (fail! :mithril.fleet/ontology-mismatch "Hermes profile ontology is not the pinned fleet ontology" {}))
+    (doseq [key ["configDigest" "soulDigest" "jobsDigest"]]
+      (when-not (or (nil? (get doc key)) (digest? (get doc key)))
+        (fail! :mithril.fleet/invalid-digest (str key " must be nil or a SHA-256 identity") {:key key})))
+    (when-not (vector? jobs)
+      (fail! :mithril.fleet/invalid-jobs "jobs must be a vector, including an explicit empty vector" {}))
+    (when-not (= (count jobs) (count (set (map #(get % "jobId") jobs))))
+      (fail! :mithril.fleet/duplicate-job "job ids must be unique within one profile" {}))
+    (doseq [job jobs]
+      (when-not (= job-keys (set (keys job)))
+        (fail! :mithril.fleet/invalid-job "job has an unknown or missing key" {:job (get job "jobId")}))
+      (when-not (and (string? (get job "jobId")) (not (str/blank? (get job "jobId")))
+                     (string? (get job "name")) (not (str/blank? (get job "name")))
+                     (boolean? (get job "enabled")) (boolean? (get job "noAgent"))
+                     (digest? (get job "promptDigest"))
+                     (digest? (get job "scheduleDigest"))
+                     (or (nil? (get job "scriptDigest")) (digest? (get job "scriptDigest")))
+                     (boolean? (get job "scriptPresent"))
+                     (or (get job "scriptDigest") (not (get job "scriptPresent")))
+                     (or (nil? (get job "workdir")) (absolute-path? (get job "workdir"))))
+        (fail! :mithril.fleet/invalid-job-value "job fields do not satisfy the fleet shape" {:job (get job "jobId")}))
+      (when-not (= (expected-effects job) (get job "effects"))
+        (fail! :mithril.fleet/effect-mismatch "job effects must be derived from script/agent/workdir state"
+               {:job (get job "jobId") :expected (expected-effects job)}))
+      (when-not (every? effect-catalog (get job "effects"))
+        (fail! :mithril.fleet/unknown-effect "job requested an effect outside the closed catalog" {:job (get job "jobId")})))
+    {:format artifact-format
+     :media-type compiler/form-media-type
+     :graph-digest (execution/digest doc)
+     :profile-ir {:version :mithril.hermes-profile/v1
+                  :id (get doc "@id")
+                  :name profile-name
+                  :root profile-root
+                  :ontology (get doc "ontology")
+                  :source-digests {:config (get doc "configDigest")
+                                   :soul (get doc "soulDigest")
+                                   :jobs (get doc "jobsDigest")}
+                  :jobs (mapv (fn [job]
+                                {:id (get job "jobId") :name (get job "name")
+                                 :enabled (get job "enabled")
+                                 :effects (mapv keyword (get job "effects"))
+                                 :script-present (get job "scriptPresent")
+                                 :workdir (get job "workdir")
+                                 :prompt-digest (get job "promptDigest")
+                                 :schedule-digest (get job "scheduleDigest")})
+                              jobs)}}))
+
+(defn compile-text [path text]
+  (compile-document path (compiler/parse-source text)))

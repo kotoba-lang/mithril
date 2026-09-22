@@ -1,0 +1,40 @@
+(ns mithril.hermes-fleet-test
+  (:require [cljs.test :refer [deftest is testing]]
+            [mithril.hermes-fleet :as fleet]))
+
+(def base
+  {"@context" "https://mithril.fund/context/v1"
+   "@id" "https://mithril.fund/id/hermes-profile/itonami"
+   "@type" "HermesProfile"
+   "ontology" fleet/ontology-digest
+   "profileName" "itonami"
+   "profileRoot" "/tmp/profiles/itonami"
+   "configDigest" nil "soulDigest" nil "jobsDigest" nil
+   "jobs" []})
+
+(defn error-code [f]
+  (try (f) nil (catch :default error (:mithril/error (ex-data error)))))
+
+(deftest profile-manifest-is-typed-and-closed
+  (let [artifact (fleet/compile-document "itonami.mith" base)]
+    (is (= fleet/artifact-format (:format artifact)))
+    (is (= :mithril.hermes-profile/v1 (get-in artifact [:profile-ir :version])))
+    (is (= [] (get-in artifact [:profile-ir :jobs]))))
+  (testing "profile roots bind identity"
+    (is (= :mithril.fleet/invalid-profile-root
+           (error-code #(fleet/compile-document "x.mith" (assoc base "profileRoot" "/tmp/profiles/other")))))))
+
+(deftest effects-are-derived-not-declared-by-prompts
+  (let [job {"jobId" "job-1" "name" "compile" "enabled" true "noAgent" false
+             "promptDigest" "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+             "scriptDigest" "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+             "scriptPresent" true
+             "scheduleDigest" "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+             "workdir" "/tmp/work" "effects" ["scheduler/tick" "host/script-run" "agent/coding-turn"]}
+        artifact (fleet/compile-document "itonami.mith" (assoc base "jobs" [job]))]
+    (is (= [:scheduler/tick :host/script-run :agent/coding-turn]
+           (get-in artifact [:profile-ir :jobs 0 :effects])))
+    (is (= :mithril.fleet/effect-mismatch
+           (error-code #(fleet/compile-document
+                          "itonami.mith"
+                          (assoc base "jobs" [(assoc job "effects" ["llm/agent-turn"])])))))))

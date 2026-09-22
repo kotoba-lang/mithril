@@ -90,6 +90,29 @@ canonicalizes the resulting RDF Dataset. [`examples/mithril-app-agent-form.mith`
 is semantically identical to the compatibility JSON-LD app source and compiles
 to the same graph digest and App IR.
 
+## Hermes profile fleet manifests
+
+`mithril-hermes-fleet` projects every local Hermes profile and cron job into a
+typed `.mith` manifest. It binds `config.yaml`, `SOUL.md`, the complete cron
+registry, every prompt, schedule, resolved script and absolute coding workdir
+by SHA-256 identity. Prompt prose is evidence only: executable authority is
+derived into the closed `scheduler/tick`, `host/script-run`,
+`llm/agent-turn`, or `agent/coding-turn` effect catalog.
+
+```sh
+kbb --backend sci bin/mithril-hermes-fleet.cljk sync \
+  "$HOME/.hermes/profiles" "$HOME/.hermes/mithril/profile-fleet-v1"
+kbb --backend sci bin/mithril-hermes-fleet.cljk verify \
+  "$HOME/.hermes/profiles" "$HOME/.hermes/mithril/profile-fleet-v1"
+```
+
+`verify` compares both the complete file set and every byte. A missing script
+is retained as `:script-present false` and counted in the index; it is never
+reported as an empty successful profile. These manifests establish the
+governed migration and drift boundary. They do not by themselves intercept a
+legacy Hermes cron execution; execution migration additionally requires the
+Mithril scheduler adapter and a receipt for each effect.
+
 ## Published Mithril code and libraries
 
 The repository now contains source authored in Mithril itself:
