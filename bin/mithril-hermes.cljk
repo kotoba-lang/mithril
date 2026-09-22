@@ -107,7 +107,7 @@
 (defn- refuse! [error]
   (println (str "REFUSE\t" (or (some-> error ex-data :mithril/error name) "hermes-error")
                 "\t" (.-message error)))
-  (js/process.exitCode 1))
+  (set! (.-exitCode js/process) 1))
 
 (let [[command profile-path task-path state-path owner grants-csv mode tool-profile-path & extra]
       *command-line-args*]
