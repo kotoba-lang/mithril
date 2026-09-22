@@ -1,4 +1,4 @@
-{:paths ["src" "test"
+{:paths ["src" "test" "resources" "lib" "examples"
          "../org-w3-json-ld-api/src"
          "../org-w3-rdf-canon/src"
          "../org-w3-nquads/src"
