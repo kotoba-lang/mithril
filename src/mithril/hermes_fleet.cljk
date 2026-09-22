@@ -19,7 +19,23 @@
   #{"jobId" "name" "enabled" "noAgent" "promptDigest" "scriptDigest"
     "scriptPresent" "scheduleDigest" "workdir" "effects"})
 (def effect-catalog
-  #{"scheduler/tick" "host/script-run" "llm/agent-turn" "agent/coding-turn"})
+  #{"scheduler/tick" "host/script-run" "llm/agent-turn" "agent/workspace-turn"})
+
+(defn coding-candidate? [job]
+  (contains? (set (:effects job)) :agent/workspace-turn))
+
+(defn coding-readiness
+  "Classify one coding job using observed workspace facts and the governed
+  workspace registry. A clean checkout is still refused until its exact tool
+  profile is registered."
+  [job registered-workspaces {:keys [exists? git? clean?]}]
+  (cond
+    (not (coding-candidate? job)) :not-coding
+    (not exists?) :missing-workspace
+    (not git?) :not-git
+    (not clean?) :dirty-workspace
+    (not (contains? registered-workspaces (:workdir job))) :unregistered-workspace
+    :else :ready))
 
 (defn- fail! [code detail data]
   (throw (ex-info detail (merge {:mithril/error code :detail detail} data))))
@@ -36,7 +52,7 @@
   (cond-> ["scheduler/tick"]
     (some? (get job "scriptDigest")) (conj "host/script-run")
     (not (get job "noAgent"))
-    (conj (if (some? (get job "workdir")) "agent/coding-turn" "llm/agent-turn"))))
+    (conj (if (some? (get job "workdir")) "agent/workspace-turn" "llm/agent-turn"))))
 
 (defn compile-document [path doc]
   (when-not (compiler/source-path? path)

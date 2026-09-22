@@ -27,10 +27,9 @@
        (or (str/starts-with? value "/")
            (boolean (re-matches #"[A-Za-z]:[\\\\/].+" value)))))
 
-(defn coding-tool-profile-path
-  "Return the one registered tool profile for workspace.  The registry is a
-  closed policy document, not mutable actor state."
-  [registry workspace]
+(defn validate-coding-tool-registry
+  "Validate the closed workspace to tool-profile policy catalog."
+  [registry]
   (when-not (and (map? registry)
                  (= #{:format :profiles} (set (keys registry)))
                  (= registry-format (:format registry))
@@ -46,6 +45,13 @@
                    (= (count workspaces) (count (set workspaces))))
       (fail! :mithril.kanban/invalid-registry
              "registry entries must be unique absolute workspace/profile pairs" {}))
+    registry))
+
+(defn coding-tool-profile-path
+  "Return the one registered tool profile for workspace.  The registry is a
+  closed policy document, not mutable actor state."
+  [registry workspace]
+  (let [profiles (:profiles (validate-coding-tool-registry registry))]
     (or (some #(when (= workspace (:workspace %)) (:tool-profile %)) profiles)
         (fail! :mithril.kanban/unregistered-workspace
                "workspace has no governed coding tool profile" {:workspace workspace}))))
