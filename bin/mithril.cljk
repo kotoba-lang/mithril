@@ -2,6 +2,7 @@
   (:require [mithril.compiler :as compiler]
             [mithril.bot :as bot]
             [mithril.desktop :as desktop]
+            [mithril.hermes-fleet :as fleet]
             [mithril.web :as web]))
 
 (defn- usage! []
@@ -11,6 +12,7 @@
   (println "  mithril compile-library <library.mith|library.mithril>")
   (println "  mithril compile-bot <profile.mith|profile.mithril>")
   (println "  mithril compile-desktop <app.mith|app.mithril>")
+  (println "  mithril compile-hermes-profile <profile.mith|profile.mithril>")
   (println "  mithril emit-desktop <app.mith|app.mithril>")
   (println "  mithril compile-web <app.mith|app.mithril> <library.mith>...")
   (println "  mithril request <app.mith|app.mithril> <library.mith> <METHOD> <PATH>")
@@ -68,6 +70,11 @@
       "compile-desktop"
       (if (and path (empty? args))
         (print-json (desktop/compile-text path (read-text path)))
+        (usage!))
+
+      "compile-hermes-profile"
+      (if (and path (empty? args))
+        (print-json (fleet/compile-text path (read-text path)))
         (usage!))
 
       "emit-desktop"
