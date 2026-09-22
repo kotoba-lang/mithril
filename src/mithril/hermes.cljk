@@ -6,6 +6,7 @@
   that diff against a digest-bound tool profile before deterministic host
   functions apply it and run exact argv compile/test tools without a shell."
   (:require [cljs.reader :as reader]
+            [clojure.set :as set]
             [clojure.string :as str]
             [mithril.bot :as bot]
             [mithril.execution :as execution]))
@@ -42,9 +43,13 @@
        (<= 1000 (:timeout-ms spec) 900000)))
 
 (defn validate-tool-profile [profile]
-  (let [expected #{:format :workspace :artifact-dir :allowed-paths
-                   :max-patch-bytes :max-context-bytes :proposer :tools}]
-    (when-not (and (map? profile) (= expected (set (keys profile)))
+  (let [required #{:format :workspace :artifact-dir :allowed-paths
+                   :max-patch-bytes :max-context-bytes :proposer :tools}
+        optional #{:create-paths}
+        keys* (set (keys profile))
+        create-paths (or (:create-paths profile) [])]
+    (when-not (and (map? profile) (= required (set (filter required keys*)))
+                   (empty? (remove (into required optional) keys*))
                    (= tool-profile-format (:format profile)))
       (fail! :mithril.hermes/invalid-tool-profile
              "coding tool profile has an invalid field set or format" {}))
@@ -56,11 +61,16 @@
       (fail! :mithril.hermes/invalid-tool-profile
              "workspace and out-of-workspace artifact directory must be absolute" {}))
     (when-not (and (vector? (:allowed-paths profile))
-                   (seq (:allowed-paths profile))
                    (= (count (:allowed-paths profile)) (count (set (:allowed-paths profile))))
-                   (every? relative-file? (:allowed-paths profile)))
+                   (every? relative-file? (:allowed-paths profile))
+                   (vector? create-paths)
+                   (= (count create-paths) (count (set create-paths)))
+                   (every? relative-file? create-paths)
+                   (seq (concat (:allowed-paths profile) create-paths))
+                   (empty? (set/intersection (set (:allowed-paths profile))
+                                             (set create-paths))))
       (fail! :mithril.hermes/invalid-tool-profile
-             "allowed paths must be a non-empty unique list of relative files" {}))
+             "edit/create paths must be disjoint unique relative files" {}))
     (when-not (and (integer? (:max-patch-bytes profile))
                    (<= 1 (:max-patch-bytes profile) 262144)
                    (integer? (:max-context-bytes profile))
@@ -133,9 +143,10 @@
              "effect is not bound to this coding tool profile" {})))
   profile)
 
-(defn- runtime-paths! [ctx profile]
+(defn- runtime-paths! [ctx profile operation]
   (let [workspace ((:realpath-fn ctx) (:workspace profile))
-        artifact-dir ((:realpath-fn ctx) (:artifact-dir profile))]
+        artifact-dir ((:realpath-fn ctx) (:artifact-dir profile))
+        create-paths (or (:create-paths profile) [])]
     (when (or (= workspace artifact-dir)
               (str/starts-with? artifact-dir (str workspace "/")))
       (fail! :mithril.hermes/artifact-path-denied
@@ -148,6 +159,23 @@
                        (str/starts-with? actual (str workspace "/")))
           (fail! :mithril.hermes/path-denied
                  "allowlisted source must be a regular in-workspace file" {}))))
+    (doseq [relative create-paths]
+      (let [file ((:join-fn ctx) workspace relative)
+            parts (str/split relative #"/")
+            parent-relative (str/join "/" (butlast parts))
+            parent ((:join-fn ctx) workspace (if (str/blank? parent-relative) "." parent-relative))
+            parent-stat ((:lstat-fn ctx) parent)
+            actual-parent ((:realpath-fn ctx) parent)]
+        (when (or (and (= :llm/propose-patch operation) ((:exists-fn ctx) file))
+                  (and ((:exists-fn ctx) file)
+                       (let [target-stat ((:lstat-fn ctx) file)]
+                         (or (not (.isFile target-stat)) (.isSymbolicLink target-stat))))
+                  (not (.isDirectory parent-stat))
+                  (.isSymbolicLink parent-stat)
+                  (not (or (= actual-parent workspace)
+                           (str/starts-with? actual-parent (str workspace "/")))))
+          (fail! :mithril.hermes/path-denied
+                 "creatable path must be absent below a real in-workspace directory" {}))))
     profile))
 
 (defn- byte-count [value]
@@ -186,15 +214,18 @@
         (when (> next-total (:max-context-bytes profile))
           (fail! :mithril.hermes/context-budget "workspace snapshot exceeds the context budget" {}))
         (recur (rest paths) next-total (conj result {:path relative :content content})))
-      result)))
+      (into result (map (fn [relative] {:path relative :content nil :create? true})
+                        (or (:create-paths profile) []))))))
 
 (defn- proposal-prompt [effect files]
   (str "You are a patch advisor in an isolated disposable Git worktree. Use only relative paths and the file tools.\n"
-       "Read and edit only the listed files. Do not rename, delete, chmod, add files, add binaries, or add symlinks.\n"
+       "Read/edit only <allowed-file> paths. You may create only <creatable-file> paths. Do not rename, delete, chmod, add any other file, add binaries, or add symlinks.\n"
        "Apply the requested edit with the patch tool, verify by reading the changed lines, then answer DONE.\n"
        "Goal: " (:goal effect) "\n"
-       (str/join "\n" (map (fn [{:keys [path]}]
-                               (str "<allowed-file>" path "</allowed-file>"))
+       (str/join "\n" (map (fn [{:keys [path create?]}]
+                               (if create?
+                                 (str "<creatable-file>" path "</creatable-file>")
+                                 (str "<allowed-file>" path "</allowed-file>")))
                              files))))
 
 (defn- default-propose! [ctx profile effect files]
@@ -216,14 +247,25 @@
           (catch :default _
             (fail! :mithril.hermes/proposer-failed
                    "Hermes proposer did not complete within its governed invocation" {}))))
-      (let [untracked-after (git! ctx proposal-workspace "ls-files" "--others" "--exclude-standard")
+      (let [untracked-before-intent (->> (str/split-lines
+                                           (git! ctx proposal-workspace "ls-files" "--others" "--exclude-standard"))
+                                         (remove str/blank?) set)
+            creatable (set (or (:create-paths profile) []))
+            denied-untracked (set/difference untracked-before-intent creatable)
+            _ (when (seq denied-untracked)
+                (fail! :mithril.hermes/proposer-workspace-denied
+                       "proposer created a non-creatable path" {:paths denied-untracked}))
+            _ (when (seq untracked-before-intent)
+                (apply git! ctx proposal-workspace "add" "-N" "--"
+                       (sort untracked-before-intent)))
+            untracked-after (git! ctx proposal-workspace "ls-files" "--others" "--exclude-standard")
             changed (->> (str/split-lines
                           (git! ctx proposal-workspace "diff" "--name-only" "--"))
                          (remove str/blank?) set)
             patch (git! ctx proposal-workspace "diff" "--binary" "--")]
         (when-not (and (str/blank? untracked-after)
                        (seq changed)
-                       (every? (set (:allowed-paths profile)) changed))
+                       (every? (into (set (:allowed-paths profile)) creatable) changed))
           (fail! :mithril.hermes/proposer-workspace-denied
                  "proposer changed an untracked or non-allowlisted path" {}))
         patch))))
@@ -240,7 +282,7 @@
         marker-paths (->> (re-seq #"(?m)^(?:---|\+\+\+) (?:[ab]/([^\n]+)|/dev/null)$" patch)
                           (keep second))
         paths (vec (distinct (concat header-paths marker-paths)))
-        allowed (set (:allowed-paths profile))]
+        allowed (into (set (:allowed-paths profile)) (or (:create-paths profile) []))]
     (when (or (empty? pairs)
               (some (fn [[_ left right]] (not= left right)) pairs)
               (some #(or (not (relative-file? %)) (not (contains? allowed %))) paths))
@@ -326,7 +368,8 @@
      (fail! :mithril.hermes/effect-denied "effect is outside the Hermes coding catalog" {}))
    (let [ctx (merge (default-context) supplied-context)
          profile (when (contains? coding-effects (:operation effect))
-                   (->> (:profile ctx) (profile! effect) (runtime-paths! ctx)))]
+                   (let [profile (profile! effect (:profile ctx))]
+                     (runtime-paths! ctx profile (:operation effect))))]
      (try
        (case (:operation effect)
          :workspace/read

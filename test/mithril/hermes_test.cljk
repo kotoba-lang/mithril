@@ -124,3 +124,43 @@
     (is (= :mithril.hermes/invalid-tool-profile
            (error-code #(hermes/tool-profile-digest
                          (assoc profile :allowed-paths ["../escape"])))))))
+
+(deftest explicitly-creatable-regular-file-can-be-proposed-and-applied
+  (let [fs (js/require "node:fs")
+        workspace (.mkdtempSync fs "/tmp/mithril-create-workspace-")
+        artifacts (.mkdtempSync fs "/tmp/mithril-create-artifacts-")]
+    (try
+      (exec! workspace "/usr/bin/git" "init" "-q")
+      (.writeFileSync fs (str workspace "/README.md") "base\n" "utf8")
+      (exec! workspace "/usr/bin/git" "add" "README.md")
+      (exec! workspace "/usr/bin/git" "-c" "user.name=Mithril Test"
+             "-c" "user.email=mithril@example.invalid" "commit" "-qm" "base")
+      (let [profile (-> (coding-profile workspace artifacts)
+                        (assoc :allowed-paths [] :create-paths ["new.cljk"])
+                        (assoc-in [:tools :test/run]
+                                  {:program "/usr/bin/grep" :args ["-q" "value 1" "new.cljk"]
+                                   :timeout-ms 5000}))
+            digest (hermes/tool-profile-digest profile)
+            effect (assoc base-effect :workspace workspace :run-id "sha256:create-1"
+                          :tool-profile-digest digest)
+            patch (str "diff --git a/new.cljk b/new.cljk\n"
+                       "new file mode 100644\n"
+                       "index 0000000..d00491f\n"
+                       "--- /dev/null\n+++ b/new.cljk\n"
+                       "@@ -0,0 +1 @@\n+value 1\n")
+            proposed (hermes/execute-effect
+                      (assoc effect :id "create-propose" :operation :llm/propose-patch)
+                      {:profile profile :propose-fn (fn [_] patch)})
+            applied (hermes/execute-effect
+                     (assoc effect :id "create-apply" :operation :workspace/apply-patch)
+                     {:profile profile})
+            tested (hermes/execute-effect
+                    (assoc effect :id "create-test" :operation :test/run)
+                    {:profile profile})]
+        (is (= :completed (get-in proposed [:receipt :status])))
+        (is (= :completed (get-in applied [:receipt :status])))
+        (is (= :completed (get-in tested [:receipt :status])))
+        (is (= "value 1\n" (.readFileSync fs (str workspace "/new.cljk") "utf8"))))
+      (finally
+        (.rmSync fs workspace #js {:recursive true :force true})
+        (.rmSync fs artifacts #js {:recursive true :force true})))))
