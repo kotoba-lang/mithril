@@ -17,6 +17,7 @@
     "SynthesizeWebApplication" "mith:SynthesizeWebApplication"
     "SynthesizeWebPipelineApplication" "mith:SynthesizeWebPipelineApplication"
     "GraphAgentApplication" "mith:GraphAgentApplication"
+    "AppAgentApplication" "mith:AppAgentApplication"
     "routerIntent" "mith:routerIntent"
     "handlerIntent" "mith:handlerIntent"
     "viewIntent" "mith:viewIntent"
@@ -31,6 +32,20 @@
     "analyzer" {"@id" "mith:analyzer" "@type" "@id"}
     "store" {"@id" "mith:store" "@type" "@id"}
     "governor" {"@id" "mith:governor" "@type" "@id"}
+    "reasoner" {"@id" "mith:reasoner" "@type" "@id"}
+    "query" {"@id" "mith:query" "@type" "@id"}
+    "validator" {"@id" "mith:validator" "@type" "@id"}
+    "compiler" {"@id" "mith:compiler" "@type" "@id"}
+    "tester" {"@id" "mith:tester" "@type" "@id"}
+    "deployer" {"@id" "mith:deployer" "@type" "@id"}
+    "maxSteps" {"@id" "mith:maxSteps" "@type" "http://www.w3.org/2001/XMLSchema#integer"}
+    "app" "mith:app"
+    "name" "mith:name"
+    "description" "mith:description"
+    "headline" "mith:headline"
+    "summary" "mith:summary"
+    "template" {"@id" "mith:template" "@type" "@id"}
+    "dataShape" {"@id" "mith:dataShape" "@type" "@id"}
     "goal" {"@id" "mith:goal" "@type" "@id"}
     "ontology" "mith:ontologyDigest"
     "choices" {"@id" "mith:choice" "@container" "@set"}
@@ -86,7 +101,9 @@
 (def import-keys #{"library" "digest"})
 (def route-keys #{"method" "path" "operation" "status" "contentType" "body"})
 (def export-kinds #{"mith:router" "mith:handler" "mith:view" "mith:effect"
-                    "mith:collector" "mith:analyzer" "mith:store" "mith:governor"})
+                    "mith:collector" "mith:analyzer" "mith:store" "mith:governor"
+                    "mith:reasoner" "mith:query" "mith:validator" "mith:compiler"
+                    "mith:tester" "mith:deployer"})
 (def web-goal "https://mithril.fund/id/goal/web-application")
 (def web-methods #{"GET" "HEAD"})
 

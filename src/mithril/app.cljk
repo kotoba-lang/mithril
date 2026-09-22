@@ -1,0 +1,101 @@
+(ns mithril.app
+  "Compiler for a bounded define -> infer -> query -> validate -> compile ->
+  test -> deploy application loop. The loop selects only imported operations;
+  it never grants ambient network or mutable-storage authority."
+  (:require [clojure.string :as str]
+            [mithril.compiler :as compiler]))
+
+(def app-format "https://mithril.fund/artifact/app-agent-v1")
+(def app-goal "https://mithril.fund/id/goal/compile-test-deploy-app")
+(def source-keys #{"@context" "@id" "@type" "goal" "ontology" "imports" "loop" "app"})
+(def loop-keys #{"maxSteps" "reasoner" "query" "validator" "compiler" "tester" "deployer" "governor"})
+(def app-keys #{"name" "description" "headline" "summary" "template" "dataShape"})
+(def role-fields {"reasoner" :reasoner "query" :query "validator" :validator
+                  "compiler" :compiler "tester" :tester "deployer" :deployer
+                  "governor" :governor})
+(def templates #{"https://mithril.fund/id/template/dashboard"
+                 "https://mithril.fund/id/template/report"
+                 "https://mithril.fund/id/template/directory"})
+(def data-shapes #{"https://mithril.fund/id/shape/metric-cards"
+                   "https://mithril.fund/id/shape/claim-list"
+                   "https://mithril.fund/id/shape/entity-directory"})
+
+(defn- fail! [code detail]
+  (throw (ex-info detail {:mithril/error code :detail detail})))
+
+(defn- bounded-text! [value label ceiling]
+  (when-not (and (string? value) (not (str/blank? value)) (<= (count value) ceiling))
+    (fail! :mithril/invalid-app-text (str label " must be 1 through " ceiling " characters")))
+  value)
+
+(defn compile-document [path doc library-artifacts]
+  (when-not (compiler/source-path? path)
+    (fail! :mithril/unsupported-extension "app agent source must end in .mith or .mithril"))
+  (when-not (= compiler/context-uri (get doc "@context"))
+    (fail! :mithril/unpinned-context "app agent source must use the pinned context"))
+  (when-not (= "AppAgentApplication" (get doc "@type"))
+    (fail! :mithril/unexpected-source-type "@type must be AppAgentApplication"))
+  (when-not (= source-keys (set (keys doc)))
+    (fail! :mithril/unknown-source-key "app agent source has an unknown or missing key"))
+  (when-not (= app-goal (get doc "goal"))
+    (fail! :mithril/unknown-goal "app agent goal is outside the v1 catalog"))
+  (let [ontology (get doc "ontology") imports (get doc "imports") loop-spec (get doc "loop")
+        app-spec (get doc "app") libraries (into {} (map (fn [a] [(get-in a [:library :id]) a]) library-artifacts))]
+    (when-not (boolean (re-matches #"[0-9a-f]{64}" (or ontology "")))
+      (fail! :mithril/invalid-ontology "ontology must be a 64-character SHA-256 identity"))
+    (when-not (and (vector? imports) (= 1 (count imports)))
+      (fail! :mithril/invalid-import "app agent v1 requires exactly one library import"))
+    (let [{library-id "library" digest "digest" :as imported} (first imports)
+          library (get libraries library-id)]
+      (when-not (= #{"library" "digest"} (set (keys imported)))
+        (fail! :mithril/invalid-import "app agent import field set is invalid"))
+      (when-not library (fail! :mithril/missing-library "app agent library was not supplied"))
+      (when-not (= digest (:graph-digest library))
+        (fail! :mithril/library-digest-mismatch "app agent library digest mismatch"))
+      (when-not (= ontology (get-in library [:library :ontology]))
+        (fail! :mithril/ontology-mismatch "app agent and library ontology identities differ"))
+      (when-not (= loop-keys (set (keys loop-spec)))
+        (fail! :mithril/invalid-loop "app agent loop has an unknown or missing key"))
+      (when-not (= 6 (get loop-spec "maxSteps"))
+        (fail! :mithril/invalid-budget "app agent v1 requires exactly six bounded execution steps"))
+      (let [exports (into {} (map (juxt :symbol :kind) (get-in library [:library :exports])))]
+        (doseq [[field role] role-fields]
+          (when-not (= role (get exports (get loop-spec field)))
+            (fail! :mithril/unexported-operation (str field " is not an imported " (name role)))))
+        (when-not (= app-keys (set (keys app-spec)))
+          (fail! :mithril/invalid-app "app description has an unknown or missing key"))
+        (bounded-text! (get app-spec "name") "name" 80)
+        (bounded-text! (get app-spec "description") "description" 240)
+        (bounded-text! (get app-spec "headline") "headline" 120)
+        (bounded-text! (get app-spec "summary") "summary" 480)
+        (when-not (contains? templates (get app-spec "template"))
+          (fail! :mithril/unknown-template "template is outside the closed app catalog"))
+        (when-not (contains? data-shapes (get app-spec "dataShape"))
+          (fail! :mithril/unknown-data-shape "dataShape is outside the closed app catalog"))
+        {:format app-format
+         :media-type compiler/media-type
+         :graph-digest (compiler/graph-digest doc)
+         :app-ir {:version :mithril.app/v1
+                  :goal :goal/compile-test-deploy-app
+                  :ontology ontology
+                  :import {:library library-id :digest digest}
+                  :budget {:max-steps 6 :max-source-bytes 8192}
+                  :operations (into {} (map (fn [[field role]] [role (get loop-spec field)]) role-fields))
+                  :app {:name (get app-spec "name")
+                        :description (get app-spec "description")
+                        :headline (get app-spec "headline")
+                        :summary (get app-spec "summary")
+                        :template (get app-spec "template")
+                        :data-shape (get app-spec "dataShape")}
+                  :effects [:render/static-document :deploy/self-contained-url]}}))))
+
+(defn compile-text [path text library-artifacts]
+  (compile-document path (compiler/parse-json text) library-artifacts))
+
+(defn prepare-run [artifact]
+  (when-not (= app-format (:format artifact))
+    (fail! :mithril.app/invalid-artifact "artifact is not an app agent"))
+  {:kind :mithril.app/run
+   :steps [:infer/owl2-rl :query/sparql :validate/shacl :compile/web-ir :test/conformance :deploy/self-contained-url]
+   :budget (get-in artifact [:app-ir :budget])
+   :effects (get-in artifact [:app-ir :effects])})

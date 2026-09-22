@@ -1,0 +1,15 @@
+{
+  "@context": "https://mithril.fund/context/v1",
+  "@id": "https://mithril.fund/ontology/app-agent-v1",
+  "@type": "http://www.w3.org/2002/07/owl#Ontology",
+  "http://www.w3.org/2002/07/owl#imports": {"@id": "https://mithril.fund/ontology/core-v1"},
+  "@graph": [
+    {"@id": "https://mithril.fund/ns/v1#AppAgentApplication", "@type": "http://www.w3.org/2002/07/owl#Class"},
+    {"@id": "https://mithril.fund/ns/v1#DashboardTemplate", "@type": "http://www.w3.org/2002/07/owl#Class"},
+    {"@id": "https://mithril.fund/ns/v1#ReportTemplate", "@type": "http://www.w3.org/2002/07/owl#Class"},
+    {"@id": "https://mithril.fund/ns/v1#DirectoryTemplate", "@type": "http://www.w3.org/2002/07/owl#Class"},
+    {"@id": "https://mithril.fund/ns/v1#StaticDeployment", "@type": "http://www.w3.org/2002/07/owl#Class"},
+    {"@id": "https://mithril.fund/ns/v1#template", "@type": "http://www.w3.org/2002/07/owl#ObjectProperty", "http://www.w3.org/2000/01/rdf-schema#domain": {"@id": "https://mithril.fund/ns/v1#AppAgentApplication"}},
+    {"@id": "https://mithril.fund/ns/v1#dataShape", "@type": "http://www.w3.org/2002/07/owl#ObjectProperty", "http://www.w3.org/2000/01/rdf-schema#domain": {"@id": "https://mithril.fund/ns/v1#AppAgentApplication"}}
+  ]
+}
