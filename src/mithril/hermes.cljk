@@ -266,6 +266,12 @@
                                  :else (str "<allowed-file>" path "</allowed-file>")))
                              files))))
 
+(defn- typed-proposal-prompt [effect diagnostic]
+  (str "Goal: " (:goal effect) "\n"
+       (when diagnostic
+         (str "A previous governed compile/test failed. Repair this bounded diagnostic:\n"
+              "<diagnostic>" diagnostic "</diagnostic>\n"))))
+
 (defn- default-propose! [ctx profile effect files diagnostic]
   (let [{program :program proposer-profile :profile timeout-ms :timeout-ms} (:proposer profile)
         proposal-workspace (proposal-workspace-path profile effect (:join-fn ctx))]
@@ -282,7 +288,9 @@
               ((:exec-fn ctx) program
                (cond-> ["-p" proposer-profile "--ignore-rules" "-t" "file"
                         "--in" proposal-workspace
-                        "-z" (proposal-prompt effect files diagnostic)]
+                        "-z" (if (= "typed-mithril-v1" proposer-profile)
+                               (typed-proposal-prompt effect diagnostic)
+                               (proposal-prompt effect files diagnostic))]
                  (= "typed-mithril-v1" proposer-profile)
                  (into ["--paths-json"
                         (.stringify js/JSON
