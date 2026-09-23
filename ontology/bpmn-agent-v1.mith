@@ -1,0 +1,38 @@
+(mithril/ontology
+  :id "https://mithril.fund/ontology/bpmn-agent-v1"
+  :profile
+  ["https://www.w3.org/TR/rdf11-concepts/"
+   "https://www.w3.org/TR/owl2-profiles/#OWL_2_RL"
+   "https://www.w3.org/TR/shacl/"]
+  :graph
+  [(owl/class
+     :id "https://mithril.fund/ns/v1#GovernedProcess"
+     :rdfs/sub-class-of "http://www.omg.org/spec/BPMN/20100524/MODEL#Process")
+   (owl/class
+     :id "https://mithril.fund/ns/v1#GovernedServiceTask"
+     :rdfs/sub-class-of "http://www.omg.org/spec/BPMN/20100524/MODEL#ServiceTask")
+   (owl/class
+     :id "https://mithril.fund/ns/v1#DecisionGateway"
+     :rdfs/sub-class-of "http://www.omg.org/spec/BPMN/20100524/MODEL#ExclusiveGateway")
+   (owl/object-property
+     :id "https://mithril.fund/ns/v1#actionBinding"
+     :rdfs/domain "https://mithril.fund/ns/v1#GovernedServiceTask"
+     :rdfs/range "https://mithril.fund/ns/v1#BotAction")
+   (shacl/node-shape
+     :id "https://mithril.fund/ns/v1#GovernedProcessShape"
+     :sh/target-class "https://mithril.fund/ns/v1#GovernedProcess"
+     :sh/property
+     [(shacl/property-shape
+        :sh/path "https://mithril.fund/ns/v1#node"
+        :sh/min-count 3)
+      (shacl/property-shape
+        :sh/path "https://mithril.fund/ns/v1#flow"
+        :sh/min-count 2)])
+   (shacl/node-shape
+     :id "https://mithril.fund/ns/v1#GovernedServiceTaskShape"
+     :sh/target-class "https://mithril.fund/ns/v1#GovernedServiceTask"
+     :sh/property
+     [(shacl/property-shape
+        :sh/path "https://mithril.fund/ns/v1#actionBinding"
+        :sh/min-count 1
+        :sh/max-count 1)])])

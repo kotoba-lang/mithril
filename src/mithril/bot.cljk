@@ -5,6 +5,7 @@
   converts an admitted choice to one typed effect. A host receipt is the only
   event that advances state; retries, leases and total steps are bounded."
   (:require [clojure.string :as str]
+            [mithril.bpmn :as bpmn]
             [mithril.compiler :as compiler]
             [mithril.execution :as execution]
             [oak.semantic :as oak]))
@@ -14,7 +15,8 @@
 (def goal "https://mithril.fund/id/goal/governed-coding-task")
 (def model-kind "openrouter/typesafe-jev-v1")
 
-(def source-keys #{"@context" "@id" "@type" "goal" "ontology" "policy"})
+(def legacy-source-keys #{"@context" "@id" "@type" "goal" "ontology" "policy"})
+(def source-keys (conj legacy-source-keys "process"))
 (def policy-keys #{"maxSteps" "maxRetries" "leaseSeconds" "confidenceFloor"
                    "actions" "effects"})
 
@@ -46,6 +48,7 @@
    {:id "https://mithril.fund/id/action/git-status"
     :label "git-status" :effect :git/status
     :confidence-floor 3000
+    :repeatable? true
     :requires #{:semantic/prefix-valid} :produces #{:git/observed}}
    {:id "https://mithril.fund/id/action/stop"
     :label "stop" :effect :agent/stop
@@ -81,7 +84,7 @@
     (fail! :mithril/unpinned-context "bot profile must use the pinned context" {}))
   (when-not (= "BotProfile" (get doc "@type"))
     (fail! :mithril/unexpected-source-type "@type must be BotProfile" {}))
-  (when-not (= source-keys (set (keys doc)))
+  (when-not (contains? #{legacy-source-keys source-keys} (set (keys doc)))
     (fail! :mithril/unknown-source-key "bot profile has an unknown or missing key" {}))
   (when-not (= goal (get doc "goal"))
     (fail! :mithril/unknown-goal "bot goal is outside the closed catalog" {}))
@@ -113,15 +116,21 @@
                        (every? admitted-effects (map keyword effects)))
           (fail! :mithril.bot/invalid-effects
                  "effects must exactly cover the selected action capabilities" {})))
-      {:format artifact-format
-       :media-type compiler/media-type
-       :graph-digest (compiler/graph-digest doc)
-       :bot-ir {:version :mithril.bot/v1
-                :goal :goal/governed-coding-task
-                :ontology (get doc "ontology")
-                :policy {:max-steps max-steps :max-retries max-retries
-                         :lease-seconds lease-seconds :confidence-floor floor
-                         :actions actions :effects (mapv keyword effects)}}})))
+      (let [process (when-let [process-doc (get doc "process")]
+                      (bpmn/compile-process process-doc action-by-id actions))]
+        (when (and process (not= (get doc "ontology") (:ontology process)))
+          (fail! :mithril.bpmn/ontology-mismatch
+                 "bot profile and BPMN process must pin the same ontology" {}))
+        {:format artifact-format
+         :media-type compiler/media-type
+         :graph-digest (compiler/graph-digest doc)
+         :bot-ir {:version (if process :mithril.bot/v2 :mithril.bot/v1)
+                  :goal :goal/governed-coding-task
+                  :ontology (get doc "ontology")
+                  :process process
+                  :policy {:max-steps max-steps :max-retries max-retries
+                           :lease-seconds lease-seconds :confidence-floor floor
+                           :actions actions :effects (mapv keyword effects)}}}))))
 
 (defn compile-text [path text]
   (compile-document path (compiler/parse-source text)))
@@ -190,21 +199,31 @@
       (fail! :mithril.bot/shacl-violation "task does not conform to the bot task shape"
              {:report report}))
     (let [run-id (execution/digest [(:graph-digest artifact) task owner now-ms])
-          lease-ms (* 1000 (get-in artifact [:bot-ir :policy :lease-seconds]))]
-      {:format "https://mithril.fund/state/bot-run-v1"
+          lease-ms (* 1000 (get-in artifact [:bot-ir :policy :lease-seconds]))
+          process (get-in artifact [:bot-ir :process])]
+      {:format (if process
+                 "https://mithril.fund/state/bot-run-v2"
+                 "https://mithril.fund/state/bot-run-v1")
        :run-id run-id :profile-digest (:graph-digest artifact)
        :task-digest (task-digest task) :task task
        :status :running :step 0 :facts #{:semantic/prefix-valid}
+       :bpmn (some-> process bpmn/start-state)
        :awaiting nil :seen-effects #{} :retries {} :receipts []
        :lease {:owner owner :acquired-at now-ms :expires-at (+ now-ms lease-ms)}
        :policy (get-in artifact [:bot-ir :policy])
        :semantic-receipts
-       [{:operation :infer/owl2-rl :status :executed
-         :output-digest (execution/digest actions) :metrics {:candidates (count actions)}}
-        {:operation :query/sparql :status :executed
-         :output-digest (execution/digest (mapv :id actions)) :metrics {:rows (count actions)}}
-        {:operation :validate/shacl :status :executed
-         :output-digest (execution/digest report) :metrics {:violations 0}}]})))
+       (cond->
+        [{:operation :infer/owl2-rl :status :executed
+          :output-digest (execution/digest actions) :metrics {:candidates (count actions)}}
+         {:operation :query/sparql :status :executed
+          :output-digest (execution/digest (mapv :id actions)) :metrics {:rows (count actions)}}
+         {:operation :validate/shacl :status :executed
+          :output-digest (execution/digest report) :metrics {:violations 0}}]
+         process
+         (conj {:operation :execute/bpmn-token :status :initialized
+                :output-digest (:digest process)
+                :metrics {:tokens 1
+                          :shacl-violations (count (get-in process [:shape-report :errors]))}}))})))
 
 (defn resume-or-start
   "Reconcile one durable checkpoint with the requested profile and task.
@@ -240,7 +259,8 @@
   "Acquire or renew a durable outer-loop lease. A live lease held by another
   worker is never stolen; an expired lease may be acquired by a new worker."
   [state owner now-ms]
-  (when-not (= "https://mithril.fund/state/bot-run-v1" (:format state))
+  (when-not (contains? #{"https://mithril.fund/state/bot-run-v1"
+                         "https://mithril.fund/state/bot-run-v2"} (:format state))
     (fail! :mithril.bot/invalid-state "state is not a Mithril bot run" {}))
   (when-not (and (string? owner) (not (str/blank? owner))
                  (integer? now-ms) (not (neg? now-ms)))
@@ -261,11 +281,16 @@
     (fail! :mithril.bot/lease-not-held "run lease is absent, expired or owned elsewhere" {})))
 
 (defn available-actions [state]
-  (let [facts (:facts state)]
-    (->> (get-in state [:policy :actions])
+  (let [facts (:facts state)
+        process-actions (some-> (:bpmn state) bpmn/enabled-action-ids set)
+        allowed (if process-actions
+                  (filter process-actions (get-in state [:policy :actions]))
+                  (get-in state [:policy :actions]))]
+    (->> allowed
          (map action-by-id)
          (filter #(every? facts (:requires %)))
-         (remove #(and (not= :agent/stop (:effect %))
+         (remove #(and (not (:repeatable? %))
+                       (not= :agent/stop (:effect %))
                        (every? facts (:produces %))))
          vec)))
 
@@ -343,7 +368,10 @@
     (when-not (contains? grants effect)
       (fail! :mithril.bot/capability-denied "Governor did not grant the selected effect"
              {:effect effect}))
-    (let [effect-id (execution/digest [(:run-id state) (:step state) (:id action)])
+    (let [state (if (:bpmn state)
+                  (update state :bpmn bpmn/select-action (:id action))
+                  state)
+          effect-id (execution/digest [(:run-id state) (:step state) (:id action)])
           request {:format "https://mithril.fund/effect/bot-action-v1"
                    :id effect-id :run-id (:run-id state) :step (:step state)
                    :action (:id action) :operation effect
@@ -379,7 +407,10 @@
           repairable? (contains? #{:amu/compile :test/run} (:effect action))
           reset? (= :workspace/revert-patch (:effect action))
           stopped? (and completed? (= :agent/stop (:effect action)))
-          next-state (-> state
+          process-state (if (:bpmn state)
+                          (update state :bpmn bpmn/apply-outcome (:id action) completed?)
+                          state)
+          next-state (-> process-state
                          (assoc :awaiting nil)
                          (update :step inc)
                          (update :seen-effects conj (:effect-id receipt))
@@ -394,7 +425,8 @@
                                                      :repair/needed))))
                          (cond-> (not completed?) (assoc-in [:retries (:id action)] (inc retries))))]
       (cond
-        stopped? (assoc next-state :status :completed)
+        (or stopped? (and (:bpmn next-state) (bpmn/completed? (:bpmn next-state))))
+        (assoc next-state :status :completed)
         retry? next-state
         completed? next-state
         :else (assoc next-state :status :held :hold-reason :retry-budget-exhausted)))))

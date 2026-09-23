@@ -1,13 +1,89 @@
 (mithril/bot-profile
   :id "https://mithril.fund/id/bot/governed-coder"
   :goal "https://mithril.fund/id/goal/governed-coding-task"
-  :ontology "3539fef6d1f26c012d4305a55a3782902ff8de47e56901e619ea0cde30ece918"
+  :ontology "2a8e807877d14b6eb6d31352f79d2976cffc63eb346afd1734b68ed6825fd9f3"
+  :process
+  (bpmn/process
+    :id "https://mithril.fund/id/bpmn/governed-coder/process"
+    :ontology "2a8e807877d14b6eb6d31352f79d2976cffc63eb346afd1734b68ed6825fd9f3"
+    :nodes
+    [(bpmn/start-event :id "https://mithril.fund/id/bpmn/governed-coder/start")
+     (bpmn/end-event :id "https://mithril.fund/id/bpmn/governed-coder/end")
+     (bpmn/exclusive-gateway :id "https://mithril.fund/id/bpmn/governed-coder/g0")
+     (bpmn/service-task :id "https://mithril.fund/id/bpmn/governed-coder/inspect" :action "https://mithril.fund/id/action/workspace-inspect")
+     (bpmn/service-task :id "https://mithril.fund/id/bpmn/governed-coder/git0" :action "https://mithril.fund/id/action/git-status")
+     (bpmn/service-task :id "https://mithril.fund/id/bpmn/governed-coder/stop0" :action "https://mithril.fund/id/action/stop")
+     (bpmn/exclusive-gateway :id "https://mithril.fund/id/bpmn/governed-coder/g1")
+     (bpmn/service-task :id "https://mithril.fund/id/bpmn/governed-coder/propose" :action "https://mithril.fund/id/action/code-propose")
+     (bpmn/service-task :id "https://mithril.fund/id/bpmn/governed-coder/git1" :action "https://mithril.fund/id/action/git-status")
+     (bpmn/service-task :id "https://mithril.fund/id/bpmn/governed-coder/stop1" :action "https://mithril.fund/id/action/stop")
+     (bpmn/exclusive-gateway :id "https://mithril.fund/id/bpmn/governed-coder/g2")
+     (bpmn/service-task :id "https://mithril.fund/id/bpmn/governed-coder/apply" :action "https://mithril.fund/id/action/patch-apply")
+     (bpmn/service-task :id "https://mithril.fund/id/bpmn/governed-coder/git2" :action "https://mithril.fund/id/action/git-status")
+     (bpmn/service-task :id "https://mithril.fund/id/bpmn/governed-coder/stop2" :action "https://mithril.fund/id/action/stop")
+     (bpmn/exclusive-gateway :id "https://mithril.fund/id/bpmn/governed-coder/g3")
+     (bpmn/service-task :id "https://mithril.fund/id/bpmn/governed-coder/compile" :action "https://mithril.fund/id/action/amu-compile")
+     (bpmn/service-task :id "https://mithril.fund/id/bpmn/governed-coder/reset3" :action "https://mithril.fund/id/action/patch-reset")
+     (bpmn/service-task :id "https://mithril.fund/id/bpmn/governed-coder/git3" :action "https://mithril.fund/id/action/git-status")
+     (bpmn/service-task :id "https://mithril.fund/id/bpmn/governed-coder/stop3" :action "https://mithril.fund/id/action/stop")
+     (bpmn/exclusive-gateway :id "https://mithril.fund/id/bpmn/governed-coder/g4")
+     (bpmn/service-task :id "https://mithril.fund/id/bpmn/governed-coder/test" :action "https://mithril.fund/id/action/test-run")
+     (bpmn/service-task :id "https://mithril.fund/id/bpmn/governed-coder/reset4" :action "https://mithril.fund/id/action/patch-reset")
+     (bpmn/service-task :id "https://mithril.fund/id/bpmn/governed-coder/git4" :action "https://mithril.fund/id/action/git-status")
+     (bpmn/service-task :id "https://mithril.fund/id/bpmn/governed-coder/stop4" :action "https://mithril.fund/id/action/stop")
+     (bpmn/exclusive-gateway :id "https://mithril.fund/id/bpmn/governed-coder/g5")
+     (bpmn/service-task :id "https://mithril.fund/id/bpmn/governed-coder/git5" :action "https://mithril.fund/id/action/git-status")
+     (bpmn/service-task :id "https://mithril.fund/id/bpmn/governed-coder/stop5" :action "https://mithril.fund/id/action/stop")
+     (bpmn/exclusive-gateway :id "https://mithril.fund/id/bpmn/governed-coder/g6")
+     (bpmn/service-task :id "https://mithril.fund/id/bpmn/governed-coder/git6" :action "https://mithril.fund/id/action/git-status")
+     (bpmn/service-task :id "https://mithril.fund/id/bpmn/governed-coder/stop6" :action "https://mithril.fund/id/action/stop")]
+    :flows
+    [(bpmn/sequence-flow :id "https://mithril.fund/id/bpmn/governed-coder/f-start" :source "https://mithril.fund/id/bpmn/governed-coder/start" :target "https://mithril.fund/id/bpmn/governed-coder/g0" :condition "always")
+     (bpmn/sequence-flow :id "https://mithril.fund/id/bpmn/governed-coder/f-g0-inspect" :source "https://mithril.fund/id/bpmn/governed-coder/g0" :target "https://mithril.fund/id/bpmn/governed-coder/inspect" :condition "https://mithril.fund/id/action/workspace-inspect")
+     (bpmn/sequence-flow :id "https://mithril.fund/id/bpmn/governed-coder/f-g0-git" :source "https://mithril.fund/id/bpmn/governed-coder/g0" :target "https://mithril.fund/id/bpmn/governed-coder/git0" :condition "https://mithril.fund/id/action/git-status")
+     (bpmn/sequence-flow :id "https://mithril.fund/id/bpmn/governed-coder/f-g0-stop" :source "https://mithril.fund/id/bpmn/governed-coder/g0" :target "https://mithril.fund/id/bpmn/governed-coder/stop0" :condition "https://mithril.fund/id/action/stop")
+     (bpmn/sequence-flow :id "https://mithril.fund/id/bpmn/governed-coder/f-inspect-g1" :source "https://mithril.fund/id/bpmn/governed-coder/inspect" :target "https://mithril.fund/id/bpmn/governed-coder/g1" :condition "always")
+     (bpmn/sequence-flow :id "https://mithril.fund/id/bpmn/governed-coder/f-git0-g0" :source "https://mithril.fund/id/bpmn/governed-coder/git0" :target "https://mithril.fund/id/bpmn/governed-coder/g0" :condition "always")
+     (bpmn/sequence-flow :id "https://mithril.fund/id/bpmn/governed-coder/f-stop0-end" :source "https://mithril.fund/id/bpmn/governed-coder/stop0" :target "https://mithril.fund/id/bpmn/governed-coder/end" :condition "always")
+     (bpmn/sequence-flow :id "https://mithril.fund/id/bpmn/governed-coder/f-g1-propose" :source "https://mithril.fund/id/bpmn/governed-coder/g1" :target "https://mithril.fund/id/bpmn/governed-coder/propose" :condition "https://mithril.fund/id/action/code-propose")
+     (bpmn/sequence-flow :id "https://mithril.fund/id/bpmn/governed-coder/f-g1-git" :source "https://mithril.fund/id/bpmn/governed-coder/g1" :target "https://mithril.fund/id/bpmn/governed-coder/git1" :condition "https://mithril.fund/id/action/git-status")
+     (bpmn/sequence-flow :id "https://mithril.fund/id/bpmn/governed-coder/f-g1-stop" :source "https://mithril.fund/id/bpmn/governed-coder/g1" :target "https://mithril.fund/id/bpmn/governed-coder/stop1" :condition "https://mithril.fund/id/action/stop")
+     (bpmn/sequence-flow :id "https://mithril.fund/id/bpmn/governed-coder/f-propose-g2" :source "https://mithril.fund/id/bpmn/governed-coder/propose" :target "https://mithril.fund/id/bpmn/governed-coder/g2" :condition "always")
+     (bpmn/sequence-flow :id "https://mithril.fund/id/bpmn/governed-coder/f-git1-g1" :source "https://mithril.fund/id/bpmn/governed-coder/git1" :target "https://mithril.fund/id/bpmn/governed-coder/g1" :condition "always")
+     (bpmn/sequence-flow :id "https://mithril.fund/id/bpmn/governed-coder/f-stop1-end" :source "https://mithril.fund/id/bpmn/governed-coder/stop1" :target "https://mithril.fund/id/bpmn/governed-coder/end" :condition "always")
+     (bpmn/sequence-flow :id "https://mithril.fund/id/bpmn/governed-coder/f-g2-apply" :source "https://mithril.fund/id/bpmn/governed-coder/g2" :target "https://mithril.fund/id/bpmn/governed-coder/apply" :condition "https://mithril.fund/id/action/patch-apply")
+     (bpmn/sequence-flow :id "https://mithril.fund/id/bpmn/governed-coder/f-g2-git" :source "https://mithril.fund/id/bpmn/governed-coder/g2" :target "https://mithril.fund/id/bpmn/governed-coder/git2" :condition "https://mithril.fund/id/action/git-status")
+     (bpmn/sequence-flow :id "https://mithril.fund/id/bpmn/governed-coder/f-g2-stop" :source "https://mithril.fund/id/bpmn/governed-coder/g2" :target "https://mithril.fund/id/bpmn/governed-coder/stop2" :condition "https://mithril.fund/id/action/stop")
+     (bpmn/sequence-flow :id "https://mithril.fund/id/bpmn/governed-coder/f-apply-g3" :source "https://mithril.fund/id/bpmn/governed-coder/apply" :target "https://mithril.fund/id/bpmn/governed-coder/g3" :condition "always")
+     (bpmn/sequence-flow :id "https://mithril.fund/id/bpmn/governed-coder/f-git2-g2" :source "https://mithril.fund/id/bpmn/governed-coder/git2" :target "https://mithril.fund/id/bpmn/governed-coder/g2" :condition "always")
+     (bpmn/sequence-flow :id "https://mithril.fund/id/bpmn/governed-coder/f-stop2-end" :source "https://mithril.fund/id/bpmn/governed-coder/stop2" :target "https://mithril.fund/id/bpmn/governed-coder/end" :condition "always")
+     (bpmn/sequence-flow :id "https://mithril.fund/id/bpmn/governed-coder/f-g3-compile" :source "https://mithril.fund/id/bpmn/governed-coder/g3" :target "https://mithril.fund/id/bpmn/governed-coder/compile" :condition "https://mithril.fund/id/action/amu-compile")
+     (bpmn/sequence-flow :id "https://mithril.fund/id/bpmn/governed-coder/f-g3-reset" :source "https://mithril.fund/id/bpmn/governed-coder/g3" :target "https://mithril.fund/id/bpmn/governed-coder/reset3" :condition "https://mithril.fund/id/action/patch-reset")
+     (bpmn/sequence-flow :id "https://mithril.fund/id/bpmn/governed-coder/f-g3-git" :source "https://mithril.fund/id/bpmn/governed-coder/g3" :target "https://mithril.fund/id/bpmn/governed-coder/git3" :condition "https://mithril.fund/id/action/git-status")
+     (bpmn/sequence-flow :id "https://mithril.fund/id/bpmn/governed-coder/f-g3-stop" :source "https://mithril.fund/id/bpmn/governed-coder/g3" :target "https://mithril.fund/id/bpmn/governed-coder/stop3" :condition "https://mithril.fund/id/action/stop")
+     (bpmn/sequence-flow :id "https://mithril.fund/id/bpmn/governed-coder/f-compile-g4" :source "https://mithril.fund/id/bpmn/governed-coder/compile" :target "https://mithril.fund/id/bpmn/governed-coder/g4" :condition "always")
+     (bpmn/sequence-flow :id "https://mithril.fund/id/bpmn/governed-coder/f-reset3-g1" :source "https://mithril.fund/id/bpmn/governed-coder/reset3" :target "https://mithril.fund/id/bpmn/governed-coder/g1" :condition "always")
+     (bpmn/sequence-flow :id "https://mithril.fund/id/bpmn/governed-coder/f-git3-g3" :source "https://mithril.fund/id/bpmn/governed-coder/git3" :target "https://mithril.fund/id/bpmn/governed-coder/g3" :condition "always")
+     (bpmn/sequence-flow :id "https://mithril.fund/id/bpmn/governed-coder/f-stop3-end" :source "https://mithril.fund/id/bpmn/governed-coder/stop3" :target "https://mithril.fund/id/bpmn/governed-coder/end" :condition "always")
+     (bpmn/sequence-flow :id "https://mithril.fund/id/bpmn/governed-coder/f-g4-test" :source "https://mithril.fund/id/bpmn/governed-coder/g4" :target "https://mithril.fund/id/bpmn/governed-coder/test" :condition "https://mithril.fund/id/action/test-run")
+     (bpmn/sequence-flow :id "https://mithril.fund/id/bpmn/governed-coder/f-g4-reset" :source "https://mithril.fund/id/bpmn/governed-coder/g4" :target "https://mithril.fund/id/bpmn/governed-coder/reset4" :condition "https://mithril.fund/id/action/patch-reset")
+     (bpmn/sequence-flow :id "https://mithril.fund/id/bpmn/governed-coder/f-g4-git" :source "https://mithril.fund/id/bpmn/governed-coder/g4" :target "https://mithril.fund/id/bpmn/governed-coder/git4" :condition "https://mithril.fund/id/action/git-status")
+     (bpmn/sequence-flow :id "https://mithril.fund/id/bpmn/governed-coder/f-g4-stop" :source "https://mithril.fund/id/bpmn/governed-coder/g4" :target "https://mithril.fund/id/bpmn/governed-coder/stop4" :condition "https://mithril.fund/id/action/stop")
+     (bpmn/sequence-flow :id "https://mithril.fund/id/bpmn/governed-coder/f-test-g5" :source "https://mithril.fund/id/bpmn/governed-coder/test" :target "https://mithril.fund/id/bpmn/governed-coder/g5" :condition "always")
+     (bpmn/sequence-flow :id "https://mithril.fund/id/bpmn/governed-coder/f-reset4-g1" :source "https://mithril.fund/id/bpmn/governed-coder/reset4" :target "https://mithril.fund/id/bpmn/governed-coder/g1" :condition "always")
+     (bpmn/sequence-flow :id "https://mithril.fund/id/bpmn/governed-coder/f-git4-g4" :source "https://mithril.fund/id/bpmn/governed-coder/git4" :target "https://mithril.fund/id/bpmn/governed-coder/g4" :condition "always")
+     (bpmn/sequence-flow :id "https://mithril.fund/id/bpmn/governed-coder/f-stop4-end" :source "https://mithril.fund/id/bpmn/governed-coder/stop4" :target "https://mithril.fund/id/bpmn/governed-coder/end" :condition "always")
+     (bpmn/sequence-flow :id "https://mithril.fund/id/bpmn/governed-coder/f-g5-git" :source "https://mithril.fund/id/bpmn/governed-coder/g5" :target "https://mithril.fund/id/bpmn/governed-coder/git5" :condition "https://mithril.fund/id/action/git-status")
+     (bpmn/sequence-flow :id "https://mithril.fund/id/bpmn/governed-coder/f-g5-stop" :source "https://mithril.fund/id/bpmn/governed-coder/g5" :target "https://mithril.fund/id/bpmn/governed-coder/stop5" :condition "https://mithril.fund/id/action/stop")
+     (bpmn/sequence-flow :id "https://mithril.fund/id/bpmn/governed-coder/f-git5-g6" :source "https://mithril.fund/id/bpmn/governed-coder/git5" :target "https://mithril.fund/id/bpmn/governed-coder/g6" :condition "always")
+     (bpmn/sequence-flow :id "https://mithril.fund/id/bpmn/governed-coder/f-stop5-end" :source "https://mithril.fund/id/bpmn/governed-coder/stop5" :target "https://mithril.fund/id/bpmn/governed-coder/end" :condition "always")
+     (bpmn/sequence-flow :id "https://mithril.fund/id/bpmn/governed-coder/f-g6-git" :source "https://mithril.fund/id/bpmn/governed-coder/g6" :target "https://mithril.fund/id/bpmn/governed-coder/git6" :condition "https://mithril.fund/id/action/git-status")
+     (bpmn/sequence-flow :id "https://mithril.fund/id/bpmn/governed-coder/f-g6-stop" :source "https://mithril.fund/id/bpmn/governed-coder/g6" :target "https://mithril.fund/id/bpmn/governed-coder/stop6" :condition "https://mithril.fund/id/action/stop")
+     (bpmn/sequence-flow :id "https://mithril.fund/id/bpmn/governed-coder/f-git6-g6" :source "https://mithril.fund/id/bpmn/governed-coder/git6" :target "https://mithril.fund/id/bpmn/governed-coder/g6" :condition "always")
+     (bpmn/sequence-flow :id "https://mithril.fund/id/bpmn/governed-coder/f-stop6-end" :source "https://mithril.fund/id/bpmn/governed-coder/stop6" :target "https://mithril.fund/id/bpmn/governed-coder/end" :condition "always")])
   :policy
   (mithril/bot-policy
-    :max-steps 16
-    :max-retries 2
-    :lease-seconds 900
-    :confidence-floor 3000
+    :max-steps 16 :max-retries 2 :lease-seconds 900 :confidence-floor 3000
     :actions
     ["https://mithril.fund/id/action/workspace-inspect"
      "https://mithril.fund/id/action/code-propose"

@@ -214,6 +214,9 @@
                          base-audit {:at (.toISOString (js/Date.))
                                      :mode mode :run-id (:run-id state) :step (:step state)
                                      :action (:id action) :confidence (:confidence admitted)
+                                     :bpmn-definition (get-in state [:bpmn :definition])
+                                     :bpmn-token-at (get-in state [:bpmn :token-state :bpmn/tokens 0 :bpmn/at])
+                                     :bpmn-candidates (mapv :id (bot/available-actions state))
                                      :model audit}]
                      (if (= "shadow" mode)
                        (do

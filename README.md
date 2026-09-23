@@ -232,11 +232,24 @@ qualification. New-role training and held-out calibration remain required.
 ## Governed coding bots
 
 [`examples/governed-coding-bot.mith`](examples/governed-coding-bot.mith)
-defines the executable bot policy as Mithril data. `mithril.bot` performs the
+defines the executable bot policy and its ontology-bound BPMN process as
+Mithril data. [`ontology/bpmn-agent-v1.mith`](ontology/bpmn-agent-v1.mith)
+maps governed processes, decision gateways, service tasks and action bindings
+to BPMN/OWL classes and constrains the bindings with SHACL. `mithril.bot`
+performs the
 OWL 2 RL / SPARQL candidate closure, validates the task with the declared SHACL
 shape, and exposes only these typed actions: workspace inspection, patch
 proposal, patch application, Amu compilation, test execution, git status and
 stop.
+
+The durable process authority is the pure token interpreter from
+`org-omg-bpmn`. A Jev choice may select only a service task reachable from the
+current BPMN exclusive gateway and whose ontology prerequisites hold. The
+gateway moves to the task before effect dispatch; only a matching successful
+receipt advances that task to the next gateway. A failed receipt restores the
+prior gateway, so retry never guesses or reconstructs control flow. Hermes
+Kanban is now only the delivery and handoff projection for this profile, not
+the source of process order.
 
 OpenRouter's real `typesafe/jev-1.13` is restricted to one finite `Choice`
 distribution over the actions whose prerequisites are true. It cannot emit
@@ -253,11 +266,12 @@ different ontology-authored floors.
   -> OWL 2 RL action entailment
   -> bounded SPARQL candidate query
   -> SHACL task validation
+  -> BPMN token enables reachable service tasks
   -> OpenRouter TypeSafe Jev typed action choice
   -> Governor capability intersection
   -> one deterministic host effect
   -> content-addressed receipt
-  -> next semantic state
+  -> next BPMN token state
 ```
 
 Compile the published profile with:
