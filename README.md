@@ -121,6 +121,20 @@ workspace turn against the live filesystem and coding registry and reports
 `unregistered-workspace`, or `ready`. It exits non-zero until every candidate
 is explicitly ready; a workdir alone never grants write or tool authority.
 
+`plan-bpmn` reconciles the immutable `.mith` manifests with live scheduler
+telemetry and produces a phased migration report. Jobs with active executions,
+non-OK terminal state, a failure streak, missing scripts/workdirs, or no prior
+observation are quarantined. Only healthy `--no-agent` script jobs enter the
+first shadow cohort. Healthy LLM jobs remain `bpmn-contract-required`: their
+prompt text is not translated into authority. They advance only after an
+explicit ontology-bound BPMN action contract exists, and execution still
+requires scheduler-originated receipts.
+
+```sh
+kbb --backend sci bin/mithril-hermes-fleet.cljk plan-bpmn \
+  "$HOME/.hermes/profiles" "$HOME/.hermes/mithril/profile-fleet-v1"
+```
+
 ## Published Mithril code and libraries
 
 The repository now contains source authored in Mithril itself:

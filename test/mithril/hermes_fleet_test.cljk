@@ -52,3 +52,24 @@
     (is (= :ready
            (fleet/coding-readiness job #{"/tmp/work"}
                                    {:exists? true :git? true :clean? true})))))
+
+(deftest bpmn-migration-admission-is-operational-and-fail-closed
+  (let [base-job {:enabled true :no-agent true :effects [:scheduler/tick :host/script-run]
+                  :workdir "/tmp/work" :last-status "ok" :failure-streak 0}
+        ready-facts {:script-present? true :workdir-present? true :active-execution? false}]
+    (is (= :shadow-ready (fleet/bpmn-job-readiness base-job ready-facts)))
+    (is (= :disabled (fleet/bpmn-job-readiness (assoc base-job :enabled false) ready-facts)))
+    (is (= :active-execution
+           (fleet/bpmn-job-readiness base-job (assoc ready-facts :active-execution? true))))
+    (is (= :missing-script
+           (fleet/bpmn-job-readiness base-job (assoc ready-facts :script-present? false))))
+    (is (= :missing-workdir
+           (fleet/bpmn-job-readiness base-job (assoc ready-facts :workdir-present? false))))
+    (is (= :unobserved
+           (fleet/bpmn-job-readiness (assoc base-job :last-status nil) ready-facts)))
+    (is (= :unhealthy
+           (fleet/bpmn-job-readiness (assoc base-job :last-status "error") ready-facts)))
+    (is (= :unhealthy
+           (fleet/bpmn-job-readiness (assoc base-job :failure-streak 1) ready-facts)))
+    (is (= :bpmn-contract-required
+           (fleet/bpmn-job-readiness (assoc base-job :no-agent false) ready-facts)))))
