@@ -24,6 +24,27 @@
 (defn coding-candidate? [job]
   (contains? (set (:effects job)) :agent/workspace-turn))
 
+(defn bpmn-job-readiness
+  "Place one enabled Hermes job into the next safe BPMN migration cohort.
+
+  Operational failure is a quarantine condition, not a reason to infer a new
+  process.  A healthy script-only job may enter shadow replay because its
+  effect boundary is already closed.  A healthy LLM job still needs an
+  explicit ontology/BPMN action contract; prompt prose is never compiled into
+  executable authority."
+  [job {:keys [script-present? workdir-present? active-execution?]}]
+  (cond
+    (not (:enabled job)) :disabled
+    active-execution? :active-execution
+    (and (contains? (set (:effects job)) :host/script-run)
+         (not script-present?)) :missing-script
+    (and (:workdir job) (not workdir-present?)) :missing-workdir
+    (nil? (:last-status job)) :unobserved
+    (not= "ok" (:last-status job)) :unhealthy
+    (pos? (or (:failure-streak job) 0)) :unhealthy
+    (:no-agent job) :shadow-ready
+    :else :bpmn-contract-required))
+
 (defn coding-readiness
   "Classify one coding job using observed workspace facts and the governed
   workspace registry. A clean checkout is still refused until its exact tool
@@ -113,6 +134,7 @@
                   :jobs (mapv (fn [job]
                                 {:id (get job "jobId") :name (get job "name")
                                  :enabled (get job "enabled")
+                                 :no-agent (get job "noAgent")
                                  :effects (mapv keyword (get job "effects"))
                                  :script-present (get job "scriptPresent")
                                  :workdir (get job "workdir")

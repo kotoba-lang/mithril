@@ -12,7 +12,7 @@
 (def cp (js/require "node:child_process"))
 
 (defn- usage! []
-  (println "usage: mithril-hermes-fleet <sync|verify> <Hermes profiles root> <output directory>")
+  (println "usage: mithril-hermes-fleet <sync|verify|plan-bpmn> <Hermes profiles root> <output directory>")
   (println "       mithril-hermes-fleet admit-coding <Hermes profiles root> <output directory> <coding registry>")
   (js/process.exit 2))
 
@@ -210,8 +210,71 @@
      :profiles (count (:entries fleet)) :codingJobs (count rows)
      :counts counts :jobs rows}))
 
+(defn- active-job-ids [profile-root]
+  (let [db (.join path profile-root "cron" "executions.db")]
+    (if-not (exists? db)
+      #{}
+      (try
+        (->> (.execFileSync cp "/usr/bin/sqlite3"
+                            ;; `unknown` is an immutable terminal audit result in
+                            ;; Hermes.  Only claimed/running are in flight.
+                            #js [db "SELECT DISTINCT job_id FROM executions WHERE status IN ('claimed','running')"]
+                            #js {:encoding "utf8" :stdio #js ["ignore" "pipe" "ignore"] :timeout 30000})
+             str/split-lines (remove str/blank?) set)
+        (catch :default error
+          (throw (ex-info "execution state could not be measured"
+                          {:mithril/error :mithril.fleet/execution-state-unreadable
+                           :profile-root profile-root})))))))
+
+(defn- operational-jobs [profile-root]
+  (let [jobs-file (.join path profile-root "cron" "jobs.json")]
+    (if-not (exists? jobs-file)
+      []
+      (let [doc (parse-json (read-text jobs-file))]
+        (or (:jobs doc) [])))))
+
+(defn- bpmn-plan [fleet]
+  (let [rows
+        (->> (:entries fleet)
+             (mapcat
+              (fn [{:keys [profile graph-digest artifact]}]
+                (let [profile-root (get-in artifact [:profile-ir :root])
+                      active (active-job-ids profile-root)
+                      live-by-id (into {} (map (juxt (comp str :id) identity))
+                                       (operational-jobs profile-root))]
+                  (for [job (get-in artifact [:profile-ir :jobs])
+                        :let [live (get live-by-id (:id job))
+                              facts {:script-present? (:script-present job)
+                                     :workdir-present? (or (nil? (:workdir job))
+                                                           (exists? (:workdir job)))
+                                     :active-execution? (contains? active (:id job))}
+                              observed (assoc job
+                                              :last-status (:last_status live)
+                                              :failure-streak (:failure_streak live))
+                              readiness (fleet/bpmn-job-readiness observed facts)]]
+                    {:profile profile :profileDigest graph-digest
+                     :jobId (:id job) :job (:name job)
+                     :enabled (:enabled job)
+                     :effects (mapv #(str (namespace %) "/" (name %)) (:effects job))
+                     :lastStatus (:last-status observed)
+                     :failureStreak (or (:failure-streak observed) 0)
+                     :admission (name readiness)}))))
+             vec)
+        enabled (filter :enabled rows)
+        counts (->> enabled (group-by :admission)
+                    (map (fn [[key values]] [key (count values)]))
+                    (into (sorted-map)))]
+    {:format "https://mithril.fund/report/hermes-bpmn-migration-v1"
+     :policy {:phase0 "quarantine unhealthy or structurally unknown jobs"
+              :phase1 "shadow healthy script-only jobs"
+              :phase2 "author explicit ontology-bound BPMN contracts for LLM jobs"
+              :phase3 "execute only after scheduler receipts reconcile"}
+     :profiles (count (:entries fleet))
+     :jobs (count rows) :enabledJobs (count enabled)
+     :counts counts :jobsDetail rows}))
+
 (let [[command profiles-root output registry-path & extra] *command-line-args*]
-  (if-not (and (contains? #{"sync" "verify" "admit-coding"} command)
+  (if-not (and (contains? #{"sync" "verify" "admit-coding" "plan-bpmn"} command)
                profiles-root output
                (if (= "admit-coding" command)
                  (and registry-path (empty? extra))
@@ -224,13 +287,16 @@
         (case command
           "sync" (write-fleet! output fleet)
           "verify" (verify-fleet! output fleet)
+          "plan-bpmn"
+          (do (verify-fleet! output fleet)
+              (println (json (bpmn-plan fleet))))
           "admit-coding"
           (let [_ (verify-fleet! output fleet)
                 report (coding-admission fleet registry-path)]
             (println (json report))
             (when-not (= (get-in report [:counts "ready"] 0) (:codingJobs report))
               (js/process.exit 1))))
-        (when-not (= "admit-coding" command)
+        (when (contains? #{"sync" "verify"} command)
           (println (json (summary fleet)))))
       (catch :default error
         (println (str "REFUSE\t" (or (some-> error ex-data :mithril/error name) "fleet-error")
