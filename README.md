@@ -274,6 +274,20 @@ fixed proposer and Mithril `compile-web`, not a Jev-authored patch or Amu
 compilation. Local refs still lack distributed CAS, crash-durable fsync, and
 fleet-wide behavioral parity.
 
+The v3 writer was then exercised by an isolated Hermes builtin cron job
+`266224087204` on 2026-09-23. Seven scheduler occurrences produced seven
+effect receipts and 14 request/result CID blocks; every block was independently
+read as v3 with a typed `stateNode` and no `stateEdn`. The verifier reported
+`completed`, seven effects and 14 blocks at final CID
+`bafyreidoq6z45mmkhivx2h2wsvqll3eyd4awzxubldvlwapl4e7slcvrc4`.
+`GET /hello` returned HTTP 200 and the changed body. Two subsequent builtin
+occurrences returned terminal receipts with no new effect or block. Before the
+second, the EDN projection was withheld; the run reconstructed it from the
+verified CID head and the verifier reported a matching projection. A separate
+intentionally misbound job refused execution and then refused continuation
+without its prior receipt. This remains a fixed-proposer, single-host canary,
+not evidence of Jev-authored coding or fleet-wide parity.
+
 For a fresh coding run, the read-only reconciliation command compares every
 Hermes `source=builtin` execution with its scheduler receipt, the exact BPMN
 action, effect ID and output digest, semantic graph digest, and parent-linked

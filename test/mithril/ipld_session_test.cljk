@@ -1,5 +1,6 @@
 (ns mithril.ipld-session-test
   (:require [cljs.test :refer [deftest is]]
+            [ipld.core :as ipld-core]
             [mithril.bot :as bot]
             [mithril.checkpoint :as checkpoint]
             [mithril.checkpoint-ipld :as ipld]
@@ -56,4 +57,40 @@
           (is (= :legacy-semantic-head
                  (do (.writeFileSync fs (str state-path ".semantic-head") "other" "utf8")
                      (reason #(session/load! store schema state-path)))))))
+      (finally (.rmSync fs directory #js {:recursive true :force true})))))
+
+(deftest primary-session-continues-a-verified-v2-head-into-v3
+  (let [directory (.mkdtempSync fs (.join path (.tmpdir os) "mithril-ipld-upgrade-"))]
+    (try
+      (let [state-path (.join path directory "run.edn")
+            store (local/open! (.join path directory "store"))
+            schema (checkpoint/schema (text checkpoint/ontology-path))
+            artifact (bot/compile-text "examples/governed-coding-bot.mith"
+                                       (text "examples/governed-coding-bot.mith"))
+            s0 (bot/start-run artifact
+                              {:id "upgrade-test" :workspace "/tmp"
+                               :goal "continue a v2 checkpoint"}
+                              "upgrade-test" 1000)
+            base (session/save! store schema state-path nil s0)
+            base-id (:stateCid base)
+            v2-node (-> (ipld-core/get-node #(local/get-block store %) base-id)
+                        (dissoc "stateNode")
+                        (assoc "format" ipld/format-v2
+                               "stateEdn" (execution/canonical-edn-text s0)
+                               "parents" [(ipld-core/link base-id)]))
+            v2 (ipld-core/node->block v2-node)
+            _ (local/put-block! store (:cid v2) (:bytes v2))
+            _ (local/advance-ref! store schema (session/ref-name state-path)
+                                  base-id (:cid v2))
+            loaded (session/load! store schema state-path)
+            s1 (update s0 :facts conj :review/approved)
+            v3 (session/save! store schema state-path loaded s1)
+            final (ipld/read! #(local/get-block store %) schema (:stateCid v3))]
+        (is (= s0 (:state loaded)))
+        (is (= (:cid v2) (:stateCid loaded)))
+        (is (= 2 (:blocks loaded)))
+        (is (= ipld/format-id (:format final)))
+        (is (= [(:cid v2)] (:parents final)))
+        (is (= s1 (:state final)))
+        (is (= 3 (:blocks (session/load! store schema state-path)))))
       (finally (.rmSync fs directory #js {:recursive true :force true})))))
