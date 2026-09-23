@@ -1,0 +1,165 @@
+(ns mithril.state-ontology
+  "OWL 2 RL target discovery and a bounded SHACL Core property subset over
+  the complete Mithril RDF state dataset. Shapes are compiled from .mith;
+  unknown constraints fail closed. This does not implement full SHACL Core."
+  (:require [mithril.compiler :as compiler]
+            [mithril.state-rdf :as state-rdf]
+            [oak.semantic :as oak]))
+
+(def ontology-path "ontology/state-graph-v1.mith")
+(def base state-rdf/base)
+(def xsd state-rdf/xsd)
+(def expected-types
+  (set (map #(str base %)
+            ["StateNode" "MapNode" "RootState" "ListNode" "SetNode"
+             "KeywordNode" "StringNode" "IntegerNode" "BooleanNode"
+             "NullNode" "MapEntry" "ListItem"])))
+(def expected-subclasses
+  (set (concat
+        [[(str base "RootState") (str base "MapNode")]
+         [(str base "MapNode") (str base "StateNode")]]
+        (for [kind ["ListNode" "SetNode" "KeywordNode" "StringNode"
+                    "IntegerNode" "BooleanNode" "NullNode"]]
+          [(str base kind) (str base "StateNode")]))))
+
+(defn- refuse! [reason]
+  (throw (ex-info "Mithril state ontology refused"
+                  {:mithril/error :mithril.state-ontology/refused :reason reason})))
+
+(defn- one-of [value choices]
+  (and (string? value) (contains? choices value)))
+
+(defn- compile-property! [property]
+  (let [keys* (set (keys property))
+        path (get property "propertyPath")
+        datatype (get property "datatype")
+        value-class (get property "valueClass")
+        min-count (get property "minCount")
+        max-count (get property "maxCount")]
+    (when-not (and (= "sh:PropertyShape" (get property "@type"))
+                   (contains? #{#{"@type" "propertyPath" "datatype"
+                                  "minCount" "maxCount"}
+                                #{"@type" "propertyPath" "valueClass"
+                                  "minCount" "maxCount"}} keys*)
+                   (one-of path (set (map #(str base %)
+                                          ["entry" "item" "key" "value"
+                                           "index" "text" "integer" "boolean"])))
+                   (not= (boolean datatype) (boolean value-class))
+                   (or (nil? datatype)
+                       (one-of datatype (set (map #(str xsd %)
+                                                  ["string" "integer" "boolean"]))))
+                   (or (nil? value-class) (one-of value-class expected-types))
+                   (integer? min-count) (integer? max-count)
+                   (<= 0 min-count max-count 8192))
+      (refuse! :unsupported-shacl-property))
+    {:path path :datatype datatype :value-class value-class
+     :min-count min-count :max-count max-count}))
+
+(defn schema [source]
+  (let [artifact (compiler/compile-ontology-text ontology-path source)
+        graph (get-in artifact [:rdf-dataset "@graph"])
+        classes (filterv #(= "owl:Class" (get % "@type")) graph)
+        shapes (filterv #(= "sh:NodeShape" (get % "@type")) graph)
+        subclasses (set (keep (fn [node]
+                                (when-let [parent (get node "subClassOf")]
+                                  [(get node "@id") parent])) classes))
+        typed (set (map #(get % "@id") classes))
+        compiled (mapv (fn [shape]
+                         (let [target (get shape "targetClass")
+                               properties (get shape "property")]
+                           (when-not (and (string? (get shape "@id"))
+                                          (one-of target expected-types)
+                                          (vector? properties) (seq properties)
+                                          (= (count properties)
+                                             (count (set (map #(get % "propertyPath")
+                                                              properties))))
+                                          (= #{"@id" "@type" "targetClass" "property"}
+                                             (set (keys shape))))
+                             (refuse! :invalid-node-shape))
+                           {:id (get shape "@id") :target target
+                            :properties (mapv compile-property! properties)})) shapes)]
+    (when-not (and (= (count graph) (+ (count classes) (count shapes)))
+                   (= expected-types typed)
+                   (= (count classes) (count typed))
+                   (= expected-subclasses subclasses)
+                   (= 9 (count compiled))
+                   (= (count compiled) (count (set (map :id compiled))))
+                   (= (set (map :target compiled))
+                      (set (map #(str base %)
+                                ["MapNode" "ListNode" "SetNode" "MapEntry"
+                                 "ListItem" "KeywordNode" "StringNode"
+                                 "IntegerNode" "BooleanNode"]))))
+      (refuse! :invalid-state-ontology))
+    {:ontology-digest (:graph-digest artifact)
+     :ontology-source source
+     :subclasses subclasses
+     :shapes compiled}))
+
+(defn- data-graph [dataset]
+  (reduce (fn [graph {:keys [subject predicate object]}]
+            (when-not (and (= :iri (:type subject))
+                           (= :iri (:type predicate)))
+              (refuse! :unsupported-rdf-term))
+            (update-in graph [(:value subject) (:value predicate)]
+                       (fnil conj []) object))
+          {} dataset))
+
+(defn- literal-type [term]
+  (when (= :literal (:type term))
+    (or (:datatype term) (str xsd "string"))))
+
+(defn validate! [schema dataset]
+  (let [graph (data-graph dataset)
+        _ (when-not (every? (fn [[_ properties]]
+                              (= 1 (count (get properties state-rdf/rdf-type []))))
+                            graph)
+            (refuse! :untyped-or-multi-typed-node))
+        types (mapcat (fn [[id properties]]
+                        (for [term (get properties state-rdf/rdf-type [])]
+                          (do
+                            (when-not (and (= :iri (:type term))
+                                           (one-of (:value term) expected-types))
+                              (refuse! :unknown-data-type))
+                            (oak/triple id :rdf/type (:value term))))) graph)
+        axioms (map (fn [[child parent]]
+                      (oak/triple child :rdfs/subClassOf parent))
+                    (:subclasses schema))
+        entailed (oak/materialize :owl2-rl (set (concat types axioms)))
+        roots (filterv (fn [[id properties]]
+                         (some #(= (str base "RootState") (:value %))
+                               (get properties state-rdf/rdf-type []))) graph)
+        violations
+        (vec
+         (take 33
+               (for [[node-id _] graph
+                     {:keys [target] :as shape} (:shapes schema)
+                     :when (contains? entailed (oak/triple node-id :rdf/type target))
+                     property (:properties shape)
+                     :let [values (get-in graph [node-id (:path property)] [])
+                           count* (count values)
+                           bad-datatype (when (:datatype property)
+                                          (some #(not= (:datatype property)
+                                                       (literal-type %)) values))
+                           bad-class (when (:value-class property)
+                                       (some #(not (and (= :iri (:type %))
+                                                         (contains? entailed
+                                                                    (oak/triple (:value %)
+                                                                                :rdf/type
+                                                                                (:value-class property)))))
+                                             values))]
+                     :when (or (< count* (:min-count property))
+                               (> count* (:max-count property))
+                               (and (:datatype property) bad-datatype)
+                               (and (:value-class property) bad-class))]
+                 {:node node-id :shape (:id shape) :path (:path property)
+                  :count count* :datatype? (boolean bad-datatype)
+                  :class? (boolean bad-class)})))]
+    (when-not (and (= 1 (count roots))
+                   (contains? entailed
+                              (oak/triple (ffirst roots) :rdf/type
+                                          (str base "StateNode"))))
+      (refuse! :root-not-entailed))
+    {:valid? (empty? violations)
+     :checked-nodes (count graph)
+     :entailed-types (count (filter #(= :rdf/type (:p %)) entailed))
+     :violations violations}))

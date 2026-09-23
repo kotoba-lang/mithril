@@ -86,6 +86,22 @@
                 (catch :default e (:mithril/error (ex-data e))))))
     (is (contains? @blocks id))))
 
+(deftest v5-state-ontology-is-fixed-and-digest-bound
+  (let [{:keys [put-fn get-fn]} (fixture)
+        id (store/put! put-fn get-fn schema (state) [])
+        node (ipld/get-node get-fn id)
+        bad-source (ipld/node->block
+                    (update node "stateOntologySource"
+                            #(.replace % ":sh/min-count 1" ":sh/min-count 0")))
+        bad-digest (ipld/node->block
+                    (assoc node "stateOntologyDigest" "sha256:wrong"))]
+    (put-fn (:cid bad-source) (:bytes bad-source))
+    (put-fn (:cid bad-digest) (:bytes bad-digest))
+    (is (= :invalid-node
+           (reason #(store/read! get-fn schema (:cid bad-source)))))
+    (is (= :noncanonical-checkpoint
+           (reason #(store/read! get-fn schema (:cid bad-digest)))))))
+
 (deftest a-valid-readdressed-block-cannot-point-to-another-run
   (let [{:keys [put-fn get-fn]} (fixture)
         first-run (state)
@@ -125,12 +141,12 @@
                                    (assoc :format "https://mithril.fund/state/bot-run-v2"))
                                []))))))
 
-(deftest semantic-v4-reconstructs-from-rdf-and-reads-v1-v2-v3
+(deftest semantic-v5-validates-rdf-and-reads-v1-through-v4
   (let [{:keys [put-fn get-fn]} (fixture)
         s (state)
         current (store/put! put-fn get-fn schema s [])
-        v4 (store/read! get-fn schema current)
-        v4-node (ipld/get-node get-fn current)
+        v5 (store/read! get-fn schema current)
+        v5-node (ipld/get-node get-fn current)
         shipped (js->clj (js/JSON.parse
                           (.readFileSync fs "resources/context-bot-checkpoint-v1.jsonld"
                                          "utf8")))
@@ -144,6 +160,10 @@
                   "source" (:source block)
                   "parents" []}
         old (ipld/node->block old-node)
+        v4-node (-> v5-node
+                    (dissoc "stateOntologySource" "stateOntologyDigest")
+                    (assoc "format" store/format-v4))
+        v4 (ipld/node->block v4-node)
         v3-node (-> v4-node
                     (dissoc "stateDataset")
                     (assoc "format" store/format-v3
@@ -155,17 +175,22 @@
                            "stateEdn" (execution/canonical-edn-text s)))
         v2 (ipld/node->block v2-node)]
     (put-fn (:cid old) (:bytes old))
+    (put-fn (:cid v4) (:bytes v4))
     (put-fn (:cid v3) (:bytes v3))
     (put-fn (:cid v2) (:bytes v2))
     (is (= checkpoint/semantic-context-document shipped))
-    (is (= store/format-id (:format v4)))
-    (is (not (contains? v4-node "stateEdn")))
-    (is (not (contains? v4-node "stateNode")))
-    (is (map? (get v4-node "stateDataset")))
-    (is (= s (:state v4)))
+    (is (= store/format-id (:format v5)))
+    (is (not (contains? v5-node "stateEdn")))
+    (is (not (contains? v5-node "stateNode")))
+    (is (map? (get v5-node "stateDataset")))
+    (is (string? (get v5-node "stateOntologySource")))
+    (is (re-matches #"sha256:[0-9a-f]{64}" (get v5-node "stateOntologyDigest")))
+    (is (= s (:state v5)))
     (is (= checkpoint/semantic-context-uri
-           (get (form/parse (:semantic-source v4)) "@context")))
-    (is (re-matches #"sha256:[0-9a-f]{64}" (:semantic-graph-digest v4)))
+           (get (form/parse (:semantic-source v5)) "@context")))
+    (is (re-matches #"sha256:[0-9a-f]{64}" (:semantic-graph-digest v5)))
+    (is (= store/format-v4 (:format (store/read! get-fn schema (:cid v4)))))
+    (is (= s (:state (store/read! get-fn schema (:cid v4)))))
     (is (= store/format-v3 (:format (store/read! get-fn schema (:cid v3)))))
     (is (= s (:state (store/read! get-fn schema (:cid v3)))))
     (is (= store/format-v2 (:format (store/read! get-fn schema (:cid v2)))))

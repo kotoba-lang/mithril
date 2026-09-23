@@ -9,6 +9,7 @@
             [ipld.core :as ipld]
             [mithril.checkpoint :as checkpoint]
             [mithril.execution :as execution]
+            [mithril.state-ontology :as state-ontology]
             [mithril.state-rdf :as state-rdf]
             [mithril.state-node :as state-node]
             [multiformats.core :as multiformats]))
@@ -16,9 +17,10 @@
 (def format-v1 "https://mithril.fund/block/bot-checkpoint-ipld-v1")
 (def format-v2 "https://mithril.fund/block/bot-checkpoint-ipld-v2")
 (def format-v3 "https://mithril.fund/block/bot-checkpoint-ipld-v3")
-(def format-id "https://mithril.fund/block/bot-checkpoint-ipld-v4")
+(def format-v4 "https://mithril.fund/block/bot-checkpoint-ipld-v4")
+(def format-id "https://mithril.fund/block/bot-checkpoint-ipld-v5")
 (defn canonical-format? [value]
-  (contains? #{format-v2 format-v3 format-id} value))
+  (contains? #{format-v2 format-v3 format-v4 format-id} value))
 (def node-keys-v1
   #{"format" "ontologyDigest" "checkpointDigest" "graphDigest"
     "stateDigest" "stateEdn" "source" "parents"})
@@ -30,6 +32,13 @@
   (conj (disj node-keys-v2 "stateEdn") "stateNode"))
 (def node-keys-v4
   (conj (disj node-keys-v3 "stateNode") "stateDataset"))
+(def node-keys-v5
+  (into node-keys-v4 #{"stateOntologySource" "stateOntologyDigest"}))
+
+(defn- local-state-ontology-source []
+  #?(:cljs (.readFileSync (js/require "node:fs")
+                         state-ontology/ontology-path "utf8")
+     :clj (slurp state-ontology/ontology-path)))
 
 (defn- refuse! [reason]
   (throw (ex-info "Mithril IPLD checkpoint refused"
@@ -82,13 +91,27 @@
   (let [dataset (state-rdf/quads (state-rdf/document state))]
     (-> (node-v3 schema state parents)
         (dissoc "stateNode")
-        (assoc "format" format-id
+        (assoc "format" format-v4
                "stateDataset" (state-rdf/pack-quads dataset)))))
+
+(defn- node-v5 [schema state parents ontology-source]
+  (let [base (node-v4 schema state parents)
+        checked (state-ontology/schema ontology-source)
+        report (state-ontology/validate!
+                checked (state-rdf/unpack-quads! (get base "stateDataset")))]
+    (when-not (:valid? report)
+      (throw (ex-info "checkpoint violates state graph SHACL shape"
+                      {:mithril/error :mithril.checkpoint-ipld/state-shacl-violation
+                       :report report})))
+    (assoc base "format" format-id
+           "stateOntologySource" ontology-source
+           "stateOntologyDigest" (:ontology-digest checked))))
 
 (defn block
   "Create canonical DAG-CBOR bytes and a real CID for one checked state."
   [schema state parents]
-  (ipld/node->block (node-v4 schema state parents)))
+  (ipld/node->block (node-v5 schema state parents
+                             (local-state-ontology-source))))
 
 (defn read!
   "Resolve and rehash a CID, then rerun Mithril parsing, OWL, SPARQL and SHACL
@@ -98,12 +121,14 @@
   (let [value (ipld/get-node get-fn id)]
     (when-not value (refuse! :missing-block))
     (let [version (get value "format")
-          v4? (= format-id version)
+          v5? (= format-id version)
+          v4? (= format-v4 version)
           v3? (= format-v3 version)
           semantic? (canonical-format? version)]
     (when-not (and (map? value)
-                   (contains? #{format-v1 format-v2 format-v3 format-id} version)
-                   (= (cond v4? node-keys-v4
+                   (contains? #{format-v1 format-v2 format-v3 format-v4 format-id} version)
+                   (= (cond v5? node-keys-v5
+                            v4? node-keys-v4
                             v3? node-keys-v3
                             semantic? node-keys-v2
                             :else node-keys-v1)
@@ -116,7 +141,12 @@
                                (get value "semanticContext"))
                             (string? (get value "semanticSource"))
                             (string? (get value "semanticGraphDigest"))))
-                   (cond v4? (map? (get value "stateDataset"))
+                   (cond v5? (and (map? (get value "stateDataset"))
+                                  (string? (get value "stateOntologySource"))
+                                  (string? (get value "stateOntologyDigest"))
+                                  (= (local-state-ontology-source)
+                                     (get value "stateOntologySource")))
+                         v4? (map? (get value "stateDataset"))
                          v3? (map? (get value "stateNode"))
                          :else (string? (get value "stateEdn")))
                    (vector? (get value "parents"))
@@ -124,12 +154,14 @@
       (refuse! :invalid-node))
     (let [parents (mapv ipld/link-cid (get value "parents"))
           _ (valid-parents! parents)
-          state (cond v4? (state-rdf/decode-packed! (get value "stateDataset"))
+          state (cond (or v5? v4?) (state-rdf/decode-packed! (get value "stateDataset"))
                       v3? (state-node/decode-canonical! (get value "stateNode"))
                       :else (try (reader/read-string (get value "stateEdn"))
                                  (catch #?(:cljs :default :clj Exception) _
                                    (refuse! :invalid-state-edn))))
-          expected (cond v4? (node-v4 schema state parents)
+          expected (cond v5? (node-v5 schema state parents
+                                      (get value "stateOntologySource"))
+                         v4? (node-v4 schema state parents)
                          v3? (node-v3 schema state parents)
                          semantic? (node-v2 schema state parents)
                          :else (node-v1 schema state parents))]

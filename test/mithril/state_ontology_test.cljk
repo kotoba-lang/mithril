@@ -1,0 +1,57 @@
+(ns mithril.state-ontology-test
+  (:require [cljs.test :refer [deftest is]]
+            [mithril.state-ontology :as ontology]
+            [mithril.state-rdf :as rdf]))
+
+(def fs (js/require "node:fs"))
+(def source (.readFileSync fs ontology/ontology-path "utf8"))
+(def schema (ontology/schema source))
+(def state {:id "test" :facts #{:a/b} :items [nil true 12]})
+(def dataset (rdf/quads (rdf/document state)))
+(defn fail-reason [f]
+  (try (f) nil (catch :default e (:reason (ex-data e)))))
+
+(deftest complete-state-graph-is-entailed-and-validated
+  (let [report (ontology/validate! schema dataset)]
+    (is (:valid? report))
+    (is (>= (:checked-nodes report) 10))
+    (is (> (:entailed-types report) (:checked-nodes report)))
+    (is (empty? (:violations report)))))
+
+(deftest shacl-class-datatype-and-count-violations-are-observable
+  (let [entry-id (some (fn [{:keys [subject predicate object]}]
+                         (when (and (= (str rdf/base "key") (:value predicate))
+                                    (= :iri (:type object)))
+                           (:value subject))) dataset)
+        list-item-id (some (fn [{:keys [subject predicate object]}]
+                             (when (and (= rdf/rdf-type (:value predicate))
+                                        (= (str rdf/base "ListItem") (:value object)))
+                               (:value subject))) dataset)
+        bad-class (mapv (fn [q]
+                          (if (and (= entry-id (get-in q [:subject :value]))
+                                   (= (str rdf/base "key") (get-in q [:predicate :value])))
+                            (assoc-in q [:object :value] list-item-id)
+                            q)) dataset)
+        bad-count (filterv (fn [q]
+                             (not (and (= entry-id (get-in q [:subject :value]))
+                                       (= (str rdf/base "key") (get-in q [:predicate :value])))))
+                           dataset)
+        bad-datatype (mapv (fn [q]
+                             (if (and (= entry-id (get-in q [:subject :value]))
+                                      (= (str rdf/base "index") (get-in q [:predicate :value])))
+                               (assoc-in q [:object :datatype] (str rdf/xsd "string"))
+                               q)) dataset)]
+    (is (string? entry-id))
+    (is (string? list-item-id))
+    (is (some #(and (= (str rdf/base "key") (:path %)) (:class? %))
+              (:violations (ontology/validate! schema bad-class))))
+    (is (some #(and (= (str rdf/base "key") (:path %)) (= 0 (:count %)))
+              (:violations (ontology/validate! schema bad-count))))
+    (is (some #(and (= (str rdf/base "index") (:path %)) (:datatype? %))
+              (:violations (ontology/validate! schema bad-datatype))))))
+
+(deftest unsupported-shacl-constraint-refuses-to-compile
+  (is (= :unsupported-shacl-property
+         (fail-reason #(ontology/schema
+                       (.replace source ":sh/max-count 1"
+                                 ":sh/max-count 9000"))))))

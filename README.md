@@ -373,26 +373,37 @@ general Unison merge or a distributed store. It does not sync refs between
 machines, provide crash-durable fsync, or establish fleet-wide Hermes profile
 equivalence.
 
-New checkpoint blocks use v4. Their complete executable state is a canonical
+New checkpoint blocks use v5. Their complete executable state is a canonical
 RDF Dataset stored as a compact IPLD `stateDataset` (term dictionary plus
 indexed triples). The reader expands its quads, reconstructs the state from
 them, and rejects noncanonical or orphaned graph nodes; it does not read an
-EDN string or v3 typed tree to recover v4. The same graph can be projected as
-JSON-LD. The reader continues to verify v1/v2/v3 blocks under their original
+EDN string or v3 typed tree to recover v5. The same graph can be projected as
+JSON-LD. The reader continues to verify v1/v2/v3/v4 blocks under their original
 identities rather than rewriting history. Alongside the legacy `graphDigest`,
-v2 through v4 store a separate
+v2 through v5 store a separate
 `semanticGraphDigest` computed from the
 [`bot-checkpoint` context](resources/context-bot-checkpoint-v1.jsonld) with
 absolute predicate IRIs and an explicit RDF field-loss check. The CID binds
 the ontology source and `.mith` semantic projection. Existing v1 blocks remain
 readable but do not acquire the stronger semantic digest retroactively.
-The domain-level OWL/SHACL graph remains a checked, lossy summary; v4's
-separate structural RDF Dataset carries the complete runtime state, but does
+The domain-level OWL/SHACL graph remains a checked, lossy summary; v5's
+separate structural RDF Dataset carries the complete runtime state, and a
+CID-bound [`state-graph-v1.mith`](ontology/state-graph-v1.mith) ontology now
+checks its node types by OWL 2 RL subclass entailment and its entry, item,
+value and scalar fields by a bounded SHACL Core subset (count, datatype,
+class). Unknown shapes and constraints are refused. This is not full OWL 2 or
+full SHACL Core, and it does
 not make every nested field independently queryable as a domain predicate or
 SHACL-validated property. A legacy `bot-run-v1`
 state may omit `task-digest`; the checkpoint derives it
 from the preserved task value, while a mismatching declared digest or a
 non-legacy omission is rejected.
+
+The final state from the isolated seven-effect Hermes builtin run was also
+read from its historical v4 CID, emitted as an in-memory v5 block, and read
+back with exact state equality. That v5 block was 97,941 bytes (one local
+measurement); no scheduler occurrence was switched to the v5 writer for this
+check, so it does not establish live v5 scheduling or fleet parity.
 
 On 2026-09-23, the actual `mithril-jev-readonly-canary` Hermes state was
 imported unchanged into a private v2 store and independently verified as one
@@ -457,6 +468,17 @@ unregistered workspaces, 10 non-Git workspaces). The standing Mithril fleet
 manifest had drifted, so this audit compiled a fresh copy in an isolated
 temporary directory without replacing the standing manifest or enabling jobs.
 These are admission counts, not behavioral parity or a replacement claim.
+
+On 2026-09-24, a fresh isolated manifest sync of the live local Hermes fleet
+found 286 profiles, 316 jobs, 296 enabled jobs, and no missing scripts. The
+read-only BPMN plan classified the enabled jobs as 30 `shadow-ready`, 211
+`bpmn-contract-required`, 27 `active-execution`, 25 `unhealthy`, and 3
+`unobserved`. Coding admission of 127 candidate jobs found 1 `ready`, 87
+`dirty-workspace`, 29 `unregistered-workspace`, and 10 `not-git`. An existing
+isolated seven-effect Hermes builtin coding run was independently reverified
+against its scheduler database as 7 completed effects, 14 semantic blocks,
+and 2 terminal deliveries; this is one representative closed workflow, not
+fleet-wide equivalence. No live job was switched off or migrated by the audit.
 
 ## Published Mithril code and libraries
 

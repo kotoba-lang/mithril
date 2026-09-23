@@ -1,0 +1,112 @@
+(mithril/ontology
+  :id "https://mithril.fund/ontology/state-graph-v1"
+  :profile
+  ["https://www.w3.org/TR/rdf11-concepts/"
+   "https://www.w3.org/TR/owl2-profiles/#OWL_2_RL"
+   "https://www.w3.org/TR/shacl/"]
+  :graph
+  [(owl/class :id "https://mithril.fund/ns/state-graph/v1#StateNode")
+   (owl/class :id "https://mithril.fund/ns/state-graph/v1#MapNode"
+              :rdfs/sub-class-of "https://mithril.fund/ns/state-graph/v1#StateNode")
+   (owl/class :id "https://mithril.fund/ns/state-graph/v1#RootState"
+              :rdfs/sub-class-of "https://mithril.fund/ns/state-graph/v1#MapNode")
+   (owl/class :id "https://mithril.fund/ns/state-graph/v1#ListNode"
+              :rdfs/sub-class-of "https://mithril.fund/ns/state-graph/v1#StateNode")
+   (owl/class :id "https://mithril.fund/ns/state-graph/v1#SetNode"
+              :rdfs/sub-class-of "https://mithril.fund/ns/state-graph/v1#StateNode")
+   (owl/class :id "https://mithril.fund/ns/state-graph/v1#KeywordNode"
+              :rdfs/sub-class-of "https://mithril.fund/ns/state-graph/v1#StateNode")
+   (owl/class :id "https://mithril.fund/ns/state-graph/v1#StringNode"
+              :rdfs/sub-class-of "https://mithril.fund/ns/state-graph/v1#StateNode")
+   (owl/class :id "https://mithril.fund/ns/state-graph/v1#IntegerNode"
+              :rdfs/sub-class-of "https://mithril.fund/ns/state-graph/v1#StateNode")
+   (owl/class :id "https://mithril.fund/ns/state-graph/v1#BooleanNode"
+              :rdfs/sub-class-of "https://mithril.fund/ns/state-graph/v1#StateNode")
+   (owl/class :id "https://mithril.fund/ns/state-graph/v1#NullNode"
+              :rdfs/sub-class-of "https://mithril.fund/ns/state-graph/v1#StateNode")
+   (owl/class :id "https://mithril.fund/ns/state-graph/v1#MapEntry")
+   (owl/class :id "https://mithril.fund/ns/state-graph/v1#ListItem")
+   (shacl/node-shape
+     :id "https://mithril.fund/ns/state-graph/v1#MapShape"
+     :sh/target-class "https://mithril.fund/ns/state-graph/v1#MapNode"
+     :sh/property
+     [(shacl/property-shape
+        :sh/path "https://mithril.fund/ns/state-graph/v1#entry"
+        :sh/class "https://mithril.fund/ns/state-graph/v1#MapEntry"
+        :sh/min-count 0 :sh/max-count 8192)])
+   (shacl/node-shape
+     :id "https://mithril.fund/ns/state-graph/v1#ListShape"
+     :sh/target-class "https://mithril.fund/ns/state-graph/v1#ListNode"
+     :sh/property
+     [(shacl/property-shape
+        :sh/path "https://mithril.fund/ns/state-graph/v1#item"
+        :sh/class "https://mithril.fund/ns/state-graph/v1#ListItem"
+        :sh/min-count 0 :sh/max-count 8192)])
+   (shacl/node-shape
+     :id "https://mithril.fund/ns/state-graph/v1#SetShape"
+     :sh/target-class "https://mithril.fund/ns/state-graph/v1#SetNode"
+     :sh/property
+     [(shacl/property-shape
+        :sh/path "https://mithril.fund/ns/state-graph/v1#item"
+        :sh/class "https://mithril.fund/ns/state-graph/v1#ListItem"
+        :sh/min-count 0 :sh/max-count 8192)])
+   (shacl/node-shape
+     :id "https://mithril.fund/ns/state-graph/v1#MapEntryShape"
+     :sh/target-class "https://mithril.fund/ns/state-graph/v1#MapEntry"
+     :sh/property
+     [(shacl/property-shape
+        :sh/path "https://mithril.fund/ns/state-graph/v1#index"
+        :sh/datatype "http://www.w3.org/2001/XMLSchema#integer"
+        :sh/min-count 1 :sh/max-count 1)
+      (shacl/property-shape
+        :sh/path "https://mithril.fund/ns/state-graph/v1#key"
+        :sh/class "https://mithril.fund/ns/state-graph/v1#StateNode"
+        :sh/min-count 1 :sh/max-count 1)
+      (shacl/property-shape
+        :sh/path "https://mithril.fund/ns/state-graph/v1#value"
+        :sh/class "https://mithril.fund/ns/state-graph/v1#StateNode"
+        :sh/min-count 1 :sh/max-count 1)])
+   (shacl/node-shape
+     :id "https://mithril.fund/ns/state-graph/v1#ListItemShape"
+     :sh/target-class "https://mithril.fund/ns/state-graph/v1#ListItem"
+     :sh/property
+     [(shacl/property-shape
+        :sh/path "https://mithril.fund/ns/state-graph/v1#index"
+        :sh/datatype "http://www.w3.org/2001/XMLSchema#integer"
+        :sh/min-count 1 :sh/max-count 1)
+      (shacl/property-shape
+        :sh/path "https://mithril.fund/ns/state-graph/v1#value"
+        :sh/class "https://mithril.fund/ns/state-graph/v1#StateNode"
+        :sh/min-count 1 :sh/max-count 1)])
+   (shacl/node-shape
+     :id "https://mithril.fund/ns/state-graph/v1#KeywordShape"
+     :sh/target-class "https://mithril.fund/ns/state-graph/v1#KeywordNode"
+     :sh/property
+     [(shacl/property-shape
+        :sh/path "https://mithril.fund/ns/state-graph/v1#text"
+        :sh/datatype "http://www.w3.org/2001/XMLSchema#string"
+        :sh/min-count 1 :sh/max-count 1)])
+   (shacl/node-shape
+     :id "https://mithril.fund/ns/state-graph/v1#StringShape"
+     :sh/target-class "https://mithril.fund/ns/state-graph/v1#StringNode"
+     :sh/property
+     [(shacl/property-shape
+        :sh/path "https://mithril.fund/ns/state-graph/v1#text"
+        :sh/datatype "http://www.w3.org/2001/XMLSchema#string"
+        :sh/min-count 1 :sh/max-count 1)])
+   (shacl/node-shape
+     :id "https://mithril.fund/ns/state-graph/v1#IntegerShape"
+     :sh/target-class "https://mithril.fund/ns/state-graph/v1#IntegerNode"
+     :sh/property
+     [(shacl/property-shape
+        :sh/path "https://mithril.fund/ns/state-graph/v1#integer"
+        :sh/datatype "http://www.w3.org/2001/XMLSchema#integer"
+        :sh/min-count 1 :sh/max-count 1)])
+   (shacl/node-shape
+     :id "https://mithril.fund/ns/state-graph/v1#BooleanShape"
+     :sh/target-class "https://mithril.fund/ns/state-graph/v1#BooleanNode"
+     :sh/property
+     [(shacl/property-shape
+        :sh/path "https://mithril.fund/ns/state-graph/v1#boolean"
+        :sh/datatype "http://www.w3.org/2001/XMLSchema#boolean"
+        :sh/min-count 1 :sh/max-count 1)])])
