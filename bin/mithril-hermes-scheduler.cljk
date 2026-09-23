@@ -4,6 +4,8 @@
   (:require [cljs.reader :as reader]
             [clojure.string :as str]
             [mithril.bot :as bot]
+            [mithril.compiler :as compiler]
+            [mithril.execution :as execution]
             [mithril.hermes :as hermes]
             [mithril.hermes-scheduler :as scheduler]))
 
@@ -22,6 +24,18 @@
   (.execFileSync cp program (clj->js args)
                  #js {:encoding "utf8" :stdio #js ["ignore" "pipe" "pipe"]
                       :timeout 360000}))
+
+(defn- held-record [contract claim execution-id state]
+  {:format (if (:coding? contract)
+             scheduler/coding-receipt-format scheduler/receipt-format)
+   :status "held" :executionId execution-id :source "builtin"
+   :jobId (:job-id contract) :scheduledInstant (:scheduled_instant claim)
+   :contractDigest (:digest contract)
+   :botProfileDigest (:bot-profile-digest contract)
+   :reason (str (:hold-reason state)) :step (:step state)})
+
+(defn- task-digest [task]
+  (bot/task-digest (into {} (map (fn [[k v]] [(keyword k) v]) task))))
 
 (defn- verified-fleet! [profiles-root manifest-dir contract]
   (run! "kbb" ["--backend" "sci" "bin/mithril-hermes-fleet.cljk" "verify-profile"
@@ -64,7 +78,7 @@
     (fail! :paths-must-be-absolute))
   (let [artifact (bot/compile-text bot-path (text bot-path))
         contract (scheduler/compile-document
-                  contract-path (js->clj (js/JSON.parse (text contract-path))) artifact)
+                  contract-path (compiler/parse-source (text contract-path)) artifact)
         _ (when-not (= (:coding? contract) (boolean tool-profile-path))
             (fail! :tool-profile-mode-mismatch))
         _ (when tool-profile-path
@@ -117,6 +131,26 @@
           before-step (or (:step prior) 0)
           before-receipts (count (:receipts prior))]
       (when (:awaiting prior) (fail! :effect-in-flight))
+      (when (and (= "semantic" (:checkpoint-mode contract))
+                 prior (not (.existsSync fs (str state-path ".semantic-head"))))
+        (fail! :semantic-import-required))
+      (when (and (= "semantic" (:checkpoint-mode contract)) prior)
+        (let [verified (parse-json
+                        (run! "kbb" ["--backend" "sci" "bin/mithril-hermes.cljk"
+                                     "semantic-verify" state-path]))]
+          (when-not (and (= "verified" (:status verified))
+                         (= (execution/digest prior) (:state-digest verified)))
+            (fail! :semantic-head-mismatch))))
+      (when (= :held (:status prior))
+        (when-not (and (= (:bot-profile-digest contract) (:profile-digest prior))
+                       (= (task-digest task) (:task-digest prior)))
+          (fail! :held-profile-mismatch))
+        (.writeFileSync fs receipt-path
+                        (str (json (held-record contract claim execution-id prior)) "\n")
+                        #js {:encoding "utf8" :flag "wx"})
+        (println (json {:status "held" :executionId execution-id
+                        :reason (str (:hold-reason prior))}))
+        (js/process.exit 0))
       (when (and prior (not= :running (:status prior)))
         (fail! :session-terminal))
       (.writeFileSync fs attempt-path
@@ -132,22 +166,25 @@
                       #js {:encoding "utf8" :flag "wx"})
       (let [stdout (run! "kbb" (cond-> ["--backend" "sci" "bin/mithril-hermes.cljk" "tick"
                                          bot-path task-path state-path (:owner contract)
-                                         (str/join "," (sort (:effects contract))) "execute"]
+                                         (str/join "," (sort (:effects contract)))
+                                         (if (= "semantic" (:checkpoint-mode contract))
+                                           "semantic-execute" "execute")]
                                   tool-profile-path (conj tool-profile-path)))
             result (parse-json (last (remove str/blank? (str/split-lines stdout))))
             state (reader/read-string (text state-path))
             receipt (last (:receipts state))
             action (get bot/action-by-label (:action result))
             effect (some-> action :effect)
-            effect-name (when effect (str (namespace effect) "/" (name effect)))]
-        (when-not (and (= "completed" (:status result))
-                       (= (inc before-step) (:step state))
-                       (= (inc before-receipts) (count (:receipts state)))
-                       (nil? (:awaiting state)) (:bpmn state)
-                       (= (:bot-profile-digest contract) (:profile-digest state))
-                       (= :completed (:status receipt))
-                       (contains? (:effects contract) effect-name))
-          (fail! :tick-or-receipt-mismatch))
+            effect-name (when effect (str (namespace effect) "/" (name effect)))
+            outcome (scheduler/verify-tick-outcome
+                     contract result state before-step before-receipts effect-name)]
+        (when (= :held outcome)
+          (.writeFileSync fs receipt-path
+                          (str (json (held-record contract claim execution-id state)) "\n")
+                          #js {:encoding "utf8" :flag "wx"})
+          (println (json {:status "held" :executionId execution-id
+                          :reason (str (:hold-reason state))}))
+          (js/process.exit 0))
         (let [record {:format (if (:coding? contract)
                                 scheduler/coding-receipt-format scheduler/receipt-format)
                       :status "completed" :executionId execution-id

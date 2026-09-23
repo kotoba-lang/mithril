@@ -1,6 +1,7 @@
 (ns mithril.hermes-scheduler-test
   (:require [cljs.test :refer [deftest is]]
             [mithril.bot :as bot]
+            [mithril.compiler :as compiler]
             [mithril.hermes-scheduler :as scheduler]))
 
 (def fs (js/require "node:fs"))
@@ -44,7 +45,14 @@
   (let [compiled (scheduler/compile-document "coding.mith" coding-contract coding-artifact)]
     (is (= scheduler/coding-contract-format (:format compiled)))
     (is (:coding? compiled))
-    (is (= 8 (count (:effects compiled)))))
+    (is (= 8 (count (:effects compiled))))
+    (is (= "legacy" (:checkpoint-mode compiled)))
+    (is (= "semantic"
+           (:checkpoint-mode (scheduler/compile-document
+                              "semantic.mith" (assoc coding-contract "checkpointMode" "semantic")
+                              coding-artifact)))))
+  (is (= :invalid-checkpoint-mode
+         (coding-reason (assoc coding-contract "checkpointMode" "unsafe"))))
   (is (= :invalid-fields (coding-reason (dissoc coding-contract "toolProfileDigest"))))
   (is (= :invalid-tool-profile-digest
          (coding-reason (assoc coding-contract "toolProfileDigest" "bad"))))
@@ -77,6 +85,39 @@
   (is (= :effect-or-task-denied (reason (assoc contract "grants" ["workspace/read" "workspace/read" "agent/stop"]))))
   (is (= :effect-or-task-denied (reason (assoc contract "grants" ["workspace/read" "workspace/write"]))))
   (is (= :invalid-hermes-binding (reason (assoc contract "jobId" "../other")))))
+
+(deftest scheduler-contract-can-use-the-same-mithril-form-surface
+  (let [source (str "(mithril/hermes-bpmn-scheduler-contract "
+                    ":id \"https://mithril.fund/id/contract/hermes-readonly-test\" "
+                    ":ontology \"" (get contract "ontology") "\" "
+                    ":profile-name \"mithril\" :job-id \"abcdef123456\" "
+                    ":profile-digest \"" (get contract "profileDigest") "\" "
+                    ":bot-profile-digest \"" (get contract "botProfileDigest") "\" "
+                    ":task (mithril/task :id \"read-only-test\" :workspace \"/tmp\" "
+                    ":goal \"inspect workspace\") "
+                    ":owner \"mithril-scheduler\" "
+                    ":checkpoint-mode \"semantic\" "
+                    ":grants [\"workspace/read\" \"agent/stop\"])")
+        parsed (compiler/parse-source source)
+        result (scheduler/compile-document "test.mith" parsed artifact)]
+    (is (= "semantic" (:checkpoint-mode result)))
+    (is (= (assoc contract "checkpointMode" "semantic") parsed))))
+
+(deftest scheduler-distinguishes-held-from-completed-effect
+  (let [compiled (scheduler/compile-document "test.mith" contract artifact)
+        base (bot/start-run artifact {:id "one" :workspace "/tmp" :goal "inspect"}
+                            "mithril-scheduler" 1000)
+        held (assoc base :status :held :hold-reason :model-confidence-below-floor)
+        classify (fn [result state]
+                   (try (scheduler/verify-tick-outcome compiled result state 0 0 nil)
+                        (catch :default error (:reason (ex-data error)))))]
+    (is (= :held (classify {:status "held"} held)))
+    (is (= :held-state-mismatch
+           (classify {:status "held"} (assoc held :step 1))))
+    (is (= :held-state-mismatch
+           (classify {:status "held"} (assoc held :awaiting {:id "unconsumed"}))))
+    (is (= :tick-or-receipt-mismatch
+           (classify {:status "completed"} held)))))
 
 (deftest only-one-live-builtin-claim-is-admitted
   (let [now (.now js/Date)

@@ -75,6 +75,11 @@
                                   profile-path task-path state-path "semantic-test"
                                   "workspace/read,git/status,agent/stop"
                                   "semantic-execute" tools-path]
+                             #js {:cwd (.cwd js/process) :encoding "utf8"}))
+        verify (fn []
+                 (.spawnSync cp "kbb"
+                             #js ["--backend" "sci" "bin/mithril-hermes.cljk"
+                                  "semantic-verify" state-path]
                              #js {:cwd (.cwd js/process) :encoding "utf8"}))]
     (try
       (.mkdirSync fs workspace)
@@ -116,6 +121,7 @@
             (is (string? (get-in block [:parent-digest])))
             (is (= "completed" (get (js->clj (js/JSON.parse (.-stdout result)))
                                      "status"))))
+          (is (= 0 (.-status (verify))))
           (let [result2 (invoke)]
             (is (not= 0 (.-status result2)))
             (is (clojure.string/includes? (.-stdout result2) "Governor did not grant"))
@@ -123,7 +129,21 @@
           (.writeFileSync fs state-path "{:tampered true}" "utf8")
           (let [rejected (invoke)]
             (is (not= 0 (.-status rejected)))
-            (is (clojure.string/includes? (.-stdout rejected) "state-diverged")))))
+            (is (clojure.string/includes? (.-stdout rejected) "state-diverged")))
+          (let [rejected (verify)]
+            (is (not= 0 (.-status rejected)))
+            (is (clojure.string/includes? (.-stdout rejected) "state-diverged")))
+          (let [restored (.spawnSync cp "kbb"
+                                     #js ["--backend" "sci" "bin/mithril-hermes.cljk"
+                                          "semantic-restore" state-path]
+                                     #js {:cwd (.cwd js/process) :encoding "utf8"})
+                head (.trim (.readFileSync fs (str state-path ".semantic-head") "utf8"))
+                block (reader/read-string
+                       (.readFileSync fs (str state-path ".semantic-blocks/" (subs head 7))
+                                        "utf8"))]
+            (is (= 0 (.-status restored)) (str (.-stdout restored) (.-stderr restored)))
+            (is (= (:state block) (reader/read-string (.readFileSync fs state-path "utf8"))))
+            (is (= 0 (.-status (verify)))))))
       (finally (.rmSync fs dir #js {:recursive true :force true})))))
 
 (deftest explicit-semantic-import-preserves-terminal-and-inflight-semantics

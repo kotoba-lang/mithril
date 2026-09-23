@@ -437,6 +437,20 @@ recognizes a semantic head and advances that same chain after an in-flight effec
 blocks are local, not published to a public IPLD store. This proves a bounded
 content-addressed checkpoint/lineage path, not distributed Unison branch/merge
 or parity with every Hermes profile and cron job.
+If a crash occurs after the head commit but before its EDN projection is
+rewritten, `semantic-execute` refuses `state-diverged`. An operator can run
+`mithril-hermes semantic-restore <state.edn>`: it verifies the ontology and
+entire block ancestry, rewrites only the EDN projection, and records an audit
+event. It does not replay an effect.
+
+An explicit Hermes BPMN scheduler contract may set `"checkpointMode":
+"semantic"` (or `:checkpoint-mode "semantic"` in its `.mith` form). The
+scheduler then calls `semantic-execute`; a pre-existing EDN-only coding session
+requires the explicit import above. Jev admission refusals such as confidence
+below the ontology floor become an effect-free `held` checkpoint and a
+non-success `held` scheduler receipt. Later occurrences return `held` without
+calling the model or host effect again. This is a safe terminal handoff, not a
+claim that the bot completed its task.
 
 `shadow` records the decision but requests no effect and does not advance the
 state. Without a coding tool profile, `execute` admits only `workspace/read`,

@@ -237,6 +237,24 @@
            (error-code #(bot/admit-decision state (model-result state "stop" 0.8 0.2)
                                              "worker-1" 1001))))))
 
+(deftest low-confidence-decision-becomes-an-effect-free-terminal-hold
+  (let [state (bot/start-run (profile) (task) "worker-1" 1000)
+        result (bot/resolve-decision state (model-result state "stop" 0.8 0.2)
+                                     "worker-1" 1001)
+        held (:held result)]
+    (is (= :mithril.bot/model-confidence-below-floor (:reason result)))
+    (is (= :held (:status held)))
+    (is (= :model-confidence-below-floor (:hold-reason held)))
+    (is (= (:step state) (:step held)))
+    (is (nil? (:awaiting held)))
+    (is (= :refused (get-in held [:semantic-receipts 4 :status])))
+    (is (= :terminal (:disposition
+                     (bot/resume-or-start (profile) (task) held "worker-1" 1002))))
+    (is (= :mithril.bot/not-running
+           (error-code #(bot/resolve-decision held
+                                              (model-result state "stop" 0.8 0.2)
+                                              "worker-1" 1003))))))
+
 (deftest bpmn-token-is-the-process-authority-through-terminal-stop
   (let [advance (fn [state label now]
                   (complete state
