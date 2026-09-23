@@ -28,7 +28,7 @@
 (defn- held-record [contract claim execution-id state]
   {:format (if (:coding? contract)
              scheduler/coding-receipt-format scheduler/receipt-format)
-   :status "held" :executionId execution-id :source "builtin"
+   :status "held" :runStatus "held" :executionId execution-id :source "builtin"
    :jobId (:job-id contract) :scheduledInstant (:scheduled_instant claim)
    :contractDigest (:digest contract)
    :botProfileDigest (:bot-profile-digest contract)
@@ -151,6 +151,14 @@
         (println (json {:status "held" :executionId execution-id
                         :reason (str (:hold-reason prior))}))
         (js/process.exit 0))
+      (when (= :completed (:status prior))
+        (let [record (scheduler/terminal-record
+                      contract claim execution-id prior (task-digest task))]
+          (.writeFileSync fs receipt-path (str (json record) "\n")
+                            #js {:encoding "utf8" :flag "wx"})
+          (println (json {:status "terminal" :executionId execution-id
+                          :step (:step prior)}))
+          (js/process.exit 0)))
       (when (and prior (not= :running (:status prior)))
         (fail! :session-terminal))
       (.writeFileSync fs attempt-path
@@ -187,7 +195,8 @@
           (js/process.exit 0))
         (let [record {:format (if (:coding? contract)
                                 scheduler/coding-receipt-format scheduler/receipt-format)
-                      :status "completed" :executionId execution-id
+                      :status "completed" :runStatus (name (:status state))
+                      :executionId execution-id
                       :source "builtin" :jobId (:job-id contract)
                       :scheduledInstant (:scheduled_instant claim)
                       :contractDigest (:digest contract)

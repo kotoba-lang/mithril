@@ -392,6 +392,26 @@
                        (every? facts (:produces %))))
          vec)))
 
+(def coding-action-order
+  ["workspace-inspect" "patch-reset" "code-propose" "patch-apply" "amu-compile"
+   "test-run" "git-status" "stop"])
+
+(def coding-reviewed-gateway
+  "https://mithril.fund/id/bpmn/governed-coder/g6")
+
+(defn deterministic-coding-action [state]
+  (let [by-label (into {} (map (juxt :label identity) (available-actions state)))
+        reviewed? (= coding-reviewed-gateway
+                     (get-in state [:bpmn :token-state :bpmn/tokens 0 :bpmn/at]))]
+    (when (and reviewed?
+               (not (every? (:facts state) [:tests/passed :git/observed])))
+      (fail! :mithril.bot/invalid-reviewed-gateway
+             "reviewed gateway lacks verified test and Git facts" {}))
+    (or (if reviewed? (get by-label "stop")
+            (some by-label coding-action-order))
+        (fail! :mithril.bot/no-coding-action
+               "coding workflow has no admitted next action" {}))))
+
 (defn prepare-request [state owner now-ms]
   (lease-valid! state owner now-ms)
   (when-not (= :running (:status state))

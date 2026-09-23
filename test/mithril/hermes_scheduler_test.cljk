@@ -2,6 +2,7 @@
   (:require [cljs.test :refer [deftest is]]
             [mithril.bot :as bot]
             [mithril.compiler :as compiler]
+            [mithril.execution :as execution]
             [mithril.hermes-scheduler :as scheduler]))
 
 (def fs (js/require "node:fs"))
@@ -118,6 +119,34 @@
            (classify {:status "held"} (assoc held :awaiting {:id "unconsumed"}))))
     (is (= :tick-or-receipt-mismatch
            (classify {:status "completed"} held)))))
+
+(deftest completed-coding-session-is-acknowledged-without-another-effect
+  (let [compiled (scheduler/compile-document "coding.mith" coding-contract coding-artifact)
+        task {:id "read-only-test" :workspace "/tmp" :goal "inspect workspace"
+              :tool-profile-digest (get coding-contract "toolProfileDigest")}
+        s0 (bot/start-run coding-artifact task "mithril-scheduler" 1000)
+        selected {:action (get bot/action-by-label "stop") :confidence 10000}
+        requested (bot/request-effect s0 selected #{:agent/stop} "mithril-scheduler" 1001)
+        effect (:effect requested)
+        s1 (bot/apply-receipt (:state requested)
+                              {:format bot/receipt-format :effect-id (:id effect)
+                               :status :completed :output-digest (execution/digest :stopped)}
+                              "mithril-scheduler" 1002)
+        claim {:scheduled_instant "2026-09-23T00:00:00Z"}
+        record (scheduler/terminal-record compiled claim "execution-2" s1
+                                          (bot/task-digest task))
+        reason (fn [state digest]
+                 (try (scheduler/terminal-record compiled claim "execution-2" state digest)
+                      nil
+                      (catch :default error (:reason (ex-data error)))))]
+    (is (= :completed (:status s1)))
+    (is (= "terminal" (:status record)))
+    (is (= "completed" (:runStatus record)))
+    (is (nil? (:effectId record)))
+    (is (= (execution/digest s1) (:stateDigest record)))
+    (is (= :terminal-state-mismatch
+           (reason (assoc s1 :awaiting {:id "unconsumed"}) (bot/task-digest task))))
+    (is (= :terminal-state-mismatch (reason s1 (execution/digest :other-task))))))
 
 (deftest only-one-live-builtin-claim-is-admitted
   (let [now (.now js/Date)
