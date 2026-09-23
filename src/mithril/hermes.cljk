@@ -189,6 +189,21 @@
                  "creatable path must be absent below a real in-workspace directory" {}))))
     profile))
 
+(defn preflight-coding-profile!
+  "Check the real workspace, artifact directory and allowlisted file paths
+  before a scheduler persists an effect request. This is not host authority;
+  execute-effect rechecks the same paths at use time."
+  [profile]
+  (validate-tool-profile profile)
+  (let [ctx (default-context)]
+    (when-not ((:exists-fn ctx) (:workspace profile))
+      (fail! :mithril.hermes/workspace-unavailable
+             "coding workspace is missing before effect admission" {}))
+    (when-not ((:exists-fn ctx) (:artifact-dir profile))
+      (fail! :mithril.hermes/artifact-directory-unavailable
+             "coding artifact directory is missing before effect admission" {}))
+    (runtime-paths! ctx profile :llm/propose-patch)))
+
 (defn- byte-count [value]
   (.byteLength js/Buffer value "utf8"))
 
@@ -334,6 +349,9 @@
 
 (defn- read-proposal! [effect profile ctx]
   (let [file (artifact-path profile effect (:join-fn ctx))
+        _ (when-not ((:exists-fn ctx) file)
+            (fail! :mithril.hermes/proposal-missing
+                   "proposal artifact is absent; an in-flight effect cannot be assumed complete" {}))
         proposal (reader/read-string ((:read-fn ctx) file))]
     (when-not (and (= #{:format :run-id :base-head :profile-digest :patch-digest :patch}
                       (set (keys proposal)))

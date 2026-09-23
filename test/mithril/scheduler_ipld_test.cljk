@@ -5,6 +5,7 @@
             [mithril.checkpoint-ipld :as ipld]
             [mithril.checkpoint-ipld-fs :as local]
             [mithril.execution :as execution]
+            [mithril.ipld-session :as primary]
             [mithril.scheduler-ipld :as scheduler-ipld]))
 
 (def fs (js/require "node:fs"))
@@ -123,6 +124,50 @@
                (reason #(verify (assoc-in rows [1 :receipt :stateCid]
                                           "bafyreifake")))))
         (is (= :scheduler-series-mismatch
+               (reason #(verify (assoc-in rows [0 :execution :source]
+                                          "direct"))))))
+      (finally (.rmSync fs directory #js {:recursive true :force true})))))
+
+(deftest primary-scheduler-receipt-requires-request-and-result-cid-phases
+  (let [directory (.mkdtempSync fs (.join path (.tmpdir os) "mithril-primary-receipts-"))]
+    (try
+      (let [store (local/open! (.join path directory "blocks"))
+            state-path (.join path directory "run.edn")
+            requested (bot/request-effect
+                       (state) {:action (get bot/action-by-label "stop")
+                                :confidence 10000}
+                       #{:agent/stop} "scheduler-ipld-test" 1001)
+            pending (:state requested)
+            c1 (primary/save! store schema state-path nil pending)
+            finished (bot/apply-receipt
+                      pending {:format bot/receipt-format
+                               :effect-id (get-in requested [:effect :id])
+                               :status :completed
+                               :output-digest (execution/digest :stopped)}
+                      "scheduler-ipld-test" 1002)
+            c2 (primary/save! store schema state-path c1 finished)
+            effect (last (:receipts finished))
+            receipt {:status "completed" :source "builtin"
+                     :executionId "execution-1"
+                     :scheduledInstant "2026-09-23T00:00:00Z"
+                     :runStatus "completed" :step 1
+                     :action "https://mithril.fund/id/action/stop"
+                     :stateCid (:stateCid c2)
+                     :semanticGraphDigest (:semanticGraphDigest c2)
+                     :effectId (:effect-id effect)
+                     :outputDigest (:output-digest effect)}
+            rows [{:execution {:id "execution-1" :source "builtin"
+                               :status "completed"
+                               :scheduled_instant "2026-09-23T00:00:00Z"}
+                   :receipt receipt}]
+            verify #(scheduler-ipld/verify-primary-occurrences!
+                     store schema state-path %)]
+        (is (= 2 (:semanticBlocks (verify rows))))
+        (is (= finished (:state (verify rows))))
+        (is (= :primary-effect-or-cid-mismatch
+               (reason #(verify (assoc-in rows [0 :receipt :effectId]
+                                          "sha256:wrong")))))
+        (is (= :primary-scheduler-series-mismatch
                (reason #(verify (assoc-in rows [0 :execution :source]
                                           "direct"))))))
       (finally (.rmSync fs directory #js {:recursive true :force true})))))

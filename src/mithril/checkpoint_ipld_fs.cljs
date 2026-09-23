@@ -74,6 +74,9 @@
       (when-not (re-matches #"b[a-z2-7]+" id) (refuse! :invalid-ref))
       id)))
 
+(defn ref-exists? [store name]
+  (.existsSync fs (ref-path store name)))
+
 (defn- create-ref-under-lock! [store name id]
   (when-not (re-matches #"b[a-z2-7]+" (str id)) (refuse! :invalid-cid))
   (try (.writeFileSync fs (ref-path store name) (str id "\n")

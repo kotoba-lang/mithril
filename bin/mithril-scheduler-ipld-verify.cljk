@@ -22,7 +22,8 @@
 
 (let [[state-dir profile job-id db & extra] *command-line-args*]
   (try
-    (when-not (and state-dir profile job-id db (empty? extra)
+    (when-not (and state-dir profile job-id db
+                   (or (empty? extra) (= ["primary"] extra))
                    (.isAbsolute path state-dir) (.isAbsolute path db)
                    (re-matches #"[A-Za-z0-9_-]+" profile)
                    (re-matches #"[0-9a-f]{12}" job-id))
@@ -50,8 +51,13 @@
                                      (parse-json (text file))))})
                      executions)]
       (when-not (seq executions) (refuse! :no-executions))
-      (let [{:keys [state verification]}
-            (scheduler-ipld/verify-from-receipts! store schema rows)
+      (let [primary? (= ["primary"] extra)
+            {:keys [state verification]}
+            (if primary?
+              (let [result (scheduler-ipld/verify-primary-occurrences!
+                            store schema state-path rows)]
+                {:state (:state result) :verification (dissoc result :state)})
+              (scheduler-ipld/verify-from-receipts! store schema rows))
             projection? (.existsSync fs state-path)]
         (when (and projection?
                    (not= state (reader/read-string (text state-path))))

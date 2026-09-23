@@ -243,6 +243,37 @@ divergent semantic head, unreceipted effect, or ambiguous execution history is
 not auto-repaired. This is recovery of a derived projection, not a claim that
 all execution state now lives solely in RDF/IPLD.
 
+An additional opt-in coding contract, `"checkpointMode":"ipld-primary"`,
+uses the local ontology-validated CID ref as the *executable* state authority.
+The EDN file is a checked, recoverable projection: a missing file is rebuilt
+from the verified CID ancestry, while a divergent file is refused. Each effect
+commits a requested/in-flight CID **before** the host call and a receipt-applied
+CID afterwards. A retry encountering an in-flight head refuses to repeat the
+effect; `mithril-hermes reconcile` can consume durable proposal/apply evidence
+without re-execution, and missing evidence remains held for inspection. Each
+state path is one run; a different task requires a new path rather than a
+silent ref reset. The verification command accepts a trailing `primary` to
+check both phases, Hermes occurrences, BPMN actions and terminal deliveries.
+`ipld-primary` does not auto-import the older semantic/EDN session.
+
+In a separate isolated Hermes profile on 2026-09-23, seven distinct builtin
+occurrences advanced read, fixed patch proposal, patch application, Mithril
+`compile-web`, test, git status and stop. The primary verifier found 14 linked
+semantic blocks (request/result for every effect), seven effect receipts, and
+one terminal delivery. The edited `.mith` app answered `GET /hello` with HTTP
+200 and the expected changed body. With the EDN projection withheld, a second
+builtin terminal delivery reconstructed it from the CID head without adding
+an effect or block. An earlier isolated attempt reached a durable in-flight
+proposal when its artifact directory was missing; it was not re-run. Coding
+profile preflight now checks that directory before effect admission, while
+reconciliation explicitly refuses `proposal-missing`. A separate CLI test
+confirmed that an already persisted proposal artifact can advance an in-flight
+CID head without invoking the proposer or changing the workspace. This
+experiment used a
+fixed proposer and Mithril `compile-web`, not a Jev-authored patch or Amu
+compilation. Local refs still lack distributed CAS, crash-durable fsync, and
+fleet-wide behavioral parity.
+
 For a fresh coding run, the read-only reconciliation command compares every
 Hermes `source=builtin` execution with its scheduler receipt, the exact BPMN
 action, effect ID and output digest, semantic graph digest, and parent-linked

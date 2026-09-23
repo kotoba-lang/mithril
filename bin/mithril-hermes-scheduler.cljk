@@ -10,6 +10,7 @@
             [mithril.execution :as execution]
             [mithril.hermes :as hermes]
             [mithril.hermes-scheduler :as scheduler]
+            [mithril.ipld-session :as ipld-session]
             [mithril.scheduler-ipld :as scheduler-ipld]))
 
 (def fs (js/require "node:fs"))
@@ -140,13 +141,13 @@
                   contract-path (compiler/parse-source (text contract-path)) artifact)
         _ (when-not (= (:coding? contract) (boolean tool-profile-path))
             (fail! :tool-profile-mode-mismatch))
-        _ (when tool-profile-path
-            (let [profile (parse-json (text tool-profile-path))]
-              (when-not (and (= (:tool-profile-digest contract)
-                                (hermes/tool-profile-digest profile))
-                             (= (get-in contract [:task "workspace"])
-                                (:workspace profile)))
-                (fail! :tool-profile-binding-mismatch))))
+        tool-profile (when tool-profile-path (parse-json (text tool-profile-path)))
+        _ (when tool-profile
+            (when-not (and (= (:tool-profile-digest contract)
+                              (hermes/tool-profile-digest tool-profile))
+                           (= (get-in contract [:task "workspace"])
+                              (:workspace tool-profile)))
+              (fail! :tool-profile-binding-mismatch)))
         _ (verified-fleet! profiles-root manifest-dir contract)
         profile-root (live-job! profiles-root contract)
         claim (running-claim! profile-root contract)
@@ -160,9 +161,10 @@
                      (str prefix ".edn"))
         receipt-path (str prefix ".receipt.json")
         ipld? (= "ipld" (:checkpoint-mode contract))
-        ipld-schema (when ipld?
+        primary? (= "ipld-primary" (:checkpoint-mode contract))
+        ipld-schema (when (or ipld? primary?)
                       (checkpoint/schema (text checkpoint/ontology-path)))
-        ipld-local (when ipld?
+        ipld-local (when (or ipld? primary?)
                      (ipld-store/open! (.join path state-dir "ipld-checkpoints")))]
     (.mkdirSync fs state-dir #js {:recursive true})
     (when (.existsSync fs receipt-path)
@@ -191,14 +193,22 @@
     (let [task (if (:coding? contract) (:task contract)
                    (assoc (:task contract) "id"
                           (str (get-in contract [:task "id"]) "/" execution-id)))
-          prior (if (.existsSync fs state-path)
-                  (reader/read-string (text state-path))
-                  (when ipld?
-                    (restore-ipld-projection! ipld-local ipld-schema state-path
-                                              profile-root contract state-dir
-                                              execution-id task)))
+          primary-before (when primary?
+                           (ipld-session/load! ipld-local ipld-schema state-path))
+          prior (if primary?
+                  (:state primary-before)
+                  (if (.existsSync fs state-path)
+                    (reader/read-string (text state-path))
+                    (when ipld?
+                      (restore-ipld-projection! ipld-local ipld-schema state-path
+                                                profile-root contract state-dir
+                                                execution-id task))))
           before-step (or (:step prior) 0)
           before-receipts (count (:receipts prior))]
+      (when (and primary? (nil? primary-before)
+                 (some #(= "builtin" (get-in % [:execution :source]))
+                       (prior-executions profile-root contract state-dir execution-id)))
+        (fail! :missing-primary-cid-head))
       (when (:awaiting prior) (fail! :effect-in-flight))
       (when (and (contains? #{"semantic" "ipld"} (:checkpoint-mode contract))
                  prior (not (.existsSync fs (str state-path ".semantic-head"))))
@@ -219,8 +229,9 @@
         (.writeFileSync fs receipt-path
                         (str (json (with-ipld-witness
                                      (held-record contract claim execution-id prior)
-                                     (when ipld?
-                                       (scheduler-ipld/witness ipld-local ipld-schema prior))))
+                                     (cond ipld?
+                                           (scheduler-ipld/witness ipld-local ipld-schema prior)
+                                           primary? primary-before)))
                              "\n")
                         #js {:encoding "utf8" :flag "wx"})
         (println (json {:status "held" :executionId execution-id
@@ -230,8 +241,9 @@
         (let [record (with-ipld-witness
                        (scheduler/terminal-record
                         contract claim execution-id prior (task-digest task))
-                       (when ipld?
-                         (scheduler-ipld/witness ipld-local ipld-schema prior)))]
+                       (cond ipld?
+                             (scheduler-ipld/witness ipld-local ipld-schema prior)
+                             primary? primary-before))]
           (.writeFileSync fs receipt-path (str (json record) "\n")
                             #js {:encoding "utf8" :flag "wx"})
           (println (json {:status "terminal" :executionId execution-id
@@ -239,6 +251,7 @@
           (js/process.exit 0)))
       (when (and prior (not= :running (:status prior)))
         (fail! :session-terminal))
+      (when tool-profile (hermes/preflight-coding-profile! tool-profile))
       (.writeFileSync fs attempt-path
                       (str (json {:format (if (:coding? contract)
                                             scheduler/coding-receipt-format
@@ -253,20 +266,27 @@
       (let [stdout (run! "kbb" (cond-> ["--backend" "sci" "bin/mithril-hermes.cljk" "tick"
                                          bot-path task-path state-path (:owner contract)
                                          (str/join "," (sort (:effects contract)))
-                                         (if (contains? #{"semantic" "ipld"}
-                                                        (:checkpoint-mode contract))
-                                           "semantic-execute" "execute")]
+                                         (case (:checkpoint-mode contract)
+                                           ("semantic" "ipld") "semantic-execute"
+                                           "ipld-primary" "ipld-execute"
+                                           "execute")]
                                   tool-profile-path (conj tool-profile-path)))
             result (parse-json (last (remove str/blank? (str/split-lines stdout))))
-            state (reader/read-string (text state-path))
+            primary-after (when primary?
+                            (ipld-session/load! ipld-local ipld-schema state-path))
+            _ (when (and primary?
+                         (not= (:state-cid result) (:stateCid primary-after)))
+                (fail! :primary-result-cid-mismatch))
+            state (if primary? (:state primary-after)
+                      (reader/read-string (text state-path)))
             receipt (last (:receipts state))
             action (get bot/action-by-label (:action result))
             effect (some-> action :effect)
             effect-name (when effect (str (namespace effect) "/" (name effect)))
             outcome (scheduler/verify-tick-outcome
                      contract result state before-step before-receipts effect-name)
-            witness (when ipld?
-                      (scheduler-ipld/record! ipld-local ipld-schema prior state))]
+            witness (cond ipld? (scheduler-ipld/record! ipld-local ipld-schema prior state)
+                          primary? primary-after)]
         (when (= :held outcome)
           (.writeFileSync fs receipt-path
                           (str (json (with-ipld-witness

@@ -37,9 +37,10 @@
                  (contains? #{keys* (conj keys* "checkpointMode")}
                             (set (keys doc))))
     (fail! :invalid-fields))
-  (when-not (and (contains? #{nil "legacy" "semantic" "ipld"}
+  (when-not (and (contains? #{nil "legacy" "semantic" "ipld" "ipld-primary"}
                              (get doc "checkpointMode"))
-                 (or coding? (not= "ipld" (get doc "checkpointMode"))))
+                 (or coding? (not (contains? #{"ipld" "ipld-primary"}
+                                        (get doc "checkpointMode")))))
     (fail! :invalid-checkpoint-mode))
   (when-not (= compiler/context-uri (get doc "@context"))
     (fail! :unpinned-context))
