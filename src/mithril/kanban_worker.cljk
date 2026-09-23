@@ -134,3 +134,16 @@
       :else (fail! :mithril.kanban/step-mismatch
                    "card expected-step does not match the durable checkpoint"
                    {:expected expected :actual actual}))))
+
+(defn replayable-handoff?
+  "True only when a running Kanban card has already committed exactly one
+  semantic step to durable Mithril state.  A later singleton worker may then
+  reclaim the orphaned card and repeat only the Kanban handoff; it must never
+  re-execute the effect."
+  [card state]
+  (and (= "running" (:status card))
+       (some? state)
+       (try
+         (let [properties (parse-card-body (:body card))]
+           (= :handoff (reconcile-step (:expected-step properties) state)))
+         (catch :default _ false))))

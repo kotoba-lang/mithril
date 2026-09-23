@@ -76,6 +76,19 @@
         (throw (ex-info "Hermes did not return a continuation task id"
                         {:mithril/error :mithril.kanban/create-failed})))))
 
+(defn- card-state [state-dir card]
+  (try
+    (let [properties (worker/parse-card-body (:body card))]
+      (load-state (.join path state-dir (str (worker/state-key properties) ".edn"))))
+    (catch :default _ nil)))
+
+(defn- reclaimable-handoff [board state-dir]
+  (let [running (parse-json (hermes! board ["list" "--assignee" "mithril-runtime"
+                                             "--status" "running" "--sort" "created" "--json"]))]
+    (some (fn [card]
+            (when (worker/replayable-handoff? card (card-state state-dir card)) card))
+          running)))
+
 (defn- tick-card! [board profile-path tool-profile-path state-dir owner grants mode card]
   (let [properties (worker/parse-card-body (:body card))
         resolved (resolve-tool-profile tool-profile-path (:workspace properties))
@@ -123,9 +136,15 @@
     (usage!)
     (try
       (.mkdirSync fs state-dir #js {:recursive true})
-      (let [cards (parse-json (hermes! board ["list" "--assignee" "mithril-runtime"
-                                               "--status" "ready" "--sort" "created" "--json"]))]
-        (if-let [card (first cards)]
+      (let [replay-card (reclaimable-handoff board state-dir)
+            _ (when replay-card
+                (hermes! board ["reclaim" (:id replay-card) "--reason"
+                                "Mithril checkpoint committed; replaying orphaned Kanban handoff"]))
+            cards (when-not replay-card
+                    (parse-json (hermes! board ["list" "--assignee" "mithril-runtime"
+                                                 "--status" "ready" "--sort" "created" "--json"])))
+            card (or replay-card (first cards))]
+        (if card
           (do
             ;; A lost claim race is idle work, not a task failure.  Never block
             ;; a card merely because another worker claimed it first.
