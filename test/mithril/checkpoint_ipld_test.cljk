@@ -145,6 +145,39 @@
     (is (= :invalid-ancestry
            (reason #(store/verify-history! get-fn schema (:cid changed)))))))
 
+(deftest history-verifies-each-shared-block-once-and-still-checks-ancestors
+  (let [{:keys [blocks put-fn get-fn]} (fixture)
+        initial (state)
+        base (store/put! put-fn get-fn schema initial [])
+        left (store/put! put-fn get-fn schema
+                         (update initial :facts conj :review/approved) [base])
+        right (store/put! put-fn get-fn schema
+                          (update initial :facts conj :source/verified) [base])
+        merged (store/merge-facts! put-fn get-fn schema base left right)
+        reads (atom {})
+        counted-get (fn [cid]
+                      (swap! reads update cid (fnil inc 0))
+                      (get-fn cid))]
+    (is (= 4 (:blocks (store/verify-history! counted-get schema merged))))
+    (is (= {base 1 left 1 right 1 merged 1} @reads))
+    (swap! blocks assoc base (get @blocks left))
+    (is (= :ipld/cid-mismatch
+           (reason #(store/verify-history! get-fn schema merged))))))
+
+(deftest history-limit-rejects-the-first-block-beyond-256
+  (let [ids (mapv #(str "synthetic-cid-" %) (range 257))
+        initial (state)
+        rows (into {}
+                   (map-indexed (fn [index id]
+                                  [id {:state initial
+                                       :parents (if (zero? index)
+                                                  [] [(nth ids (dec index))])}])
+                                ids))]
+    (with-redefs [store/read! (fn [_ _ id] (get rows id))]
+      (is (= 256 (:blocks (store/verify-history! nil schema (nth ids 255)))))
+      (is (= :ancestry-limit
+             (reason #(store/verify-history! nil schema (nth ids 256))))))))
+
 (deftest legacy-run-task-is-derived-without-rewriting-the-saved-state
   (let [{:keys [put-fn get-fn]} (fixture)
         legacy (-> (state)

@@ -442,6 +442,17 @@ optimization. This remains a fixed proposer and Mithril `compile-web` canary,
 not Jev-authored code, real Amu compilation, distributed ref semantics or
 fleet-wide profile parity.
 
+A read-only profile of that same 14-block store measured 2.68 seconds for
+one head read and 46.55 seconds for whole-history verification. The verifier
+was then changed to fully read and ontology-validate each unique CID once,
+including shared ancestors, instead of rereading every parent before visiting
+it. The same whole-history command took 25.12 seconds and returned the
+identical verification result (one local before/after measurement, about
+1.85× faster). A negative test still rejects corruption of a shared ancestor.
+This is an offline verification improvement, not a post-change Hermes tick
+or fleet latency qualification; the complete history is still checked on
+every scheduler occurrence.
+
 The final state from the isolated seven-effect Hermes builtin run was also
 read from its historical v4 CID, emitted as an in-memory v5 block, and read
 back with exact state equality. That v5 block was 97,941 bytes (one local
