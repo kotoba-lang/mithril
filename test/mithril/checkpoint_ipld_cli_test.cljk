@@ -1,0 +1,53 @@
+(ns mithril.checkpoint-ipld-cli-test
+  (:require [cljs.test :refer [deftest is]]
+            [mithril.bot :as bot]
+            [mithril.checkpoint :as checkpoint]
+            [mithril.execution :as execution]))
+
+(def fs (js/require "node:fs"))
+(def path (js/require "node:path"))
+(def os (js/require "node:os"))
+(def child (js/require "node:child_process"))
+(defn- read-text [file] (.readFileSync fs file "utf8"))
+(defn- invoke [& args]
+  (.spawnSync child "kbb"
+              (clj->js (into ["--backend" "sci" "bin/mithril-checkpoint-ipld.cljk"] args))
+              #js {:encoding "utf8" :cwd (.cwd js/process)}))
+(defn- output [run] (str (.-stdout run) (.-stderr run)))
+
+(deftest cli-reopens-private-ipld-graph-and-refuses-mismatched-input
+  (let [directory (.mkdtempSync fs (.join path (.tmpdir os) "mithril-ipld-cli-"))]
+    (try
+      (let [artifact (bot/compile-text "examples/governed-coding-bot.mith"
+                                       (read-text "examples/governed-coding-bot.mith"))
+            state (bot/start-run artifact
+                                 {:id "cli-ipld" :workspace "/tmp" :goal "branch facts"}
+                                 "cli-ipld" 1000)
+            source (checkpoint/form-text (checkpoint/projection state nil))
+            source-file (.join path directory "state.mith")
+            state-file (.join path directory "state.edn")]
+        (.writeFileSync fs source-file (str source "\n"))
+        (.writeFileSync fs state-file (execution/canonical-edn-text state))
+        (let [imported (invoke "import" source-file state-file directory "base")]
+          (is (= 0 (.-status imported)) (output imported))
+          (is (re-find #"\"status\":\"imported\"" (output imported))))
+        (is (= 0 (.-status (invoke "fork" directory "base" "left"))))
+        (is (= 0 (.-status (invoke "fork" directory "base" "right"))))
+        (is (= 0 (.-status (invoke "assert" directory "left" "review/approved"))))
+        (is (= 0 (.-status (invoke "assert" directory "right" "source/verified"))))
+        (is (= 0 (.-status (invoke "merge" directory "base" "left" "right" "merged"))))
+        (let [verified (invoke "verify" directory "merged")
+              shown (invoke "show" directory "merged")]
+          (is (= 0 (.-status verified)) (output verified))
+          (is (re-find #"\"blocks\":4" (output verified)))
+          (is (= 0 (.-status shown)) (output shown))
+          (is (re-find #"review/approved" (output shown)))
+          (is (re-find #"source/verified" (output shown))))
+        (.writeFileSync fs source-file "(wrong-source)\n")
+        (let [rejected (invoke "import" source-file state-file directory "other")]
+          (is (= 1 (.-status rejected)))
+          (is (re-find #"REFUSE\tsource-state-mismatch" (output rejected))))
+        (let [duplicate (invoke "fork" directory "base" "left")]
+          (is (= 1 (.-status duplicate)))
+          (is (re-find #"REFUSE\tref-exists" (output duplicate)))))
+      (finally (.rmSync fs directory #js {:recursive true :force true})))))

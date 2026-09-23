@@ -1,0 +1,99 @@
+(ns mithril.checkpoint-ipld-test
+  (:require [cljs.test :refer [deftest is]]
+            [ipld.core :as ipld]
+            [mithril.bot :as bot]
+            [mithril.checkpoint :as checkpoint]
+            [mithril.checkpoint-ipld :as store]))
+
+(def fs (js/require "node:fs"))
+(def schema (checkpoint/schema (.readFileSync fs checkpoint/ontology-path "utf8")))
+(def artifact (bot/compile-text "examples/governed-coding-bot.mith"
+                                (.readFileSync fs "examples/governed-coding-bot.mith" "utf8")))
+(defn state [] (bot/start-run artifact {:id "ipld-test" :workspace "/tmp"
+                                       :goal "merge semantic facts"}
+                               "ipld-test" 1000))
+(defn fixture []
+  (let [blocks (atom {})
+        put-fn (fn [cid bytes] (swap! blocks assoc cid bytes))
+        get-fn (fn [cid] (get @blocks cid))]
+    {:blocks blocks :put-fn put-fn :get-fn get-fn}))
+(defn reason [f]
+  (try (f) nil (catch :default e (or (:reason (ex-data e)) (:type (ex-data e))))))
+
+(deftest dag-cbor-checkpoints-use-real-verified-links-and-canonical-state
+  (let [{:keys [blocks put-fn get-fn]} (fixture)
+        s0 (state)
+        base (store/put! put-fn get-fn schema s0 [])
+        same (store/put! put-fn get-fn schema (into {} (reverse (seq s0))) [])
+        left (store/put! put-fn get-fn schema
+                         (update s0 :facts conj :review/approved) [base])
+        node (ipld/get-node get-fn left)
+        saved (store/read! get-fn schema left)]
+    (is (= base same) "map insertion order cannot change semantic block identity")
+    (is (= [base] (:parents saved)))
+    (is (= [base] (ipld/links node)) "parents are IPLD tag-42 links")
+    (is (contains? (get-in saved [:state :facts]) :review/approved))
+    (is (= left (:cid saved)))
+    (is (= :ipld/cid-mismatch
+           (reason #(store/read! (fn [id] (if (= id left) (get @blocks base)
+                                               (get @blocks id))) schema left))))
+    (is (= :missing-block
+           (reason #(store/read! (constantly nil) schema left))))))
+
+(deftest disjoint-facts-merge-but-execution-and-removal-do-not
+  (let [{:keys [put-fn get-fn]} (fixture)
+        s0 (state)
+        base (store/put! put-fn get-fn schema s0 [])
+        left (store/put! put-fn get-fn schema
+                         (update s0 :facts conj :review/approved) [base])
+        right (store/put! put-fn get-fn schema
+                          (update s0 :facts conj :source/verified) [base])
+        merged (store/merge-facts! put-fn get-fn schema base left right)
+        result (store/read! get-fn schema merged)
+        changed-step (store/put! put-fn get-fn schema
+                                 (assoc s0 :step 1) [base])
+        removed (store/put! put-fn get-fn schema
+                            (update s0 :facts disj :semantic/prefix-valid) [base])]
+    (is (= (vec (sort [left right])) (:parents result)))
+    (is (= (conj (:facts s0) :review/approved :source/verified)
+           (get-in result [:state :facts])))
+    (is (= merged (store/merge-facts! put-fn get-fn schema base right left))
+        "branch order must not alter a merge CID")
+    (is (= :non-additive-or-effect-conflict
+           (reason #(store/merge-facts! put-fn get-fn schema base left changed-step))))
+    (is (= :non-additive-or-effect-conflict
+           (reason #(store/merge-facts! put-fn get-fn schema base left removed))))
+    (is (= :not-common-ancestor
+           (reason #(store/merge-facts! put-fn get-fn schema left base right))))))
+
+(deftest readdressed-tampering-is-rejected-by-semantic-validation
+  (let [{:keys [blocks put-fn get-fn]} (fixture)
+        id (store/put! put-fn get-fn schema (state) [])
+        node (ipld/get-node get-fn id)
+        changed (ipld/node->block (assoc node "source" "(mithril/bot-checkpoint)"))]
+    (put-fn (:cid changed) (:bytes changed))
+    (is (= :noncanonical-checkpoint
+           (reason #(store/read! get-fn schema (:cid changed)))))
+    (is (= :invalid-parents
+           (reason #(store/block schema (state) [id id]))))
+    (is (= :mithril.checkpoint/shacl-violation
+           (try (store/block schema (assoc (state) :step "wrong") []) nil
+                (catch :default e (:mithril/error (ex-data e))))))
+    (is (contains? @blocks id))))
+
+(deftest a-valid-readdressed-block-cannot-point-to-another-run
+  (let [{:keys [put-fn get-fn]} (fixture)
+        first-run (state)
+        other-run (bot/start-run artifact {:id "other-task" :workspace "/tmp"
+                                           :goal "another run"}
+                                 "ipld-test" 1000)
+        base (store/put! put-fn get-fn schema first-run [])
+        child (store/put! put-fn get-fn schema
+                          (update first-run :facts conj :review/approved) [base])
+        foreign (store/put! put-fn get-fn schema other-run [])
+        changed (ipld/node->block
+                 (assoc (ipld/get-node get-fn child) "parents" [(ipld/link foreign)]))]
+    (put-fn (:cid changed) (:bytes changed))
+    (is (= [foreign] (:parents (store/read! get-fn schema (:cid changed)))))
+    (is (= :invalid-ancestry
+           (reason #(store/verify-history! get-fn schema (:cid changed)))))))

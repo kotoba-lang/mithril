@@ -1,0 +1,136 @@
+(ns mithril.checkpoint-ipld-fs
+  "Private local block/ref adapter for the verified Mithril IPLD value layer.
+  Ref updates are serialized and atomic on one filesystem. This does not
+  claim distributed CAS, publication, or crash-durable fsync semantics."
+  (:require [clojure.string :as str]
+            [ipld.core :as ipld]
+            [mithril.checkpoint-ipld :as checkpoint-ipld]))
+
+(def fs (js/require "node:fs"))
+(def path (js/require "node:path"))
+
+(defn- refuse! [reason]
+  (throw (ex-info "Mithril local IPLD store refused"
+                  {:mithril/error :mithril.checkpoint-ipld-fs/refused
+                   :reason reason})))
+
+(defn open! [directory]
+  (when-not (and (string? directory) (.isAbsolute path directory))
+    (refuse! :invalid-directory))
+  (.mkdirSync fs (.join path directory "blocks") #js {:recursive true :mode 448})
+  (.mkdirSync fs (.join path directory "refs") #js {:recursive true :mode 448})
+  {:directory directory})
+
+(defn- block-path [store id]
+  (when-not (and (string? id) (re-matches #"b[a-z2-7]+" id))
+    (refuse! :invalid-cid))
+  (.join path (:directory store) "blocks" id))
+
+(defn- ref-path [store name]
+  (when-not (and (string? name) (re-matches #"[A-Za-z0-9][A-Za-z0-9._-]*" name))
+    (refuse! :invalid-ref-name))
+  (.join path (:directory store) "refs" name))
+
+(defn get-block [store id]
+  (let [file (block-path store id)]
+    (when (.existsSync fs file) (.readFileSync fs file))))
+
+(defn put-block! [store id bytes]
+  (when-not (= id (ipld/cid bytes)) (refuse! :block-cid-mismatch))
+  (let [file (block-path store id)]
+    (if (.existsSync fs file)
+      (let [old (ipld/get-verified-block #(get-block store %) id)]
+        (when-not (.equals old bytes)
+          (refuse! :block-conflict)))
+      (try (.writeFileSync fs file bytes #js {:flag "wx" :mode 384})
+           (catch :default error
+             (if (= "EEXIST" (.-code error))
+               (let [old (ipld/get-verified-block #(get-block store %) id)]
+                 (when-not (.equals old bytes)
+                   (refuse! :block-conflict)))
+               (throw error)))))
+    id))
+
+(defn- with-write-lock [store f]
+  (let [file (.join path (:directory store) ".write.lock")
+        fd (try (.openSync fs file "wx" 384)
+                (catch :default _ (refuse! :store-locked)))]
+    (try
+      (.writeFileSync fs fd (str (.-pid js/process)) "utf8")
+      (f)
+      (finally
+        (.closeSync fs fd)
+        (.unlinkSync fs file)))))
+
+(defn read-ref [store name]
+  (let [file (ref-path store name)]
+    (when-not (.existsSync fs file) (refuse! :missing-ref))
+    (let [id (str/trim (.readFileSync fs file "utf8"))]
+      (when-not (re-matches #"b[a-z2-7]+" id) (refuse! :invalid-ref))
+      id)))
+
+(defn- create-ref-under-lock! [store name id]
+  (when-not (re-matches #"b[a-z2-7]+" (str id)) (refuse! :invalid-cid))
+  (try (.writeFileSync fs (ref-path store name) (str id "\n")
+                       #js {:flag "wx" :mode 384})
+       (catch :default error
+         (if (= "EEXIST" (.-code error)) (refuse! :ref-exists)
+             (throw error))))
+  id)
+
+(defn- advance-ref-under-lock! [store name expected next-id]
+  (when-not (= expected (read-ref store name)) (refuse! :ref-conflict))
+  (let [file (ref-path store name)
+        temporary (str file ".tmp-" (.-pid js/process) "-" (.now js/Date))]
+    (.writeFileSync fs temporary (str next-id "\n")
+                    #js {:flag "wx" :mode 384})
+    (.renameSync fs temporary file))
+  next-id)
+
+(defn import-state! [store schema name state]
+  (with-write-lock store
+    (fn []
+      (when (.existsSync fs (ref-path store name)) (refuse! :ref-exists))
+      (let [id (checkpoint-ipld/put!
+                #(put-block! store %1 %2) #(get-block store %) schema state [])]
+        (create-ref-under-lock! store name id)))))
+
+(defn fork-ref! [store source name]
+  (with-write-lock store
+    (fn [] (create-ref-under-lock! store name (read-ref store source)))))
+
+(defn advance-ref! [store schema name expected next-id]
+  (with-write-lock store
+    (fn []
+      (let [saved (checkpoint-ipld/read! #(get-block store %) schema next-id)]
+        (when-not (or (= expected next-id)
+                      (some #{expected} (:parents saved)))
+          (refuse! :noncausal-ref-advance))
+        (advance-ref-under-lock! store name expected next-id)))))
+
+(defn advance-fact! [store schema name fact]
+  (when-not (keyword? fact) (refuse! :invalid-fact))
+  (with-write-lock store
+    (fn []
+      (let [head (read-ref store name)
+            state (:state (checkpoint-ipld/read! #(get-block store %) schema head))]
+        (when-not (and (= :running (:status state)) (nil? (:awaiting state)))
+          (refuse! :effect-or-terminal-state))
+        (if (contains? (:facts state) fact)
+          head
+          (let [next-id (checkpoint-ipld/put!
+                         #(put-block! store %1 %2) #(get-block store %) schema
+                         (update state :facts conj fact) [head])]
+            (advance-ref-under-lock! store name head next-id)))))))
+
+(defn merge-refs! [store schema base left right output]
+  (with-write-lock store
+    (fn []
+      (when (.existsSync fs (ref-path store output)) (refuse! :ref-exists))
+      (let [id (checkpoint-ipld/merge-facts!
+                #(put-block! store %1 %2) #(get-block store %) schema
+                (read-ref store base) (read-ref store left) (read-ref store right))]
+        (create-ref-under-lock! store output id)))))
+
+(defn verify-ref! [store schema name]
+  (checkpoint-ipld/verify-history! #(get-block store %) schema (read-ref store name)))
