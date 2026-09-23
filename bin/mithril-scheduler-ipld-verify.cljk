@@ -28,9 +28,7 @@
                    (re-matches #"[A-Za-z0-9_-]+" profile)
                    (re-matches #"[0-9a-f]{12}" job-id))
       (refuse! :invalid-arguments))
-    (let [state-path (.join path state-dir
-                            (str profile "-" job-id ".session.edn"))
-          _ (when-not (.existsSync fs db)
+    (let [_ (when-not (.existsSync fs db)
               (refuse! :missing-input))
           schema (checkpoint/schema (text checkpoint/ontology-path))
           store (local/open! (.join path state-dir "ipld-checkpoints"))
@@ -52,6 +50,11 @@
                      executions)]
       (when-not (seq executions) (refuse! :no-executions))
       (let [primary? (= ["primary"] extra)
+            state-path (.join path state-dir
+                              (if primary?
+                                (scheduler-ipld/primary-state-basename
+                                 profile job-id rows)
+                                (str profile "-" job-id ".session.edn")))
             {:keys [state verification]}
             (if primary?
               (let [result (scheduler-ipld/verify-primary-occurrences!

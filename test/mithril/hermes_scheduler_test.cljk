@@ -65,8 +65,11 @@
          (coding-reason (assoc coding-contract "checkpointMode" "unsafe"))))
   (is (= :invalid-checkpoint-mode
          (reason (assoc contract "checkpointMode" "ipld"))))
-  (is (= :invalid-checkpoint-mode
-         (reason (assoc contract "checkpointMode" "ipld-primary"))))
+  (is (= "ipld-primary"
+         (:checkpoint-mode
+          (scheduler/compile-document "primary.mith"
+                                      (assoc contract "checkpointMode" "ipld-primary")
+                                      artifact))))
   (is (= :invalid-fields (coding-reason (dissoc coding-contract "toolProfileDigest"))))
   (is (= :invalid-tool-profile-digest
          (coding-reason (assoc coding-contract "toolProfileDigest" "bad"))))
@@ -99,6 +102,20 @@
   (is (= :effect-or-task-denied (reason (assoc contract "grants" ["workspace/read" "workspace/read" "agent/stop"]))))
   (is (= :effect-or-task-denied (reason (assoc contract "grants" ["workspace/read" "workspace/write"]))))
   (is (= :invalid-hermes-binding (reason (assoc contract "jobId" "../other")))))
+
+(deftest readonly-primary-requires-one-scheduler-occurrence
+  (let [primary (scheduler/compile-document
+                 "primary.mith" (assoc contract "checkpointMode" "ipld-primary")
+                 artifact)
+        legacy (scheduler/compile-document "legacy.mith" contract artifact)]
+    (is (true? (scheduler/admit-job-repeat! primary {:repeat {:times 1}})))
+    (is (= :readonly-primary-must-be-one-shot
+           (try (scheduler/admit-job-repeat! primary {:repeat {:times 2}})
+                nil (catch :default error (:reason (ex-data error))))))
+    (is (= :readonly-primary-must-be-one-shot
+           (try (scheduler/admit-job-repeat! primary {})
+                nil (catch :default error (:reason (ex-data error))))))
+    (is (true? (scheduler/admit-job-repeat! legacy {})))))
 
 (deftest scheduler-contract-can-use-the-same-mithril-form-surface
   (let [source (str "(mithril/hermes-bpmn-scheduler-contract "
