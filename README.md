@@ -413,10 +413,34 @@ non-legacy omission is rejected.
 The verified seven-effect v5 Hermes final state was read under its historical
 CID and emitted as an in-memory v6 block: exact state equality, 93 domain
 quads, seven SPARQL receipt rows, eight fact rows, and a 109,082-byte block
-(one local measurement). This is a v6 value-layer test, not yet a v6 builtin
-scheduler run. `domainGraphDigest` is semantic RDF identity; the block's CID
-is causal storage identity. Neither by itself supplies distributed mutable
-refs, general branch merge, or crash-durable persistence.
+(one local measurement). That first check covered only the v6 value layer;
+the separate scheduler run is recorded below. `domainGraphDigest` is semantic
+RDF identity; the block's CID is causal storage identity. Neither by itself
+supplies distributed mutable refs, general branch merge, or crash-durable
+persistence.
+
+An isolated v6 Hermes `source=builtin` coding job `ba648cbf4be7` then ran
+on 2026-09-24 with the v6 writer in the actual scheduler path. Its nine
+occurrences all completed: seven governed effects (read, fixed patch
+proposal, apply, Mithril `compile-web`, response test, Git status, stop)
+followed by two no-effect terminal deliveries. The primary verifier matched
+all nine Hermes execution rows to scheduler receipts and 14 linked v6
+request/result blocks, with no direct executions, and reported
+`projection=matched`. Before the ninth delivery, the EDN projection was
+withheld; the scheduler reconstructed a semantically equal value from the
+verified CID head without another effect or block. The final CID was
+`bafyreib5h3e3eqpp2wsgvtbyzcjk443f3y3z4q7so6f7nad3bbtolgbe3i`.
+Independent checkpoint verification returned v6 format and
+`domainGraphDigest=sha256:1694eecd60656226fdcf7b1c1b81df7a0f6d42c2e0f531fff88a3ce33d394061`;
+the emitted domain graph had 23 typed nodes, including seven receipt and
+eight fact nodes. The edited `.mith` app returned the expected HTTP 200
+body. The repeat-limited job ended disabled; the live fleet was not changed.
+The seven effect occurrence durations in this one run were 16.5, 39.8,
+54.9, 76.6, 96.2, 120.4 and 138.5 seconds, respectively, so v6 currently
+does not establish a speedup; growing-chain verification needs profiling and
+optimization. This remains a fixed proposer and Mithril `compile-web` canary,
+not Jev-authored code, real Amu compilation, distributed ref semantics or
+fleet-wide profile parity.
 
 The final state from the isolated seven-effect Hermes builtin run was also
 read from its historical v4 CID, emitted as an in-memory v5 block, and read
