@@ -4,6 +4,8 @@
             [mithril.typed-proposer :as proposer]))
 
 (def cp (js/require "node:child_process"))
+(def os (js/require "node:os"))
+(def path (js/require "node:path"))
 
 (defn- refuse! [reason]
   (throw (ex-info "OpenRouter proposal refused"
@@ -13,11 +15,13 @@
   (or (let [value (.-OPENROUTER_API_KEY js/process.env)]
         (when-not (str/blank? (str value)) value))
       (try
-        (str/trim
-         (.execFileSync cp "security"
-                        #js ["find-generic-password" "-s" "gftd.openrouter"
-                             "-a" "OPENROUTER_API_KEY" "-w"]
-                        #js {:encoding "utf8" :stdio #js ["ignore" "pipe" "ignore"]}))
+        (let [login-keychain (.join path (.-homedir (.userInfo os))
+                                    "Library" "Keychains" "login.keychain-db")]
+          (str/trim
+           (.execFileSync cp "security"
+                          #js ["find-generic-password" "-s" "gftd.openrouter"
+                               "-a" "OPENROUTER_API_KEY" "-w" login-keychain]
+                          #js {:encoding "utf8" :stdio #js ["ignore" "pipe" "ignore"]})))
         (catch :default _ nil))))
 
 (defn- request! [model key messages]

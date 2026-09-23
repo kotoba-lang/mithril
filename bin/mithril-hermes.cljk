@@ -14,6 +14,7 @@
 (def fs (js/require "node:fs"))
 (def path (js/require "node:path"))
 (def cp (js/require "node:child_process"))
+(def os (js/require "node:os"))
 
 (defn- usage! []
   (println "usage: mithril-hermes tick <profile.mith> <task.json> <state.edn> <owner> <grants.csv> <shadow|execute|semantic-execute|ipld-execute> [coding-tools.json] [jev]")
@@ -31,11 +32,13 @@
   (or (let [value (.-OPENROUTER_API_KEY js/process.env)]
         (when-not (str/blank? (str value)) value))
       (try
-        (str/trim
-         (.execFileSync cp "security"
-                        #js ["find-generic-password" "-s" "gftd.openrouter"
-                             "-a" "OPENROUTER_API_KEY" "-w"]
-                        #js {:encoding "utf8" :stdio #js ["ignore" "pipe" "ignore"]}))
+        (let [login-keychain (.join path (.-homedir (.userInfo os))
+                                    "Library" "Keychains" "login.keychain-db")]
+          (str/trim
+           (.execFileSync cp "security"
+                          #js ["find-generic-password" "-s" "gftd.openrouter"
+                               "-a" "OPENROUTER_API_KEY" "-w" login-keychain]
+                          #js {:encoding "utf8" :stdio #js ["ignore" "pipe" "ignore"]})))
         (catch :default _ nil))))
 
 (defn- keyword-string [value]
