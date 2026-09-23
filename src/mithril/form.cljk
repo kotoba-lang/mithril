@@ -20,6 +20,7 @@
    'mithril/bot-profile "BotProfile"
    'mithril/bot-checkpoint "BotCheckpoint"
    'mithril/growth-profile "GrowthProfile"
+   'mithril/growth-decision "GrowthDecision"
    'mithril/hermes-profile "HermesProfile"
    'mithril/hermes-bpmn-scheduler-contract "HermesBpmnSchedulerContract"
    'mithril/hermes-bpmn-coding-scheduler-contract "HermesBpmnCodingSchedulerContract"
@@ -89,6 +90,15 @@
    :state-digest "stateDigest"
    :parent-digest "parentDigest"
    :profile-digest "profileDigest"
+   :profile-graph-digest "profileGraphDigest"
+   :definition-digest "definitionDigest"
+   :observation-digest "observationDigest"
+   :model-result-digest "modelResultDigest"
+   :receipt-digest "receiptDigest"
+   :selected-action "selectedAction"
+   :model-id "modelId"
+   :request-id "requestId"
+   :parent-cid "parentCid"
    :bot-profile-digest "botProfileDigest"
    :tool-profile-digest "toolProfileDigest"
    :checkpoint-mode "checkpointMode"
@@ -162,7 +172,9 @@
         body (fields (rest form))]
     (cond
       (contains? top-level-tags tag)
-      (assoc body "@context" "https://mithril.fund/context/v1"
+      (assoc body "@context" (if (= tag 'mithril/growth-decision)
+                                "https://mithril.fund/context/growth-decision/v1"
+                                "https://mithril.fund/context/v1")
                   "@type" (get top-level-tags tag))
 
       (= 'mithril/task tag)

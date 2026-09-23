@@ -1,0 +1,173 @@
+(ns mithril.growth-semantic
+  "Versioned RDF/OWL/SHACL projection of one admitted growth decision. The
+  v1 profile context is untouched; this decision context binds every field
+  used for the semantic graph identity. SHACL support is the declared
+  count/datatype subset implemented by mithril.execution."
+  (:require [clojure.string :as str]
+            [json-ld-api.core :as jsonld]
+            [json-ld-api.to-rdf :as to-rdf]
+            [rdf-canon.core :as rdf-canon]
+            [mithril.compiler :as compiler]
+            [mithril.execution :as execution]
+            [mithril.form :as form]
+            [oak.semantic :as oak]))
+
+(def ontology-path "ontology/growth-decision-v1.mith")
+(def context-uri "https://mithril.fund/context/growth-decision/v1")
+(def base "https://mithril.fund/ns/v1#")
+(def decision-class (str base "GrowthDecision"))
+(def super-class (str base "SemanticDecision"))
+(def shape-id (str base "GrowthDecisionShape"))
+(def context-document
+  {"@context"
+   {"mith" base
+    "xsd" "http://www.w3.org/2001/XMLSchema#"
+    "GrowthDecision" (str base "GrowthDecision")
+    "profileGraphDigest" (str base "profileGraphDigest")
+    "definitionDigest" (str base "definitionDigest")
+    "observationDigest" (str base "observationDigest")
+    "modelResultDigest" (str base "modelResultDigest")
+    "receiptDigest" (str base "receiptDigest")
+    "selectedAction" (str base "selectedAction")
+    "confidence" {"@id" (str base "confidence")
+                  "@type" "http://www.w3.org/2001/XMLSchema#integer"}
+    "authority" (str base "authority")
+    "modelId" (str base "modelId")
+    "requestId" (str base "requestId")
+    "parentCid" (str base "parentCid")}})
+
+(def fields
+  {"profileGraphDigest" :profile-graph-digest
+   "definitionDigest" :definition-digest
+   "observationDigest" :observation-digest
+   "modelResultDigest" :model-result-digest
+   "receiptDigest" :receipt-digest
+   "selectedAction" :selected-action
+   "confidence" :confidence
+   "authority" :authority
+   "modelId" :model-id
+   "requestId" :request-id
+   "parentCid" :parent-cid})
+
+(defn- refuse! [reason]
+  (throw (ex-info "Mithril growth semantic projection refused"
+                  {:mithril/error :mithril.growth-semantic/refused
+                   :reason reason})))
+
+(defn schema [source]
+  (let [artifact (compiler/compile-ontology-text ontology-path source)
+        graph (get-in artifact [:rdf-dataset "@graph"])
+        class-node (first (filter #(= decision-class (get % "@id")) graph))
+        shape-node (first (filter #(= shape-id (get % "@id")) graph))
+        properties (mapv (fn [p]
+                           (let [label (some-> (get p "propertyPath")
+                                               (str/replace base ""))
+                                 dtype (get p "datatype")]
+                             (when-not (and (contains? fields label)
+                                            (contains? #{"http://www.w3.org/2001/XMLSchema#string"
+                                                         "http://www.w3.org/2001/XMLSchema#integer"}
+                                                       dtype)
+                                            (integer? (get p "minCount"))
+                                            (integer? (get p "maxCount"))
+                                            (<= 0 (get p "minCount") (get p "maxCount") 1))
+                               (refuse! :unsupported-shape))
+                             {:path (get fields label)
+                              :datatype (if (str/ends-with? dtype "#integer")
+                                          :integer :string)
+                              :min-count (get p "minCount")
+                              :max-count (get p "maxCount")}))
+                         (get shape-node "property"))
+        required (disj (set (vals fields)) :parent-cid)
+        expected-properties (into {}
+                                  (for [field (vals fields)]
+                                    [field {:datatype (if (= field :confidence)
+                                                        :integer :string)
+                                            :min-count (if (= field :parent-cid) 0 1)
+                                            :max-count 1}]))]
+    (when-not (and (= super-class (get class-node "subClassOf"))
+                   (= decision-class (get shape-node "targetClass"))
+                   (= (set (vals fields)) (set (map :path properties)))
+                   (= (count fields) (count properties))
+                   (= required (set (map :path (filter #(= 1 (:min-count %)) properties))))
+                   (= expected-properties
+                      (into {} (map (fn [{:keys [path datatype min-count max-count]}]
+                                      [path {:datatype datatype
+                                             :min-count min-count
+                                             :max-count max-count}])
+                                    properties))))
+      (refuse! :invalid-ontology))
+    {:ontology-digest (:graph-digest artifact)
+     :ontology-source source
+     :shape {:shacl/type :node-shape :property properties}}))
+
+(defn projection [profile-digest definition-digest observation model-result receipt parent-cid]
+  (let [receipt-digest (execution/digest receipt)
+        data (cond-> {:id (str "https://mithril.fund/id/growth-decision/"
+                               (subs receipt-digest 7))
+                      :profile-graph-digest profile-digest
+                      :definition-digest definition-digest
+                      :observation-digest (execution/digest observation)
+                      :model-result-digest (execution/digest model-result)
+                      :receipt-digest receipt-digest
+                      :selected-action (get-in receipt [:action :id])
+                      :confidence (:confidence receipt)
+                      :authority (:authority receipt)
+                      :model-id (get-in receipt [:model :model])
+                      :request-id (get-in receipt [:audit :request-id])}
+               parent-cid (assoc :parent-cid parent-cid))]
+    (when-not (and (= "propose-only" (:authority data))
+                   (string? (:selected-action data))
+                   (str/starts-with? (:selected-action data)
+                                     "https://mithril.fund/id/action/")
+                   (integer? (:confidence data))
+                   (<= 0 (:confidence data) 10000))
+      (refuse! :invalid-decision))
+    data))
+
+(defn form-text [data]
+  (str "(mithril/growth-decision "
+       (str/join " " (mapcat (fn [[k v]] [(str k) (pr-str v)])
+                           (sort-by (comp str key) data)))
+       ")"))
+
+(defn- graph-digest! [document]
+  (when-not (= context-uri (get document "@context"))
+    (refuse! :invalid-context))
+  (let [expanded (jsonld/expand document {:contexts {context-uri context-document}})
+        node (first expanded)
+        expected (set (concat ["@id" "@type"]
+                              (for [field (keys fields)
+                                    :when (contains? document field)]
+                                (str base field))))]
+    (when-not (and (= 1 (count expanded)) (= expected (set (keys node))))
+      (refuse! :rdf-field-loss))
+    (str "sha256:" (rdf-canon/canonical-hash (to-rdf/to-rdf expanded)))))
+
+(defn build [schema profile-digest definition-digest observation model-result receipt parent-cid]
+  (let [data (projection profile-digest definition-digest observation
+                         model-result receipt parent-cid)
+        shape-report (execution/validate-shape (:shape schema) data)
+        triples #{(oak/triple :mithril/GrowthDecision :rdfs/subClassOf
+                             :mithril/SemanticDecision)
+                  (oak/triple :mithril/decision :rdf/type :mithril/GrowthDecision)}
+        inferred (oak/materialize :owl2-rl triples)
+        rows (oak/execute :owl2-rl
+                          [:sparql/project [:?node]
+                           [:sparql/bgp [:?node :rdf/type :mithril/SemanticDecision]]]
+                          triples)]
+    (when-not (:valid? shape-report)
+      (throw (ex-info "growth decision violates declared SHACL shape"
+                      {:mithril/error :mithril.growth-semantic/shacl-violation
+                       :report shape-report})))
+    (when-not (and (contains? inferred
+                             (oak/triple :mithril/decision :rdf/type
+                                         :mithril/SemanticDecision))
+                   (seq rows))
+      (refuse! :owl-entailment-failed))
+    (let [source (form-text data)
+          document (form/parse source)]
+      {:ontology-digest (:ontology-digest schema)
+       :graph-digest (graph-digest! document)
+       :source source
+       :document document
+       :shape-report shape-report})))

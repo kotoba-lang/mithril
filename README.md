@@ -282,7 +282,15 @@ decisions link to the preceding CID; duplicate observation IDs, untraced
 legacy tails, receipt mutation, policy drift, and broken ancestry are refused.
 The traced receipt also exposes `definitionDigest` for the complete checked
 profile; its older `profile-digest` remains only the v1 RDF projection.
-The verifier replays Mithril's decision admission from the saved inputs:
+Trace v2 additionally projects the admitted decision through
+[`growth-decision-v1.mith`](ontology/growth-decision-v1.mith) into a pinned
+[`JSON-LD context`](resources/context-growth-decision-v1.jsonld). It verifies
+the declared SHACL count/datatype constraints, an OWL 2 RL superclass
+entailment, a SPARQL query, and an RDF Dataset canonical hash. The trace CID
+binds the ontology source, semantic `.mith` source, and graph digest; missing
+JSON-LD term mappings are rejected. This is the declared subset of OWL/SHACL,
+not general OWL 2 or SHACL support. The verifier replays Mithril's decision
+admission and semantic projection from the saved inputs:
 
 ```sh
 kbb --backend sci bin/mithril-growth.cljk decide-traced \
@@ -294,13 +302,24 @@ kbb --backend sci bin/mithril-growth.cljk verify-trace \
 ```
 
 A real OpenRouter Jev 1.13 call with `test/fixtures/growth-trace-smoke.json` on
-2026-09-23 selected `hold-for-evidence` at 9,600 basis points, wrote one CID
-block, and passed a fresh-process `verify-trace` (1 receipt/1 block). This
+2026-09-23 selected `hold-for-evidence` at 9,400 basis points, wrote one v2 CID
+block, and passed a fresh-process `verify-trace` (1 receipt/1 semantic block).
+The older v1 trace from the same day still verifies as one legacy block. This
 proves deterministic replay of the recorded result; it does not prove that
 the observation was true, that the provider signed its response, that an
 external proposal effect occurred, or that the entire Hermes job is equivalent.
 The local JSONL/block append is serialized among cooperating writers but has
 no distributed CAS or crash-durable fsync guarantee.
+
+An isolated 2026-09-23 migration audit of the current Hermes fleet found 286
+profiles, 316 jobs, and 296 enabled jobs. Of the enabled jobs, 30 were
+`shadow-ready`, 221 required explicit BPMN contracts, 26 were unhealthy, 16
+had active executions, and 3 were unobserved. The coding admission gate found
+only 1 ready job out of 127 coding candidates (82 dirty workspaces, 34
+unregistered workspaces, 10 non-Git workspaces). The standing Mithril fleet
+manifest had drifted, so this audit compiled a fresh copy in an isolated
+temporary directory without replacing the standing manifest or enabling jobs.
+These are admission counts, not behavioral parity or a replacement claim.
 
 ## Published Mithril code and libraries
 

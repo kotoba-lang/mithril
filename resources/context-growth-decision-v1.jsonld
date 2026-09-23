@@ -1,0 +1,21 @@
+{
+  "@context": {
+    "mith": "https://mithril.fund/ns/v1#",
+    "xsd": "http://www.w3.org/2001/XMLSchema#",
+    "GrowthDecision": "https://mithril.fund/ns/v1#GrowthDecision",
+    "profileGraphDigest": "https://mithril.fund/ns/v1#profileGraphDigest",
+    "definitionDigest": "https://mithril.fund/ns/v1#definitionDigest",
+    "observationDigest": "https://mithril.fund/ns/v1#observationDigest",
+    "modelResultDigest": "https://mithril.fund/ns/v1#modelResultDigest",
+    "receiptDigest": "https://mithril.fund/ns/v1#receiptDigest",
+    "selectedAction": "https://mithril.fund/ns/v1#selectedAction",
+    "confidence": {
+      "@id": "https://mithril.fund/ns/v1#confidence",
+      "@type": "http://www.w3.org/2001/XMLSchema#integer"
+    },
+    "authority": "https://mithril.fund/ns/v1#authority",
+    "modelId": "https://mithril.fund/ns/v1#modelId",
+    "requestId": "https://mithril.fund/ns/v1#requestId",
+    "parentCid": "https://mithril.fund/ns/v1#parentCid"
+  }
+}
