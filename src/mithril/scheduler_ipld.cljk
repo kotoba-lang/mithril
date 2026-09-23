@@ -141,20 +141,21 @@
     {:state state :verification verification}))
 
 (defn verify-primary-occurrences!
-  "Verify the CID-primary two-phase journal: one requested-effect block and
-  one applied-receipt block for every completed builtin occurrence."
+  "Verify the CID-primary two-phase journal, with an optional checked initial
+  state block for the first Jev decision's causal parent."
   [store schema state-path rows]
   (let [history (local/verify-ref! store schema (primary/ref-name state-path))
         builtin (filterv #(= "builtin" (get-in % [:execution :source])) rows)
         completed (filterv #(= "completed" (get-in % [:receipt :status])) builtin)
         terminal (filterv #(= "terminal" (get-in % [:receipt :status])) builtin)
-        direct (remove #(= "builtin" (get-in % [:execution :source])) rows)]
+        direct (remove #(= "builtin" (get-in % [:execution :source])) rows)
+        baseline? (= (inc (* 2 (count completed))) (:blocks history))]
     (when-not (and (seq completed)
                    (= (count builtin) (+ (count completed) (count terminal)))
                    (= (mapv #(get-in % [:receipt :status]) builtin)
                       (vec (concat (repeat (count completed) "completed")
                                    (repeat (count terminal) "terminal"))))
-                   (= (* 2 (count completed)) (:blocks history))
+                   (or (= (* 2 (count completed)) (:blocks history)) baseline?)
                    (every? #(= "completed" (get-in % [:execution :status])) builtin)
                    (every? #(= "failed" (get-in % [:execution :status])) direct)
                    (every? (fn [{:keys [execution receipt]}]
@@ -175,12 +176,30 @@
                     effect (last (:receipts state))
                     passed (last (filter #(= :pass (:bpmn/event %))
                                          (get-in state [:bpmn :token-state :bpmn/trace])))
-                    action (get-in state [:bpmn :model :bpmn/nodes
-                                          (:bpmn/at passed) :mithril/action])]
+                    action (or (get-in state [:bpmn :model :bpmn/nodes
+                                              (:bpmn/at passed) :mithril/action])
+                               (when-not (:bpmn state)
+                                 (get-in pending [:awaiting :action])))
+                    baseline-cid (when (and baseline? (= index 1))
+                                   (first (:parents requested)))
+                    baseline (when baseline-cid
+                               (ipld/read! #(local/get-block store %) schema
+                                           baseline-cid))]
                 (when-not (and (ipld/canonical-format? (:format final))
                                (ipld/canonical-format? (:format requested))
                                (= [request-cid] (:parents final))
-                               (= (if previous [previous] []) (:parents requested))
+                               (= (if baseline-cid [baseline-cid]
+                                      (if previous [previous] []))
+                                  (:parents requested))
+                               (or (not baseline?)
+                                   (not= index 1)
+                                   (and baseline
+                                        (= 0 (get-in baseline [:state :step]))
+                                        (nil? (get-in baseline [:state :awaiting]))
+                                        (= 1 (count
+                                              (filter #(and (= :decide/jev (:operation %))
+                                                            (= :admitted (:status %)))
+                                                      (:semantic-receipts pending))))))
                                (= (:run-id pending) (:run-id state))
                                (= (dec index) (:step pending))
                                (= index (:step state) (count (:receipts state)))

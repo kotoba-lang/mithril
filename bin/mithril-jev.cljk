@@ -3,6 +3,7 @@
   (:require [clojure.string :as str]
             [mithril.bot :as bot]
             [mithril.compiler :as compiler]
+            [mithril.decision-proof :as decision-proof]
             [mithril.openrouter-jev :as jev]))
 
 (def fs (js/require "node:fs"))
@@ -59,11 +60,15 @@
         (-> (jev/decide! plan key)
             (.then (fn [{:keys [model-result audit]}]
                      (let [admitted (bot/admit-decision state model-result owner (+ now 2))
-                           requested (bot/request-effect state admitted grants owner (+ now 3))]
+                           requested (decision-proof/request-effect
+                                      state admitted model-result audit grants owner
+                                      (+ now 2) (+ now 3))]
                        (print-json {:format "https://mithril.fund/decision/openrouter-jev-v1"
                                     :audit audit
                                     :decision (select-keys admitted [:confidence :probabilities :model])
                                     :action (select-keys (:action admitted) [:id :label :effect])
-                                    :effect (:effect requested)}))))
+                                    :effect (:effect requested)
+                                    :decision-receipt
+                                    (last (get-in requested [:state :semantic-receipts]))}))))
             (.catch refuse!)))
       (catch :default error (refuse! error)))))

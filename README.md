@@ -746,9 +746,29 @@ OpenRouter Jev call on 2026-09-24 accepted this form and selected
 `workspace-inspect` (confidence 0.64); it reported 847 input and 44 output
 tokens, cost $0.000035574. This command emitted an effect request but did not
 execute a host tool. The API still tokenizes the S-expression input and bills
-output tokens for its typed choice; this is not token-free inference. The
-decision-input digests are audit fields, not yet part of the CID-bound bot
-effect receipt.
+output tokens for its typed choice; this is not token-free inference. That
+standalone `mithril-jev next` observation did not commit a CID checkpoint.
+
+In the opt-in IPLD-primary loop, a Jev-selected effect now appends a typed
+`decide/jev` receipt to the executable state *before* invoking the host. It
+binds the validated Mithril input and RDF/ontology digests, normalized model
+result, selected action, exact effect ID, and provider request ID. The state
+RDF Dataset and DAG-CBOR CID therefore commit to this decision output. On
+ref/history verification, the parent state is used to reconstruct the
+candidate set, re-admit the recorded choice, and replay the effect request;
+altered or missing decision evidence is refused. This is local causal replay,
+not a provider-signed response or proof that the model's choice was correct.
+The domain RDF projection still describes facts and effects rather than
+individual decision receipts, and older checkpoint formats remain readable.
+An isolated live OpenRouter `ipld-execute` check on 2026-09-24 selected
+`workspace-inspect` with confidence 0.99 and completed a real read-only
+`workspace/read` effect. A fresh process verified its three-block causal
+chain (pre-decision state, requested effect with Jev receipt, applied host
+receipt), ending at CID
+`bafyreigzs5r3umsjr2lvc2wdcqlobxgybcnszgr74qv4mcnej33nfxlhoi`.
+OpenRouter reported 844 input and 44 output tokens, cost $0.000035448.
+This direct isolated tick was not `source=builtin` from Hermes cron; it does
+not establish scheduler-originated or fleet-wide behavioral parity.
 
 ### Hermes cron canary
 
