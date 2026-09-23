@@ -257,25 +257,33 @@
 (defn verify-history!
   "Verify every reachable IPLD block and its checked semantic projection."
   [get-fn schema head]
-  (loop [queue [head] seen #{}]
+  (loop [queue [head] checked {}]
     (cond
-      (empty? queue) {:head head :blocks (count seen)}
-      (> (count seen) 256) (refuse! :ancestry-limit)
+      (> (count checked) 256) (refuse! :ancestry-limit)
+      (empty? queue)
+      (do
+        (doseq [[_ {:keys [parents] :as child}] checked
+                parent parents]
+          (let [prior (get checked parent)]
+            (when-not (and prior
+                           (= (:run-id prior) (:run-id child))
+                           (= (:profile-digest prior) (:profile-digest child))
+                           (= (:task-identity prior) (:task-identity child))
+                           (<= (:step prior) (:step child)))
+              (refuse! :invalid-ancestry))))
+        {:head head :blocks (count checked)})
       :else
       (let [current (first queue)
             remaining (subvec (vec queue) 1)]
-        (if (contains? seen current)
-          (recur remaining seen)
-          (let [{:keys [state parents]} (read! get-fn schema current)]
-            (doseq [parent parents]
-              (let [prior (:state (read! get-fn schema parent))]
-                (when-not (and (= (:run-id prior) (:run-id state))
-                               (= (:profile-digest prior) (:profile-digest state))
-                               (= (checkpoint/task-identity prior)
-                                  (checkpoint/task-identity state))
-                               (<= (:step prior) (:step state)))
-                  (refuse! :invalid-ancestry))))
-            (recur (into remaining parents) (conj seen current))))))))
+        (if (contains? checked current)
+          (recur remaining checked)
+          (let [{:keys [state parents]} (read! get-fn schema current)
+                binding {:parents parents
+                         :run-id (:run-id state)
+                         :profile-digest (:profile-digest state)
+                         :task-identity (checkpoint/task-identity state)
+                         :step (:step state)}]
+            (recur (into remaining parents) (assoc checked current binding))))))))
 
 (defn merge-facts!
   "Three-way merge of disjoint, additive facts over one immutable ancestor.
