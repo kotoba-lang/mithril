@@ -6,6 +6,8 @@
 (def fs (js/require "node:fs"))
 (def bot-path "examples/hermes-readonly-bot.mith")
 (def artifact (bot/compile-text bot-path (.readFileSync fs bot-path "utf8")))
+(def coding-path "examples/governed-coding-bot.mith")
+(def coding-artifact (bot/compile-text coding-path (.readFileSync fs coding-path "utf8")))
 (def contract
   {"@context" "https://mithril.fund/context/v1"
    "@id" "https://mithril.fund/id/contract/hermes-readonly-test"
@@ -21,6 +23,48 @@
 (defn- reason [doc]
   (try (scheduler/compile-document "test.mith" doc artifact) nil
        (catch :default error (:reason (ex-data error)))))
+
+(def coding-contract
+  (-> contract
+      (assoc "@type" "HermesBpmnCodingSchedulerContract"
+             "@id" "https://mithril.fund/id/contract/hermes-coding-test"
+             "botProfileDigest" (:graph-digest coding-artifact)
+             "toolProfileDigest" (str "sha256:" (apply str (repeat 64 "b")))
+             "grants" ["workspace/read" "llm/propose-patch" "workspace/revert-patch"
+                       "workspace/apply-patch" "amu/compile" "test/run"
+                       "git/status" "agent/stop"])
+      (assoc-in ["task" "tool-profile-digest"]
+                (str "sha256:" (apply str (repeat 64 "b"))))))
+
+(defn- coding-reason [doc]
+  (try (scheduler/compile-document "coding.mith" doc coding-artifact) nil
+       (catch :default error (:reason (ex-data error)))))
+
+(deftest coding-contract-is-explicit-and-cannot-weaken-v1
+  (let [compiled (scheduler/compile-document "coding.mith" coding-contract coding-artifact)]
+    (is (= scheduler/coding-contract-format (:format compiled)))
+    (is (:coding? compiled))
+    (is (= 8 (count (:effects compiled)))))
+  (is (= :invalid-fields (coding-reason (dissoc coding-contract "toolProfileDigest"))))
+  (is (= :invalid-tool-profile-digest
+         (coding-reason (assoc coding-contract "toolProfileDigest" "bad"))))
+  (is (= :effect-or-task-denied
+         (coding-reason (assoc-in coding-contract ["task" "tool-profile-digest"]
+                                  (str "sha256:" (apply str (repeat 64 "c")))))))
+  (is (= :effect-or-task-denied
+         (coding-reason (assoc coding-contract "grants" ["workspace/read"]))))
+  (is (= :invalid-fields
+         (reason (assoc contract "toolProfileDigest" (get coding-contract "toolProfileDigest")))))
+  (is (= :effect-or-task-denied
+         (try (scheduler/compile-document
+               "v1-coding.mith"
+               (-> coding-contract
+                   (dissoc "toolProfileDigest")
+                   (assoc "@type" "HermesBpmnSchedulerContract")
+                   (update "task" dissoc "tool-profile-digest"))
+               coding-artifact)
+              nil
+              (catch :default error (:reason (ex-data error)))))))
 
 (deftest explicit-contract-binds-the-bpmn-bot-and-readonly-effects
   (let [result (scheduler/compile-document "test.mith" contract artifact)]
