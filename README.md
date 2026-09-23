@@ -452,6 +452,21 @@ non-success `held` scheduler receipt. Later occurrences return `held` without
 calling the model or host effect again. This is a safe terminal handoff, not a
 claim that the bot completed its task.
 
+On 2026-09-23, an isolated Hermes profile was exercised through the actual
+`cron tick` scheduler, with a one-occurrence read-only contract using
+`checkpointMode=semantic`. Execution `e53fd1d823fe406393990720b4efc2a2`
+was recorded by Hermes as `source=builtin`, `status=completed`; the matching
+Mithril receipt bound the same execution and job IDs to one `workspace/read`
+effect and its output digest. `semantic-verify` checked the parent-linked
+head (`sha256:87d90b6aa2e8f467cb09a1b331db853bb4a92a76738856dabb5db1236852b735`),
+including its OWL entailment, SHACL shape, and SPARQL fact projection. The
+OpenRouter Jev request used 418 input and 36 output tokens (reported cost
+0.000017556 USD); the two audit rows refer to the same request, not two model
+calls. A separate `cron run` occurrence had `source=direct` and was correctly
+refused with `not-scheduler-originated`. This is scheduler-originated evidence
+for one read-only service task, not coding completion, fleet parity, or a
+token-free loop. The isolated profile was repeat-limited and is terminal.
+
 `shadow` records the decision but requests no effect and does not advance the
 state. Without a coding tool profile, `execute` admits only `workspace/read`,
 `git/status`, and `agent/stop`. Workspace and Git
