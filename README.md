@@ -416,6 +416,20 @@ kbb --backend sci bin/mithril-hermes.cljk tick \
   workspace/read,git/status,agent/stop execute
 ```
 
+An opt-in `semantic-execute` mode uses the same one-effect loop but commits
+each requested and completed state to an immutable, parent-linked block under
+`state.edn.semantic-blocks/`. The head is `state.edn.semantic-head`; the EDN
+file remains a local projection. The block contains a `.mith` BotCheckpoint
+form, RDF-canonical graph digest, full state digest and ontology digest.
+[`bot-checkpoint-v1.mith`](ontology/bot-checkpoint-v1.mith) declares its OWL
+class and SHACL shape; the writer executes both checks, and the reader verifies
+the full ancestry before continuing. A legacy EDN-only state is refused by
+this mode rather than silently imported. `reconcile` recognizes a semantic
+head and advances that same chain after an in-flight effect. These private
+blocks are local, not published to a public IPLD store. This proves a bounded
+content-addressed checkpoint/lineage path, not distributed Unison branch/merge
+or parity with every Hermes profile and cron job.
+
 `shadow` records the decision but requests no effect and does not advance the
 state. Without a coding tool profile, `execute` admits only `workspace/read`,
 `git/status`, and `agent/stop`. Workspace and Git

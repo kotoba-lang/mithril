@@ -27,6 +27,7 @@
     "GraphAgentApplication" "mith:GraphAgentApplication"
     "AppAgentApplication" "mith:AppAgentApplication"
     "BotProfile" "mith:BotProfile"
+    "BotCheckpoint" "mith:BotCheckpoint"
     "HermesProfile" "mith:HermesProfile"
     "DesktopApplication" "mith:DesktopApplication"
     "Ontology" "owl:Ontology"
@@ -94,6 +95,16 @@
     "leaseSeconds" {"@id" "mith:leaseSeconds" "@type" "http://www.w3.org/2001/XMLSchema#integer"}
     "effects" {"@id" "mith:effect" "@type" "@id" "@container" "@set"}
     "legacyProfiles" {"@id" "mith:legacyProfileDigest" "@container" "@set"}
+    "runId" "mith:runId"
+    "runStatus" "mith:runStatus"
+    "stateDigest" "mith:stateDigest"
+    "parentDigest" "mith:parentDigest"
+    "profileDigest" "mith:profileDigest"
+    "taskDigest" "mith:taskDigest"
+    "processDigest" "mith:processDigest"
+    "lastEffectDigest" "mith:lastEffectDigest"
+    "step" {"@id" "mith:step" "@type" "xsd:integer"}
+    "facts" {"@id" "mith:fact" "@type" "@id" "@container" "@set"}
     "process" "mith:process"
     "nodes" {"@id" "mith:node" "@container" "@set"}
     "flows" {"@id" "mith:flow" "@container" "@set"}
