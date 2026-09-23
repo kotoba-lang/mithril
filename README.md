@@ -135,6 +135,25 @@ kbb --backend sci bin/mithril-hermes-fleet.cljk plan-bpmn \
   "$HOME/.hermes/profiles" "$HOME/.hermes/mithril/profile-fleet-v1"
 ```
 
+`shadow-bpmn` replays one named job's latest Hermes execution into the
+ontology-bound [`hermes-shadow-process-v1.mith`](resources/hermes-shadow-process-v1.mith).
+It first verifies the entire profile manifest set, then requires a healthy
+script-only job and a complete `source=builtin`, `status=completed` scheduler
+receipt. The BPMN token must terminate before an immutable, idempotent local
+receipt is written. This is observation-only: no Hermes job is disabled, no
+script is rerun, and no tool effect is authorized by this process.
+
+```sh
+kbb --backend sci bin/mithril-hermes-fleet.cljk shadow-bpmn \
+  "$HOME/.hermes/profiles" "$HOME/.hermes/mithril/profile-fleet-v1" \
+  "$PWD/resources/hermes-shadow-process-v1.mith" \
+  "$HOME/.hermes/mithril/bpmn-shadow-v1" cron-health b777d8b13259
+```
+
+The command deliberately takes an explicit profile and job ID; `plan-bpmn`
+eligibility is not permission to turn on all jobs. LLM-driven jobs and actual
+scheduler replacement remain separate migration phases.
+
 ## Published Mithril code and libraries
 
 The repository now contains source authored in Mithril itself:

@@ -1,0 +1,20 @@
+{
+  "@context": "https://mithril.fund/context/v1",
+  "@id": "https://mithril.fund/process/hermes-shadow-receipt-v1",
+  "@type": "bpmn:Process",
+  "ontology": "3539fef6d1f26c012d4305a55a3782902ff8de47e56901e619ea0cde30ece918",
+  "nodes": [
+    {"@id": "start", "@type": "bpmn:StartEvent"},
+    {"@id": "decision", "@type": "bpmn:ExclusiveGateway"},
+    {"@id": "accept", "@type": "bpmn:ServiceTask", "action": "shadow/accept"},
+    {"@id": "hold", "@type": "bpmn:ServiceTask", "action": "shadow/hold"},
+    {"@id": "end", "@type": "bpmn:EndEvent"}
+  ],
+  "flows": [
+    {"@id": "f-start", "@type": "bpmn:SequenceFlow", "source": "start", "target": "decision", "condition": null},
+    {"@id": "f-accept", "@type": "bpmn:SequenceFlow", "source": "decision", "target": "accept", "condition": "shadow/accept"},
+    {"@id": "f-hold", "@type": "bpmn:SequenceFlow", "source": "decision", "target": "hold", "condition": "shadow/hold"},
+    {"@id": "f-accept-end", "@type": "bpmn:SequenceFlow", "source": "accept", "target": "end", "condition": null},
+    {"@id": "f-hold-end", "@type": "bpmn:SequenceFlow", "source": "hold", "target": "end", "condition": null}
+  ]
+}
