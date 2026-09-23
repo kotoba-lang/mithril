@@ -421,6 +421,63 @@
           (failed effect code {:diagnostic-digest (execution/digest diagnostic)
                                :diagnostic-bytes (byte-count diagnostic)}))))))
 
+(defn reconcile-effect
+  "Recover a durable in-flight receipt from host evidence, without rerunning
+  the proposer or mutating the target workspace. Unsupported/ambiguous effects
+  stay in-flight for operator inspection."
+  [effect supplied-context]
+  (when-not (and (map? effect)
+                 (= "https://mithril.fund/effect/bot-action-v1" (:format effect))
+                 (string? (:id effect))
+                 (contains? #{:llm/propose-patch :workspace/apply-patch}
+                            (:operation effect)))
+    (fail! :mithril.hermes/reconcile-unsupported
+           "effect cannot be reconciled from durable host evidence" {}))
+  (let [ctx (merge (default-context) supplied-context)
+        profile (profile! effect (:profile ctx))
+        _ (runtime-paths! ctx profile (:operation effect))
+        proposal (read-proposal! effect profile ctx)
+        paths (diff-paths! profile (:patch proposal))]
+    (case (:operation effect)
+      :llm/propose-patch
+      (do
+        (when-not (= (:base-head proposal) (clean-head! ctx (:workspace profile)))
+          (fail! :mithril.hermes/reconcile-ambiguous
+                 "proposal base is no longer the clean workspace HEAD" {}))
+        (completed effect (dissoc proposal :patch)
+                   {:proposal-digest (:patch-digest proposal)
+                    :files (count paths) :bytes (byte-count (:patch proposal))
+                    :reconciled true}))
+
+      :workspace/apply-patch
+      (let [patch-file (str (artifact-path profile effect (:join-fn ctx)) ".patch")
+            scratch (proposal-workspace-path profile effect (:join-fn ctx))
+            {:keys [head status]} (git-state ctx (:workspace profile))
+            changed (->> (str/split-lines status)
+                         (map #(subs % (min 3 (count %))))
+                         set)]
+        (when-not (and (= head (:base-head proposal))
+                       (seq changed) (= changed (set paths))
+                       ((:exists-fn ctx) patch-file)
+                       (= (:patch proposal) ((:read-fn ctx) patch-file))
+                       ((:exists-fn ctx) scratch)
+                       (every? (fn [relative]
+                                 (= ((:read-fn ctx) ((:join-fn ctx) scratch relative))
+                                    ((:read-fn ctx) ((:join-fn ctx) (:workspace profile) relative))))
+                               paths))
+          (fail! :mithril.hermes/reconcile-ambiguous
+                 "workspace does not exactly match the admitted proposal" {}))
+        (try
+          ((:exec-fn ctx) "/usr/bin/git" ["apply" "--reverse" "--check" "--" patch-file]
+           (:workspace profile) 30000)
+          (catch :default _
+            (fail! :mithril.hermes/reconcile-ambiguous
+                   "the exact proposal cannot be reversed cleanly" {})))
+        (let [delta (git! ctx (:workspace profile) "diff" "--binary" "--")]
+          (completed effect {:patch-digest (:patch-digest proposal)
+                             :workspace-digest (execution/digest delta)}
+                     {:files (count paths) :changed true :reconciled true}))))))
+
 (defn execute-effect
   "Execute one closed host effect. Coding effects require a digest-bound tool
   profile. All host functions are injectable for contract tests."

@@ -91,9 +91,18 @@
             proposed (hermes/execute-effect
                       (assoc effect :id "propose" :operation :llm/propose-patch)
                       {:profile profile :propose-fn (fn [_] patch)})
+            scratch (str artifacts "/sha256_run-1.workspace")
+            _ (.mkdirSync fs scratch)
+            _ (.writeFileSync fs (str scratch "/app.mith") "value 2\n" "utf8")
+            proposed-reconciled (hermes/reconcile-effect
+                                 (assoc effect :id "propose" :operation :llm/propose-patch)
+                                 {:profile profile})
             applied (hermes/execute-effect
                      (assoc effect :id "apply" :operation :workspace/apply-patch)
                      {:profile profile})
+            reconciled (hermes/reconcile-effect
+                        (assoc effect :id "apply" :operation :workspace/apply-patch)
+                        {:profile profile})
             applied-again (hermes/execute-effect
                            (assoc effect :id "apply-retry" :operation :workspace/apply-patch)
                            {:profile profile})
@@ -104,13 +113,32 @@
                     (assoc effect :id "test" :operation :test/run)
                     {:profile profile})]
         (is (= :completed (get-in proposed [:receipt :status])))
+        (is (= (:receipt proposed) (:receipt proposed-reconciled)))
         (is (= 1 (get-in proposed [:audit :files])))
         (is (= :completed (get-in applied [:receipt :status])))
+        (is (= (:receipt applied) (:receipt reconciled))
+            "reconciliation derives the receipt without another workspace write")
+        (is (true? (get-in reconciled [:audit :reconciled])))
         (is (= :completed (get-in applied-again [:receipt :status]))
             "a crash after apply but before receipt persistence is idempotent")
         (is (= "value 2\n" (.readFileSync fs (str workspace "/app.mith") "utf8")))
         (is (= :completed (get-in compiled [:receipt :status])))
         (is (= :completed (get-in tested [:receipt :status])))
+        (.writeFileSync fs (str scratch "/app.mith") "different\n" "utf8")
+        (is (= :mithril.hermes/reconcile-ambiguous
+               (error-code #(hermes/reconcile-effect
+                             (assoc effect :id "apply" :operation :workspace/apply-patch)
+                             {:profile profile}))))
+        (.writeFileSync fs (str scratch "/app.mith") "value 2\n" "utf8")
+        (.writeFileSync fs (str workspace "/extra.txt") "unrelated\n" "utf8")
+        (is (= :mithril.hermes/reconcile-ambiguous
+               (error-code #(hermes/reconcile-effect
+                             (assoc effect :id "apply" :operation :workspace/apply-patch)
+                             {:profile profile}))))
+        (is (= :mithril.hermes/reconcile-unsupported
+               (error-code #(hermes/reconcile-effect
+                             (assoc effect :id "compile" :operation :amu/compile)
+                             {:profile profile}))))
         (is (not (some #{"value 2"} (tree-seq coll? seq [proposed applied compiled tested])))))
       (finally
         (.rmSync fs workspace #js {:recursive true :force true})

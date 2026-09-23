@@ -178,6 +178,26 @@ profiles may change independently). V1 admits only `workspace/read`,
 `git/status`, and `agent/stop`; write, compile, test, and other coding effects
 need separate idempotency or reconciliation contracts before migration.
 
+The coding executor now persists the `:awaiting` BPMN checkpoint and an
+`effect-requested` audit record **before** calling the host. A restarted tick
+with that checkpoint refuses `effect-in-flight`; it cannot silently select or
+repeat another action. For a completed patch whose receipt was lost, an
+operator can run `mithril-hermes reconcile` with the exact bot, task, state,
+owner, and digest-bound coding tool profile. Reconciliation checks the
+proposal, patch file, base HEAD, exact changed paths, disposable proposer
+workspace bytes, and reverse-apply feasibility. It advances the BPMN token
+from observed state without another target write:
+
+```sh
+kbb --backend sci bin/mithril-hermes.cljk reconcile \
+  examples/governed-coding-bot.mith task.json state.edn operator coding-tools.json
+```
+
+Proposal artifacts can likewise be reconciled from their verified content;
+compile, test, reset, and effects with ambiguous host state remain held. This
+is the underlying write-recovery primitive, **not** authorization to add those
+effects to the v1 scheduler contract or to auto-retry an uncertain occurrence.
+
 ## Published Mithril code and libraries
 
 The repository now contains source authored in Mithril itself:

@@ -13,6 +13,7 @@
 (defn- usage! []
   (println "usage: mithril-hermes tick <profile.mith> <task.json> <state.edn> <owner> <grants.csv> <shadow|execute> [coding-tools.json]")
   (println "       mithril-hermes migrate <profile.mith> <task.json> <state.edn> <owner>")
+  (println "       mithril-hermes reconcile <profile.mith> <task.json> <state.edn> <owner> <coding-tools.json>")
   (println "       mithril-hermes profile-digest <coding-tools.json>")
   (js/process.exit 2))
 
@@ -204,6 +205,39 @@
         (catch :default error (refuse! error))
         (finally (release-lock! lock))))))
 
+(defn- reconcile-checkpoint! [profile-path task-path state-path owner tool-profile-path]
+  (let [lock (try (acquire-lock! state-path) (catch :default error (refuse! error) nil))]
+    (when lock
+      (try
+        (let [artifact (bot/compile-text profile-path (read-text profile-path))
+              task (js->clj (js/JSON.parse (read-text task-path)) :keywordize-keys true)
+              profile (js->clj (js/JSON.parse (read-text tool-profile-path))
+                               :keywordize-keys true)
+              _ (when-not (= (:tool-profile-digest task)
+                             (hermes/tool-profile-digest profile))
+                  (throw (ex-info "task does not bind coding tools"
+                                  {:mithril/error :mithril.hermes/tool-profile-mismatch})))
+              saved (reader/read-string (read-text state-path))
+              _ (when-not (and (= :running (:status saved))
+                               (= owner (get-in saved [:lease :owner]))
+                               (:awaiting saved))
+                  (throw (ex-info "no owner-bound in-flight effect"
+                                  {:mithril/error :mithril.hermes/no-inflight-effect})))
+              state (:state (bot/resume-or-start artifact task saved owner (.now js/Date)))
+              effect (:awaiting state)
+              {:keys [receipt audit]} (hermes/reconcile-effect effect {:profile profile})
+              next-state (bot/apply-receipt state receipt owner (.now js/Date))]
+          (write-state! state-path next-state)
+          (append-audit! state-path {:at (.toISOString (js/Date.))
+                                     :status :reconciled :effect-id (:id effect)
+                                     :action (:action effect) :host audit
+                                     :output-digest (:output-digest receipt)})
+          (println (json-line {:status :reconciled :effect-id (:id effect)
+                               :step (:step next-state)
+                               :run-status (:status next-state)})))
+        (catch :default error (refuse! error))
+        (finally (release-lock! lock))))))
+
 (let [[command profile-path task-path state-path owner grants-csv mode tool-profile-path & extra]
       *command-line-args*]
   (cond
@@ -218,6 +252,12 @@
     (= "migrate" command)
     (if (and profile-path task-path state-path owner (nil? grants-csv))
       (migrate-checkpoint! profile-path task-path state-path owner)
+      (usage!))
+
+    (= "reconcile" command)
+    (if (and profile-path task-path state-path owner grants-csv
+             (nil? mode) (empty? extra))
+      (reconcile-checkpoint! profile-path task-path state-path owner grants-csv)
       (usage!))
 
     :else
@@ -245,6 +285,10 @@
                 run (load-or-start artifact task state-path owner now)
                 state (:state run)
                 grants (set (map keyword (remove str/blank? (str/split grants-csv #","))))]
+            (when (and (not= :terminal (:disposition run)) (:awaiting state))
+              (throw (ex-info "in-flight effect requires explicit reconciliation"
+                              {:mithril/error :mithril.bot/effect-in-flight
+                               :effect-id (get-in state [:awaiting :id])})))
             (if (= :terminal (:disposition run))
               (do
                 (append-audit! state-path {:at (.toISOString (js/Date.))
@@ -275,6 +319,10 @@
                                              :step (:step state) :run-status (:status state)})))
                        (let [{requested-state :state effect :effect}
                              (bot/request-effect state admitted grants owner (+ now 3))
+                             _ (write-state! state-path requested-state)
+                             _ (append-audit! state-path
+                                              (assoc base-audit :status :effect-requested
+                                                     :effect-id (:id effect)))
                              {:keys [receipt audit]}
                              (hermes/execute-effect effect (cond-> {}
                                                             tool-profile (assoc :profile tool-profile)))
