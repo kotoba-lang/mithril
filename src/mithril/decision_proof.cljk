@@ -1,0 +1,108 @@
+(ns mithril.decision-proof
+  "CID-bound, locally replayable proof of one Jev decision and its requested
+  effect. This records the normalized provider result, not a provider signature."
+  (:require #?(:cljs [cljs.reader :as reader]
+               :clj [clojure.edn :as reader])
+            [mithril.bot :as bot]
+            [mithril.decision-input :as decision-input]
+            [mithril.execution :as execution]))
+
+(def format-id "https://mithril.fund/receipt/jev-decision-v1")
+
+(defn- refuse! [reason]
+  (throw (ex-info "Mithril Jev decision proof refused"
+                  {:mithril/error :mithril.decision-proof/refused
+                   :reason reason})))
+
+(defn- decision-records [state]
+  (filterv #(and (= :decide/jev (:operation %))
+                 (= :admitted (:status %)))
+           (:semantic-receipts state)))
+
+(defn- evidence [state admitted model-result audit effect owner admitted-at requested-at]
+  (let [input (decision-input/build state (bot/available-actions state))
+        expected {:decision-state-digest (:form-digest input)
+                  :domain-graph-digest (:graph-digest input)
+                  :domain-ontology-digest (:ontology-digest input)}
+        result-source (execution/canonical-edn-text model-result)]
+    (when-not (and (= expected (select-keys audit (keys expected)))
+                   (string? (:request-id audit))
+                   (<= 1 (count (:request-id audit)) 256)
+                   (= (:model model-result) (:model audit))
+                   (= admitted
+                      (bot/admit-decision state model-result owner admitted-at))
+                   (<= (count result-source) 8192))
+      (refuse! :decision-evidence-mismatch))
+    {:format format-id
+     :run-id (:run-id state) :step (:step state)
+     :state-digest (execution/digest state)
+     :decision-state-digest (:form-digest input)
+     :domain-graph-digest (:graph-digest input)
+     :domain-ontology-digest (:ontology-digest input)
+     :request-id (:request-id audit)
+     :model (:model audit)
+     :model-result-source result-source
+     :action-id (get-in admitted [:action :id])
+     :effect-id (:id effect)
+     :owner owner :admitted-at admitted-at :requested-at requested-at}))
+
+(defn request-effect
+  "Admit exactly one Jev-chosen effect and append its typed proof to the
+  executable state before that state is CID-committed or the host is called."
+  [prior admitted model-result audit grants owner admitted-at requested-at]
+  (let [{requested-state :state effect :effect :as requested}
+        (bot/request-effect prior admitted grants owner requested-at)
+        proof (evidence prior admitted model-result audit effect owner
+                        admitted-at requested-at)
+        record {:operation :decide/jev :status :admitted
+                :output-digest (execution/digest proof)
+                :proof proof}]
+    (assoc requested :state (update requested-state :semantic-receipts conj record))))
+
+(defn verify-transition!
+  "Recompute a newly appended Jev decision from the immutable parent state.
+  Unchanged decision history is required for all subsequent effect receipts."
+  [prior child]
+  (let [before (decision-records prior)
+        after (decision-records child)]
+    (when-not (and (<= (count before) (count after) (inc (count before)))
+                   (= before (subvec after 0 (count before))))
+      (refuse! :decision-history-diverged))
+    (when (= (inc (count before)) (count after))
+      (let [record (last after)
+            proof (:proof record)
+            source (:model-result-source proof)
+            model-result (try
+                           (when (and (string? source) (<= (count source) 8192))
+                             (reader/read-string source))
+                           (catch #?(:cljs :default :clj Exception) _ nil))
+            audit (select-keys proof [:request-id :model :decision-state-digest
+                                      :domain-graph-digest :domain-ontology-digest])]
+        (when-not (and (= #{:operation :status :output-digest :proof} (set (keys record)))
+                       (map? proof)
+                       (= (execution/digest proof) (:output-digest record))
+                       (= source (execution/canonical-edn-text model-result))
+                       (= format-id (:format proof))
+                       (= (:run-id prior) (:run-id proof))
+                       (= (:step prior) (:step proof))
+                       (= (execution/digest prior) (:state-digest proof)))
+          (refuse! :invalid-decision-record))
+        (let [expected (try
+                         (request-effect prior
+                                         (bot/admit-decision prior model-result
+                                                             (:owner proof)
+                                                             (:admitted-at proof))
+                                         model-result audit
+                                         #{(get-in child [:awaiting :operation])}
+                                         (:owner proof) (:admitted-at proof)
+                                         (:requested-at proof))
+                         (catch #?(:cljs :default :clj Exception) _
+                           (refuse! :decision-replay-failed)))]
+          (when-not (and (= proof (get-in expected [:state :semantic-receipts
+                                                   (dec (count (:semantic-receipts
+                                                                (:state expected)))) :proof]))
+                         (= (:state expected) child)
+                         (= (get-in expected [:effect :id]) (:effect-id proof))
+                         (= (get-in expected [:effect :action]) (:action-id proof)))
+            (refuse! :decision-transition-mismatch)))))
+    true))

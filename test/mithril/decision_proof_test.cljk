@@ -1,0 +1,147 @@
+(ns mithril.decision-proof-test
+  (:require [cljs.test :refer [deftest is]]
+            [mithril.bot :as bot]
+            [mithril.checkpoint :as checkpoint]
+            [mithril.checkpoint-ipld :as ipld]
+            [mithril.checkpoint-ipld-fs :as local]
+            [mithril.decision-input :as decision-input]
+            [mithril.decision-proof :as proof]
+            [mithril.execution :as execution]
+            [mithril.ipld-session :as session]
+            [mithril.scheduler-ipld :as scheduler]))
+
+(def fs (js/require "node:fs"))
+(def path (js/require "node:path"))
+(def os (js/require "node:os"))
+(def schema (checkpoint/schema (.readFileSync fs checkpoint/ontology-path "utf8")))
+(def artifact (bot/compile-text "examples/governed-coding-bot.mith"
+                                (.readFileSync fs "examples/governed-coding-bot.mith" "utf8")))
+
+(defn fixture []
+  (let [state (bot/start-run artifact
+                             {:id "jev-cid-proof" :workspace "/tmp/jev-cid-proof"
+                              :goal "Inspect the workspace"}
+                             "proof-worker" 1000)
+        labels (mapv :label (bot/available-actions state))
+        model-result {:kind bot/model-kind :generated_text false
+                      :model "typesafe/jev-1.13-20260917"
+                      :artifact {:provider bot/jev-provider
+                                 :endpoint bot/jev-endpoint
+                                 :requested_model bot/jev-model
+                                 :resolved_model "typesafe/jev-1.13-20260917"}
+                      :decisions [{:choice "workspace-inspect" :confidence 0.64
+                                   :probabilities {"workspace-inspect" 0.76
+                                                   "git-status" 0.16
+                                                   "stop" 0.08}}]}
+        input (decision-input/build state (bot/available-actions state))
+        audit {:request-id "gen-dec-cid-proof"
+               :model (:model model-result)
+               :decision-state-digest (:form-digest input)
+               :domain-graph-digest (:graph-digest input)
+               :domain-ontology-digest (:ontology-digest input)}
+        admitted (bot/admit-decision state model-result "proof-worker" 1002)]
+    (when-not (= ["workspace-inspect" "git-status" "stop"] labels)
+      (throw (ex-info "fixture candidate set changed" {})))
+    {:state state :model-result model-result :audit audit :admitted admitted}))
+
+(defn reason [f]
+  (try (f) nil (catch :default error
+                 (or (:reason (ex-data error)) (:mithril/error (ex-data error))))))
+
+(deftest jev-output-is-cid-bound-and-parent-replayable
+  (let [{:keys [state model-result audit admitted]} (fixture)
+        {:keys [state effect]} (proof/request-effect
+                               state admitted model-result audit #{:workspace/read}
+                               "proof-worker" 1002 1003)
+        record (last (:semantic-receipts state))
+        blocks (atom {})
+        put (fn [cid bytes] (swap! blocks assoc cid bytes))
+        get-block (fn [cid] (get @blocks cid))
+        initial (:state (fixture))
+        base (ipld/put! put get-block schema initial [])
+        requested (ipld/put! put get-block schema state [base])
+        applied-state (bot/apply-receipt state
+                                         {:format bot/receipt-format
+                                          :effect-id (:id effect)
+                                          :status :completed
+                                          :output-digest (execution/digest :observed)}
+                                         "proof-worker" 1004)
+        applied (ipld/put! put get-block schema applied-state [requested])]
+    (is (= :admitted (:status record)))
+    (is (= (:id effect) (get-in record [:proof :effect-id])))
+    (is (= (:decision-state-digest audit)
+           (get-in record [:proof :decision-state-digest])))
+    (is (= true (proof/verify-transition! initial state)))
+    (is (= true (proof/verify-transition! state applied-state)))
+    (is (= 3 (:blocks (ipld/verify-history! get-block schema applied))))
+    (is (= :decision-history-diverged
+           (reason #(proof/verify-transition!
+                     state (update applied-state :semantic-receipts pop)))))
+    (is (= :invalid-decision-record
+           (reason #(proof/verify-transition!
+                     initial
+                     (assoc-in state [:semantic-receipts
+                                      (dec (count (:semantic-receipts state)))
+                                      :proof :request-id] "tampered")))))
+    (is (= :invalid-decision-record
+           (reason #(ipld/put!
+                     put get-block schema
+                     (assoc-in state [:semantic-receipts
+                                      (dec (count (:semantic-receipts state)))
+                                      :proof :request-id] "tampered")
+                     [base]))))))
+
+(deftest mismatched-ontology-input-or-choice-is-refused-before-effect
+  (let [{:keys [state model-result audit admitted]} (fixture)]
+    (is (= :decision-evidence-mismatch
+           (reason #(proof/request-effect
+                     state admitted model-result
+                     (assoc audit :domain-graph-digest (execution/digest :wrong))
+                     #{:workspace/read} "proof-worker" 1002 1003))))
+    (is (= :decision-evidence-mismatch
+           (reason #(proof/request-effect
+                     state (assoc admitted :confidence 10000) model-result audit
+                     #{:workspace/read} "proof-worker" 1002 1003))))))
+
+(deftest primary-scheduler-verifies-jev-baseline-decision-effect-and-cid
+  (let [directory (.mkdtempSync fs (.join path (.tmpdir os) "mithril-jev-primary-"))]
+    (try
+      (let [{:keys [state model-result audit admitted]} (fixture)
+            store (local/open! (.join path directory "store"))
+            state-path (.join path directory "state.edn")
+            base (session/save! store schema state-path nil state)
+            requested (proof/request-effect
+                       state admitted model-result audit #{:workspace/read}
+                       "proof-worker" 1002 1003)
+            pending (session/save! store schema state-path base (:state requested))
+            finished (bot/apply-receipt
+                      (:state requested)
+                      {:format bot/receipt-format
+                       :effect-id (get-in requested [:effect :id])
+                       :status :completed
+                       :output-digest (execution/digest :inspected)}
+                      "proof-worker" 1004)
+            final (session/save! store schema state-path pending finished)
+            receipt {:status "completed" :source "builtin"
+                     :executionId "jev-primary-1"
+                     :scheduledInstant "2026-09-24T00:00:00Z"
+                     :runStatus "running" :step 1
+                     :action (get-in requested [:effect :action])
+                     :stateCid (:stateCid final)
+                     :semanticGraphDigest (:semanticGraphDigest final)
+                     :effectId (get-in requested [:effect :id])
+                     :outputDigest (get-in finished [:receipts 0 :output-digest])}
+            rows [{:execution {:id "jev-primary-1" :source "builtin"
+                               :status "completed"
+                               :scheduled_instant "2026-09-24T00:00:00Z"}
+                   :receipt receipt}]
+            verified (scheduler/verify-primary-occurrences!
+                      store schema state-path rows)]
+        (is (= 3 (:semanticBlocks verified)))
+        (is (= 1 (:completedEffects verified)))
+        (is (= (:stateCid final) (:stateCid (session/load! store schema state-path))))
+        (is (= :primary-effect-or-cid-mismatch
+               (reason #(scheduler/verify-primary-occurrences!
+                         store schema state-path
+                         (assoc-in rows [0 :receipt :action] "not-the-action"))))))
+      (finally (.rmSync fs directory #js {:recursive true :force true})))))

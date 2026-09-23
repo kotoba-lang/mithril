@@ -9,6 +9,7 @@
             [ipld.core :as ipld]
             [mithril.checkpoint :as checkpoint]
             [mithril.domain-rdf :as domain-rdf]
+            [mithril.decision-proof :as decision-proof]
             [mithril.execution :as execution]
             [mithril.state-ontology :as state-ontology]
             [mithril.state-rdf :as state-rdf]
@@ -235,7 +236,8 @@
                      (= (checkpoint/task-identity saved)
                         (checkpoint/task-identity state))
                      (<= (:step saved) (:step state)))
-        (refuse! :parent-binding-mismatch))))
+        (refuse! :parent-binding-mismatch))
+      (decision-proof/verify-transition! saved state)))
   (let [{:keys [cid bytes]} (block schema state parents)]
     (put-fn cid bytes)
     cid))
@@ -270,7 +272,8 @@
                            (= (:profile-digest prior) (:profile-digest child))
                            (= (:task-identity prior) (:task-identity child))
                            (<= (:step prior) (:step child)))
-              (refuse! :invalid-ancestry))))
+              (refuse! :invalid-ancestry))
+            (decision-proof/verify-transition! (:state prior) (:state child))))
         {:head head :blocks (count checked)})
       :else
       (let [current (first queue)
@@ -282,7 +285,8 @@
                          :run-id (:run-id state)
                          :profile-digest (:profile-digest state)
                          :task-identity (checkpoint/task-identity state)
-                         :step (:step state)}]
+                         :step (:step state)
+                         :state state}]
             (recur (into remaining parents) (assoc checked current binding))))))))
 
 (defn merge-facts!

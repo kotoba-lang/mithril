@@ -5,6 +5,7 @@
             [mithril.bot :as bot]
             [mithril.checkpoint :as checkpoint]
             [mithril.checkpoint-ipld-fs :as ipld-store]
+            [mithril.decision-proof :as decision-proof]
             [mithril.execution :as execution]
             [mithril.hermes :as hermes]
             [mithril.ipld-session :as ipld-session]
@@ -236,7 +237,7 @@
         (-> (jev/decide! plan (read-key))
             (.then (fn [{:keys [model-result audit]}]
                      (assoc (bot/resolve-decision state model-result owner (+ now 2))
-                            :audit audit))))))))
+                            :audit audit :model-result model-result))))))))
 
 (defn- refuse! [error]
   (println (str "REFUSE\t" (or (some-> error ex-data :mithril/error name) "hermes-error")
@@ -479,7 +480,11 @@
                 save! (fn [prior state]
                         (cond semantic? (semantic-save! state-path schema prior state)
                               primary? (ipld-session/save! store schema state-path prior state)
-                              :else (do (write-state! state-path state) nil)))]
+                              :else (do (write-state! state-path state) nil)))
+                decision-baseline
+                (when (and primary? (nil? previous) (nil? tool-profile)
+                           (> (count (bot/available-actions state)) 1))
+                  (save! previous state))]
             (when (and (not= :terminal (:disposition run)) (:awaiting state))
               (throw (ex-info "in-flight effect requires explicit reconciliation"
                               {:mithril/error :mithril.bot/effect-in-flight
@@ -500,11 +505,11 @@
                 (release-lock! lock))
               (-> (decide! state owner now (boolean tool-profile))
                 (.then
-                 (fn [{:keys [admitted held reason audit]}]
+                 (fn [{:keys [admitted held reason audit model-result]}]
                    (if held
                      (let [shadow? (= "shadow" mode)]
                        (when-not shadow?
-                         (save! previous held))
+                         (save! (or decision-baseline previous) held))
                        (append-audit! state-path
                                       {:at (.toISOString (js/Date.))
                                        :mode mode :status (if shadow? :shadow-refused :held)
@@ -528,8 +533,13 @@
                          (println (json-line {:status :shadowed :action (:label action)
                                              :step (:step state) :run-status (:status state)})))
                        (let [{requested-state :state effect :effect}
-                             (bot/request-effect state admitted grants owner (+ now 3))
-                             requested-checkpoint (save! previous requested-state)
+                             (if model-result
+                               (decision-proof/request-effect
+                                state admitted model-result audit grants owner
+                                (+ now 2) (+ now 3))
+                               (bot/request-effect state admitted grants owner (+ now 3)))
+                             requested-checkpoint
+                             (save! (or decision-baseline previous) requested-state)
                              _ (append-audit! state-path
                                               (assoc base-audit :status :effect-requested
                                                      :effect-id (:id effect)))
