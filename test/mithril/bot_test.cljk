@@ -7,6 +7,9 @@
 (defn read-text [path] (.readFileSync (js/require "fs") path "utf8"))
 (defn profile [] (bot/compile-text "examples/governed-coding-bot.mith"
                                   (read-text "examples/governed-coding-bot.mith")))
+(defn legacy-profile []
+  (let [doc (compiler/parse-source (read-text "examples/governed-coding-bot.mith"))]
+    (bot/compile-document "legacy.mith" (dissoc doc "process" "legacyProfiles"))))
 (defn task [] {:id "task-1" :workspace "/tmp/work" :goal "Implement one checked change"})
 (defn error-code [f] (try (f) nil (catch :default e (:mithril/error (ex-data e)))))
 
@@ -158,6 +161,70 @@
     (is (not= (:run-id running) (get-in next-run [:state :run-id])))
     (is (= :mithril.bot/state-binding-mismatch
            (error-code #(bot/resume-or-start artifact task-b running "worker-1" 1400))))))
+
+(deftest legacy-checkpoints-migrate-by-replaying-semantic-facts
+  (let [artifact (profile)
+        old-artifact (legacy-profile)
+        base (-> (bot/start-run old-artifact (task) "worker-1" 1000)
+                 (assoc :profile-digest
+                        "sha256:c53e7a4cddfee776084a68bd926924f1554d60cb0888f2000a5672ba2de5136d")
+                 (update-in [:policy :actions]
+                            #(vec (remove #{"https://mithril.fund/id/action/patch-reset"} %)))
+                 (update-in [:policy :effects]
+                            #(vec (remove #{:workspace/revert-patch} %))))
+        stages [{:facts #{:semantic/prefix-valid}
+                 :actions ["workspace-inspect" "git-status" "stop"]}
+                {:facts #{:semantic/prefix-valid :workspace/inspected}
+                 :actions ["code-propose" "git-status" "stop"]}
+                {:facts #{:semantic/prefix-valid :workspace/inspected :proposal/ready}
+                 :actions ["patch-apply" "git-status" "stop"]}
+                {:facts #{:semantic/prefix-valid :workspace/inspected :proposal/ready
+                          :workspace/changed :repair/needed}
+                 :actions ["patch-reset" "amu-compile" "git-status" "stop"]}
+                {:facts #{:semantic/prefix-valid :workspace/inspected :proposal/ready
+                          :workspace/changed :artifact/compiled :repair/needed}
+                 :actions ["patch-reset" "test-run" "git-status" "stop"]}
+                {:facts #{:semantic/prefix-valid :workspace/inspected :proposal/ready
+                          :workspace/changed :artifact/compiled :tests/passed}
+                 :actions ["git-status" "stop"]}
+                {:facts #{:semantic/prefix-valid :workspace/inspected :proposal/ready
+                          :workspace/changed :artifact/compiled :tests/passed :git/observed}
+                 :actions ["git-status" "stop"]}
+                {:facts #{:semantic/prefix-valid :workspace/inspected :workspace/reset}
+                 :actions ["code-propose" "git-status" "stop"]}]]
+    (is (= ["sha256:c53e7a4cddfee776084a68bd926924f1554d60cb0888f2000a5672ba2de5136d"]
+           (:legacy-profile-digests artifact)))
+    (doseq [[index {:keys [facts actions]}] (map-indexed vector stages)]
+      (let [legacy (assoc base :facts facts :step index
+                          :receipts [{:legacy index}]
+                          :retries {"legacy" index})
+            result (bot/resume-or-start artifact (task) legacy "worker-1" 2000)
+            migrated (:state result)]
+        (is (= :migrated (:disposition result)))
+        (is (= "https://mithril.fund/state/bot-run-v2" (:format migrated)))
+        (is (= actions (mapv :label (bot/available-actions migrated))))
+        (is (= index (:step migrated)))
+        (is (= [{:legacy index}] (:receipts migrated)))
+        (is (= {"legacy" index} (:retries migrated)))
+        (is (= :migrate/bot-run-v1-to-bpmn-v2
+               (-> migrated :semantic-receipts last :operation)))))))
+
+(deftest unsafe-or-unbound-legacy-checkpoints-refuse-migration
+  (let [artifact (profile)
+        base (-> (bot/start-run (legacy-profile) (task) "worker-1" 1000)
+                 (assoc :profile-digest
+                        "sha256:c53e7a4cddfee776084a68bd926924f1554d60cb0888f2000a5672ba2de5136d")
+                 (update-in [:policy :actions]
+                            #(vec (remove #{"https://mithril.fund/id/action/patch-reset"} %)))
+                 (update-in [:policy :effects]
+                            #(vec (remove #{:workspace/revert-patch} %))))
+        mismatch (assoc base :profile-digest (str "sha256:" (apply str (repeat 64 "f"))))
+        in-flight (assoc base :awaiting {:id "effect"})
+        unknown-fact (update base :facts conj :untrusted/fact)
+        inconsistent (update base :facts conj :tests/passed)]
+    (doseq [state [mismatch in-flight unknown-fact inconsistent]]
+      (is (= :mithril.bot/state-binding-mismatch
+             (error-code #(bot/resume-or-start artifact (task) state "worker-1" 2000)))))))
 
 (deftest generated-text-and-low-confidence-are-refused
   (let [state (bot/start-run (profile) (task) "worker-1" 1000)]

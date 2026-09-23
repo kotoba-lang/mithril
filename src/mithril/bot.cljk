@@ -16,7 +16,8 @@
 (def model-kind "openrouter/typesafe-jev-v1")
 
 (def legacy-source-keys #{"@context" "@id" "@type" "goal" "ontology" "policy"})
-(def source-keys (conj legacy-source-keys "process"))
+(def bpmn-source-keys (conj legacy-source-keys "process"))
+(def source-keys (conj bpmn-source-keys "legacyProfiles"))
 (def policy-keys #{"maxSteps" "maxRetries" "leaseSeconds" "confidenceFloor"
                    "actions" "effects"})
 
@@ -65,6 +66,9 @@
 (defn- sha256? [value]
   (and (string? value) (boolean (re-matches #"[0-9a-f]{64}" value))))
 
+(defn- digest-identity? [value]
+  (and (string? value) (boolean (re-matches #"sha256:[0-9a-f]{64}" value))))
+
 (def jev-provider "openrouter")
 (def jev-endpoint "https://openrouter.ai/api/alpha/decisions")
 (def jev-model "typesafe/jev-1.13")
@@ -84,7 +88,7 @@
     (fail! :mithril/unpinned-context "bot profile must use the pinned context" {}))
   (when-not (= "BotProfile" (get doc "@type"))
     (fail! :mithril/unexpected-source-type "@type must be BotProfile" {}))
-  (when-not (contains? #{legacy-source-keys source-keys} (set (keys doc)))
+  (when-not (contains? #{legacy-source-keys bpmn-source-keys source-keys} (set (keys doc)))
     (fail! :mithril/unknown-source-key "bot profile has an unknown or missing key" {}))
   (when-not (= goal (get doc "goal"))
     (fail! :mithril/unknown-goal "bot goal is outside the closed catalog" {}))
@@ -117,13 +121,21 @@
           (fail! :mithril.bot/invalid-effects
                  "effects must exactly cover the selected action capabilities" {})))
       (let [process (when-let [process-doc (get doc "process")]
-                      (bpmn/compile-process process-doc action-by-id actions))]
+                      (bpmn/compile-process process-doc action-by-id actions))
+            legacy-profiles (get doc "legacyProfiles" [])]
+        (when-not (and (vector? legacy-profiles)
+                       (= (count legacy-profiles) (count (set legacy-profiles)))
+                       (every? digest-identity? legacy-profiles)
+                       (or process (empty? legacy-profiles)))
+          (fail! :mithril.bot/invalid-legacy-profiles
+                 "legacy profile identities must be a unique SHA-256 vector on a BPMN profile" {}))
         (when (and process (not= (get doc "ontology") (:ontology process)))
           (fail! :mithril.bpmn/ontology-mismatch
                  "bot profile and BPMN process must pin the same ontology" {}))
         {:format artifact-format
          :media-type compiler/media-type
          :graph-digest (compiler/graph-digest doc)
+         :legacy-profile-digests legacy-profiles
          :bot-ir {:version (if process :mithril.bot/v2 :mithril.bot/v1)
                   :goal :goal/governed-coding-task
                   :ontology (get doc "ontology")
@@ -170,6 +182,90 @@
   [task]
   (execution/digest task))
 
+(def ^:private legacy-run-format "https://mithril.fund/state/bot-run-v1")
+(def ^:private bpmn-run-format "https://mithril.fund/state/bot-run-v2")
+
+(def ^:private legacy-facts
+  #{:semantic/prefix-valid :workspace/inspected :proposal/ready
+    :workspace/changed :artifact/compiled :tests/passed :git/observed
+    :repair/needed :workspace/reset})
+
+(defn- legacy-facts-valid? [facts]
+  (and (set? facts)
+       (contains? facts :semantic/prefix-valid)
+       (every? legacy-facts facts)
+       (or (not (contains? facts :proposal/ready))
+           (contains? facts :workspace/inspected))
+       (or (not (contains? facts :workspace/changed))
+           (contains? facts :proposal/ready))
+       (or (not (contains? facts :artifact/compiled))
+           (contains? facts :workspace/changed))
+       (or (not (contains? facts :tests/passed))
+           (contains? facts :artifact/compiled))
+       (or (not (contains? facts :repair/needed))
+           (contains? facts :workspace/changed))
+       (or (not (contains? facts :workspace/reset))
+           (and (contains? facts :workspace/inspected)
+                (not-any? facts [:proposal/ready :workspace/changed
+                                 :artifact/compiled :tests/passed
+                                 :repair/needed])))))
+
+(defn- completed-actions-for-facts [facts]
+  (cond-> []
+    (contains? facts :workspace/inspected)
+    (conj "https://mithril.fund/id/action/workspace-inspect")
+    (contains? facts :proposal/ready)
+    (conj "https://mithril.fund/id/action/code-propose")
+    (contains? facts :workspace/changed)
+    (conj "https://mithril.fund/id/action/patch-apply")
+    (contains? facts :artifact/compiled)
+    (conj "https://mithril.fund/id/action/amu-compile")
+    (contains? facts :tests/passed)
+    (conj "https://mithril.fund/id/action/test-run")
+    (and (contains? facts :tests/passed) (contains? facts :git/observed))
+    (conj "https://mithril.fund/id/action/git-status")))
+
+(defn- compatible-legacy-policy? [artifact state]
+  (let [new-policy (get-in artifact [:bot-ir :policy])
+        old-policy (:policy state)
+        reset-id "https://mithril.fund/id/action/patch-reset"]
+    (and (= (select-keys old-policy [:max-steps :max-retries :lease-seconds
+                                    :confidence-floor])
+            (select-keys new-policy [:max-steps :max-retries :lease-seconds
+                                    :confidence-floor]))
+         (= (set (:actions old-policy))
+            (disj (set (:actions new-policy)) reset-id))
+         (= (set (:effects old-policy))
+            (disj (set (:effects new-policy)) :workspace/revert-patch)))))
+
+(defn- migratable-legacy-run? [artifact task state]
+  (and (= legacy-run-format (:format state))
+       (= :running (:status state))
+       (nil? (:awaiting state))
+       (nil? (:bpmn state))
+       (contains? (set (:legacy-profile-digests artifact)) (:profile-digest state))
+       (compatible-legacy-policy? artifact state)
+       (= (or (:task-digest state) (task-digest (:task state)))
+          (task-digest task))
+       (= (:task state) task)
+       (legacy-facts-valid? (:facts state))))
+
+(defn- migrate-legacy-run [artifact state]
+  (let [process (get-in artifact [:bot-ir :process])
+        actions (completed-actions-for-facts (:facts state))
+        runtime (bpmn/replay-completed-actions (bpmn/start-state process) actions)
+        migration {:operation :migrate/bot-run-v1-to-bpmn-v2
+                   :status :executed
+                   :input-digest (execution/digest state)
+                   :output-digest (:digest process)
+                   :metrics {:replayed-actions (count actions) :tokens 1}}]
+    (-> state
+        (assoc :format bpmn-run-format
+               :profile-digest (:graph-digest artifact)
+               :bpmn runtime
+               :policy (get-in artifact [:bot-ir :policy]))
+        (update :semantic-receipts (fnil conj []) migration))))
+
 (defn start-run [artifact task owner now-ms]
   (when-not (= artifact-format (:format artifact))
     (fail! :mithril.bot/invalid-artifact "artifact is not a bot profile" {}))
@@ -201,9 +297,7 @@
     (let [run-id (execution/digest [(:graph-digest artifact) task owner now-ms])
           lease-ms (* 1000 (get-in artifact [:bot-ir :policy :lease-seconds]))
           process (get-in artifact [:bot-ir :process])]
-      {:format (if process
-                 "https://mithril.fund/state/bot-run-v2"
-                 "https://mithril.fund/state/bot-run-v1")
+      {:format (if process bpmn-run-format legacy-run-format)
        :run-id run-id :profile-digest (:graph-digest artifact)
        :task-digest (task-digest task) :task task
        :status :running :step 0 :facts #{:semantic/prefix-valid}
@@ -239,6 +333,10 @@
           same-task? (= (or (:task-digest state) (task-digest (:task state)))
                         (task-digest task))]
       (cond
+        (migratable-legacy-run? artifact task state)
+        {:disposition :migrated
+         :state (acquire-lease (migrate-legacy-run artifact state) owner now-ms)}
+
         (= :running (:status state))
         (do
           (when-not (and same-profile? same-task?)

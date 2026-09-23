@@ -2,6 +2,8 @@
   :id "https://mithril.fund/id/bot/governed-coder"
   :goal "https://mithril.fund/id/goal/governed-coding-task"
   :ontology "2a8e807877d14b6eb6d31352f79d2976cffc63eb346afd1734b68ed6825fd9f3"
+  :legacy-profiles
+  ["sha256:c53e7a4cddfee776084a68bd926924f1554d60cb0888f2000a5672ba2de5136d"]
   :process
   (bpmn/process
     :id "https://mithril.fund/id/bpmn/governed-coder/process"

@@ -334,6 +334,14 @@ no model or host effect; a task with a distinct content identity starts a new
 bounded run. This makes ordinary cron/webhook at-least-once delivery safe
 without a canary-specific completed-state wrapper.
 
+The BPMN profile explicitly lists the content identities of legacy profiles it
+can migrate. A quiescent v1 checkpoint with the exact task, admitted legacy
+policy, known monotonic facts, and no in-flight effect is upgraded by replaying
+its completed semantic actions through the BPMN interpreter. The migration
+preserves step, retry, and effect receipts and appends a content-digested
+semantic migration receipt. Unknown profiles, facts, inconsistent fact chains,
+or in-flight effects fail closed instead of guessing a token position.
+
 For a coding run, the optional final argument is a JSON tool profile. The task
 must contain the digest printed by `profile-digest`:
 
