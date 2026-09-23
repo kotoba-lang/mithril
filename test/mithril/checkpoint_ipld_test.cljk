@@ -3,7 +3,9 @@
             [ipld.core :as ipld]
             [mithril.bot :as bot]
             [mithril.checkpoint :as checkpoint]
-            [mithril.checkpoint-ipld :as store]))
+            [mithril.checkpoint-ipld :as store]
+            [mithril.execution :as execution]
+            [mithril.form :as form]))
 
 (def fs (js/require "node:fs"))
 (def schema (checkpoint/schema (.readFileSync fs checkpoint/ontology-path "utf8")))
@@ -19,6 +21,8 @@
     {:blocks blocks :put-fn put-fn :get-fn get-fn}))
 (defn reason [f]
   (try (f) nil (catch :default e (or (:reason (ex-data e)) (:type (ex-data e))))))
+(defn code [f]
+  (try (f) nil (catch :default e (:mithril/error (ex-data e)))))
 
 (deftest dag-cbor-checkpoints-use-real-verified-links-and-canonical-state
   (let [{:keys [blocks put-fn get-fn]} (fixture)
@@ -97,3 +101,60 @@
     (is (= [foreign] (:parents (store/read! get-fn schema (:cid changed)))))
     (is (= :invalid-ancestry
            (reason #(store/verify-history! get-fn schema (:cid changed)))))))
+
+(deftest legacy-run-task-is-derived-without-rewriting-the-saved-state
+  (let [{:keys [put-fn get-fn]} (fixture)
+        legacy (-> (state)
+                   (assoc :format checkpoint/legacy-run-format)
+                   (dissoc :task-digest :bpmn))
+        base (store/put! put-fn get-fn schema legacy [])
+        child (store/put! put-fn get-fn schema
+                          (update legacy :facts conj :review/approved) [base])
+        saved (store/read! get-fn schema child)]
+    (is (nil? (get-in saved [:state :task-digest])))
+    (is (= (bot/task-digest (:task legacy))
+           (:task-digest (checkpoint/projection legacy nil))))
+    (is (= 2 (:blocks (store/verify-history! get-fn schema child))))
+    (is (= :mithril.checkpoint/task-binding-mismatch
+           (code #(store/block schema
+                               (assoc legacy :task-digest "sha256:wrong") []))))
+    (is (= :mithril.checkpoint/task-binding-mismatch
+           (code #(store/block schema
+                               (-> legacy
+                                   (assoc :format "https://mithril.fund/state/bot-run-v2"))
+                               []))))))
+
+(deftest semantic-v2-binds-absolute-iri-context-and-reads-v1
+  (let [{:keys [put-fn get-fn]} (fixture)
+        s (state)
+        current (store/put! put-fn get-fn schema s [])
+        v2 (store/read! get-fn schema current)
+        shipped (js->clj (js/JSON.parse
+                          (.readFileSync fs "resources/context-bot-checkpoint-v1.jsonld"
+                                         "utf8")))
+        {:keys [digest block]} (checkpoint/build schema s nil)
+        old-node {"format" store/format-v1
+                  "ontologyDigest" (:ontology-digest schema)
+                  "checkpointDigest" digest
+                  "graphDigest" (:graph-digest block)
+                  "stateDigest" (:state-digest block)
+                  "stateEdn" (execution/canonical-edn-text s)
+                  "source" (:source block)
+                  "parents" []}
+        old (ipld/node->block old-node)]
+    (put-fn (:cid old) (:bytes old))
+    (is (= checkpoint/semantic-context-document shipped))
+    (is (= store/format-id (:format v2)))
+    (is (= checkpoint/semantic-context-uri
+           (get (form/parse (:semantic-source v2)) "@context")))
+    (is (re-matches #"sha256:[0-9a-f]{64}" (:semantic-graph-digest v2)))
+    (is (= store/format-v1 (:format (store/read! get-fn schema (:cid old)))))
+    (is (nil? (:semantic-graph-digest
+               (store/read! get-fn schema (:cid old)))))))
+
+(deftest missing-rdf-mapping-cannot-be-saved-as-semantic-v2
+  (is (= :mithril.checkpoint/rdf-field-loss
+         (code #(with-redefs [checkpoint/semantic-context-document
+                             (update checkpoint/semantic-context-document
+                                     "@context" dissoc "taskDigest")]
+                  (store/block schema (state) []))))))

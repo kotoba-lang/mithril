@@ -2,19 +2,56 @@
   "Content-addressed, ontology-validated projection of a bot run. A block
   binds the full runtime state to its RDF graph and causal predecessor."
   (:require [clojure.string :as str]
+            [json-ld-api.core :as jsonld]
+            [json-ld-api.to-rdf :as to-rdf]
             [mithril.compiler :as compiler]
             [mithril.execution :as execution]
             [mithril.form :as form]
-            [oak.semantic :as oak]))
+            [oak.semantic :as oak]
+            [rdf-canon.core :as rdf-canon]))
 
 (def ontology-path "ontology/bot-checkpoint-v1.mith")
 (def checkpoint-class "https://mithril.fund/ns/v1#BotCheckpoint")
 (def state-class "https://mithril.fund/ns/v1#AgentState")
 (def shape-id "https://mithril.fund/ns/v1#BotCheckpointShape")
 (def base "https://mithril.fund/ns/v1#")
+(def legacy-run-format "https://mithril.fund/state/bot-run-v1")
+(def semantic-context-uri "https://mithril.fund/context/bot-checkpoint/v1")
+(def semantic-fields
+  {"runId" "runId" "runStatus" "runStatus"
+   "stateDigest" "stateDigest" "parentDigest" "parentDigest"
+   "profileDigest" "profileDigest" "taskDigest" "taskDigest"
+   "processDigest" "processDigest" "lastEffectDigest" "lastEffectDigest"
+   "step" "step" "receiptCount" "receiptCount"
+   "bpmnTokenAt" "bpmnTokenAt" "awaitingEffect" "awaitingEffect"
+   "facts" "fact"})
+(def semantic-context-document
+  {"@context"
+   (merge {"BotCheckpoint" (str base "BotCheckpoint")}
+          (into {}
+                (for [[field local-name] semantic-fields]
+                  [field (cond
+                           (= field "facts") {"@id" (str base local-name)
+                                              "@type" "@id"}
+                           (contains? #{"step" "receiptCount"} field)
+                           {"@id" (str base local-name)
+                            "@type" "http://www.w3.org/2001/XMLSchema#integer"}
+                           :else (str base local-name))])))} )
 
 (defn- refuse! [code message]
   (throw (ex-info message {:mithril/error code})))
+
+(defn task-identity [state]
+  (let [task (:task state)
+        declared (:task-digest state)
+        calculated (when (map? task) (execution/digest task))]
+    (when-not (and (string? calculated)
+                   (or (and (string? declared) (= declared calculated))
+                       (and (= legacy-run-format (:format state))
+                            (nil? declared))))
+      (refuse! :mithril.checkpoint/task-binding-mismatch
+               "checkpoint task must match its declared digest; only legacy v1 may omit it"))
+    calculated))
 
 (defn schema [source]
   (let [artifact (compiler/compile-ontology-text ontology-path source)
@@ -50,6 +87,7 @@
       (refuse! :mithril.checkpoint/invalid-ontology
                "checkpoint OWL class or SHACL target/fields do not match the contract"))
     {:ontology-digest (:graph-digest artifact)
+     :ontology-source source
      :shape {:shacl/type :node-shape :property properties}}))
 
 (defn projection [state parent-digest]
@@ -65,7 +103,7 @@
                       :run-status (name (:status state))
                       :state-digest (execution/digest state)
                       :profile-digest (:profile-digest state)
-                      :task-digest (:task-digest state)
+                      :task-digest (task-identity state)
                       :step (:step state)
                       :receipt-count (count (:receipts state))
                       :facts (mapv fact-iri (sort-by str (:facts state)))}
@@ -91,6 +129,35 @@
        (str/join " " (mapcat (fn [[k v]] [(str k) (pr-str v)])
                             (sort-by (comp str key) data)))
        ")"))
+
+(defn semantic-form-text [data]
+  (str "(mithril/bot-checkpoint-semantic "
+       (str/join " " (mapcat (fn [[k v]] [(str k) (pr-str v)])
+                            (sort-by (comp str key) data)))
+       ")"))
+
+(defn semantic-graph [state parent-digest]
+  (let [source (semantic-form-text (projection state parent-digest))
+        document (form/parse source)
+        _ (when-not (= semantic-context-uri (get document "@context"))
+            (refuse! :mithril.checkpoint/invalid-semantic-context
+                     "checkpoint semantic source has the wrong context"))
+        expanded (jsonld/expand document
+                                {:contexts {semantic-context-uri
+                                            semantic-context-document}})
+        node (first expanded)
+        expected (set (concat ["@id" "@type"]
+                              (for [[field local-name] semantic-fields
+                                    :when (contains? document field)]
+                                (str base local-name))))]
+    (when-not (and (= 1 (count expanded))
+                   (= expected (set (keys node)))
+                   (= [(str base "BotCheckpoint")] (get node "@type")))
+      (refuse! :mithril.checkpoint/rdf-field-loss
+               "checkpoint semantic RDF projection lost a typed field"))
+    {:source source
+     :graph-digest (str "sha256:"
+                        (rdf-canon/canonical-hash (to-rdf/to-rdf expanded)))}))
 
 (defn build [schema state parent-digest]
   (let [data (projection state parent-digest)

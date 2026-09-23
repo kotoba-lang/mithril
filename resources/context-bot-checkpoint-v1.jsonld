@@ -1,0 +1,27 @@
+{
+  "@context": {
+    "BotCheckpoint": "https://mithril.fund/ns/v1#BotCheckpoint",
+    "runId": "https://mithril.fund/ns/v1#runId",
+    "runStatus": "https://mithril.fund/ns/v1#runStatus",
+    "stateDigest": "https://mithril.fund/ns/v1#stateDigest",
+    "parentDigest": "https://mithril.fund/ns/v1#parentDigest",
+    "profileDigest": "https://mithril.fund/ns/v1#profileDigest",
+    "taskDigest": "https://mithril.fund/ns/v1#taskDigest",
+    "processDigest": "https://mithril.fund/ns/v1#processDigest",
+    "lastEffectDigest": "https://mithril.fund/ns/v1#lastEffectDigest",
+    "step": {
+      "@id": "https://mithril.fund/ns/v1#step",
+      "@type": "http://www.w3.org/2001/XMLSchema#integer"
+    },
+    "receiptCount": {
+      "@id": "https://mithril.fund/ns/v1#receiptCount",
+      "@type": "http://www.w3.org/2001/XMLSchema#integer"
+    },
+    "bpmnTokenAt": "https://mithril.fund/ns/v1#bpmnTokenAt",
+    "awaitingEffect": "https://mithril.fund/ns/v1#awaitingEffect",
+    "facts": {
+      "@id": "https://mithril.fund/ns/v1#fact",
+      "@type": "@id"
+    }
+  }
+}
