@@ -1,0 +1,80 @@
+(ns mithril.decision-input
+  "Jev-facing Mithril form derived from an OWL/SHACL-checked domain RDF graph.
+  This is a bounded semantic projection, not a free-form prompt or authority
+  to execute the selected action."
+  (:require [mithril.bot :as bot]
+            [mithril.checkpoint :as checkpoint]
+            [mithril.domain-rdf :as domain-rdf]
+            [mithril.execution :as execution]))
+
+(def format-id "https://mithril.fund/agent/decision-state-v1")
+(def max-form-chars 16384)
+
+(defn- refuse! [reason]
+  (throw (ex-info "Mithril semantic decision input refused"
+                  {:mithril/error :mithril.decision-input/refused
+                   :reason reason})))
+
+(defn- ontology-source []
+  #?(:cljs (.readFileSync (js/require "node:fs")
+                         domain-rdf/ontology-path "utf8")
+     :clj (slurp domain-rdf/ontology-path)))
+
+(defn- field [name value]
+  (str " :" name " " (pr-str value)))
+
+(defn build
+  "Return a small .mith S-expression and identities for the exact admitted
+  action set. The full domain graph is materialized and checked before any
+  state reaches Jev."
+  [state candidates]
+  (let [expected-actions (bot/available-actions state)
+        expected (mapv :id expected-actions)
+        actual (mapv :id candidates)
+        goal (get-in state [:task :goal])]
+    (when-not (and (map? state)
+                   (vector? candidates) (<= 2 (count candidates) 16)
+                   (= expected actual)
+                   (= expected-actions candidates)
+                   (string? goal) (<= (count goal) 8192)
+                   (set? (:facts state)) (<= (count (:facts state)) 128))
+      (refuse! :invalid-decision-state))
+    (let [domain-state (assoc state :task-digest
+                              (checkpoint/task-identity state))
+          document (domain-rdf/document domain-state)
+          dataset (domain-rdf/quads document)
+          schema (domain-rdf/schema (ontology-source))
+          report (domain-rdf/validate! schema dataset)]
+      (when-not (:valid? report)
+        (refuse! :domain-shacl-violation))
+      (let [nodes (get document "@graph")
+            root (first (filter #(= "Run" (get % "@type")) nodes))
+            facts (->> nodes
+                       (filter #(= "Fact" (get % "@type")))
+                       (map #(get % "name"))
+                       sort vec)
+            receipts (->> nodes
+                          (filter #(= "Receipt" (get % "@type")))
+                          (sort-by #(get % "index"))
+                          (mapv #(get-in % ["action" "@id"])))
+            graph-digest (domain-rdf/graph-digest dataset)
+            form (str "(mithril/decision-state"
+                      (field "format" format-id)
+                      (field "ontology-digest" (:ontology-digest schema))
+                      (field "graph-digest" graph-digest)
+                      (field "run-id" (get root "runId"))
+                      (field "status" (get root "status"))
+                      (field "step" (get root "step"))
+                      (field "task-digest" (get root "taskDigest"))
+                      (field "task-goal" goal)
+                      (field "facts" facts)
+                      (field "receipt-actions" receipts)
+                      (field "candidate-actions" actual)
+                      ")")]
+        (when (> (count form) max-form-chars)
+          (refuse! :decision-state-too-large))
+        {:text form
+         :ontology-digest (:ontology-digest schema)
+         :graph-digest graph-digest
+         :form-digest (execution/digest form)
+         :checked-nodes (:checked-nodes report)}))))

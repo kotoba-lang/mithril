@@ -423,10 +423,9 @@
   (let [candidates (available-actions state)]
     (when (< (count candidates) 2)
       (fail! :mithril.bot/insufficient-candidates "decision requires at least two admitted actions" {}))
-    {:state (str "Mithril bot run " (:run-id state) " step " (:step state)
-                 ". Select one admitted action; never generate source text.")
+    {:run-state state
      :questions [{:type "choice"
-                  :instructions (str "Advance task: " (get-in state [:task :goal]))
+                  :instructions "Select one admitted semantic action; do not generate source text."
                   :options (mapv :label candidates)}]
      :candidates candidates}))
 

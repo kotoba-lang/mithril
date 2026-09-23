@@ -1,25 +1,78 @@
 (ns mithril.openrouter-jev-test
-  (:require [cljs.test :refer [deftest is]]
+  (:require [cljs.reader :as reader]
+            [cljs.test :refer [deftest is]]
             [mithril.bot :as bot]
+            [mithril.checkpoint :as checkpoint]
+            [mithril.domain-rdf :as domain-rdf]
             [mithril.openrouter-jev :as jev]))
 
-(def plan
-  {:state "A bounded coding run before workspace inspection."
-   :questions [{:type "choice"
-                :instructions "Choose the safest next action."
-                :options ["workspace-inspect" "git-status" "stop"]}]
-   :candidates [(get bot/action-by-label "workspace-inspect")
-                (get bot/action-by-label "git-status")
-                (get bot/action-by-label "stop")]})
+(def fs (js/require "node:fs"))
+(defn plan []
+  (let [artifact (bot/compile-text "examples/governed-coding-bot.mith"
+                                   (.readFileSync fs "examples/governed-coding-bot.mith" "utf8"))
+        state (bot/start-run artifact
+                             {:id "jev-semantic-input" :workspace "/tmp/jev-test"
+                              :goal "Inspect the workspace before coding"}
+                             "jev-test" 1000)]
+    (bot/prepare-request state "jev-test" 1001)))
+
+(defn state-fields [request]
+  (apply hash-map (rest (reader/read-string (:state request)))))
 
 (deftest request-is-the-openrouter-decisions-shape
-  (let [request (jev/decision-request plan)]
+  (let [prepared (plan)
+        request (jev/decision-request prepared)
+        form (reader/read-string (:state request))
+        fields (apply hash-map (rest form))]
     (is (= bot/jev-model (:model request)))
     (is (= "choice" (get-in request [:questions jev/question-id :type])))
     (is (= #{"workspace-inspect" "git-status" "stop"}
            (set (keys (get-in request [:questions jev/question-id :criteria])))))
+    (is (= 'mithril/decision-state (first form)))
+    (is (= "https://mithril.fund/agent/decision-state-v1" (:format fields)))
+    (is (re-matches #"sha256:[0-9a-f]{64}" (:graph-digest fields)))
+    (is (= [":semantic/prefix-valid"] (:facts fields)))
+    (is (= (mapv :id (:candidates prepared)) (:candidate-actions fields)))
+    (is (= (domain-rdf/graph-digest
+            (domain-rdf/quads
+             (domain-rdf/document
+              (assoc (:run-state prepared) :task-digest
+                     (checkpoint/task-identity (:run-state prepared))))))
+           (:graph-digest fields)))
+    (is (= "Inspect the workspace before coding" (:task-goal fields)))
+    (is (not (.includes (:state request) "/tmp/jev-test"))
+        "private workspace path is not sent in Jev prefill")
+    (is (= 'mithril/action
+           (first (reader/read-string
+                   (get-in request [:questions jev/question-id :criteria
+                                    "workspace-inspect"])))))
     (is (not (contains? request :messages)))
     (is (not (contains? request :prompt)))))
+
+(deftest semantic-fact-delta-changes-jev-prefill-identity
+  (let [prepared (plan)
+        before (state-fields (jev/decision-request prepared))
+        after (state-fields
+               (jev/decision-request
+                (update-in prepared [:run-state :facts] conj :source/verified)))]
+    (is (not= (:graph-digest before) (:graph-digest after)))
+    (is (= [":semantic/prefix-valid" ":source/verified"] (:facts after)))))
+
+(deftest semantic-state-fails-closed-before-model-call
+  (let [prepared (plan)
+        error (fn [value]
+                (try (jev/decision-request value) nil
+                     (catch :default e (or (:reason (ex-data e))
+                                           (:mithril/error (ex-data e))))))]
+    (is (= :mithril.jev/candidate-mismatch
+           (error (update prepared :candidates pop))))
+    (is (= :invalid-decision-state
+           (error (assoc-in prepared [:candidates 0 :effect] :workspace/write))))
+    (is (= :invalid-run-state
+           (error (assoc-in prepared [:run-state :step] "not-an-integer"))))
+    (is (= :invalid-decision-state
+           (error (assoc-in prepared [:run-state :task :goal]
+                            (apply str (repeat 8193 "x"))))))))
 
 (deftest live-response-normalizes-without-generated-text
   (let [response {:id "gen-dec-test"

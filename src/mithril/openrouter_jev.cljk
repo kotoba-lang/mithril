@@ -5,7 +5,8 @@
   executes an action. `mithril.bot` independently validates the returned
   distribution, confidence, model identity and Governor capability."
   (:require [clojure.string :as str]
-            [mithril.bot :as bot]))
+            [mithril.bot :as bot]
+            [mithril.decision-input :as decision-input]))
 
 (def question-id "next_action")
 (def timeout-ms 30000)
@@ -13,26 +14,34 @@
 (defn- fail! [code detail data]
   (throw (ex-info detail (merge {:mithril/error code :detail detail} data))))
 
-(defn decision-request [{:keys [state questions candidates]}]
-  (when-not (and (string? state) (= 1 (count questions)) (seq candidates))
+(defn- action-form [{:keys [id effect requires produces]}]
+  (str "(mithril/action :id " (pr-str id)
+       " :effect " (pr-str (str effect))
+       " :requires " (pr-str (vec (sort (map str requires))))
+       " :produces " (pr-str (vec (sort (map str produces)))) ")"))
+
+(defn- checked-request [{:keys [run-state questions candidates]}]
+  (when-not (and (map? run-state) (= 1 (count questions)) (seq candidates))
     (fail! :mithril.jev/invalid-plan "bot decision plan is invalid" {}))
   (let [question (first questions)
         labels (mapv :label candidates)
         descriptions (into {}
-                           (map (fn [{:keys [label effect requires produces description]}]
-                                  [label (or description
-                                             (str "Effect " (name effect)
-                                                  "; requires " (str/join "," (map name (sort requires)))
-                                                  "; produces " (str/join "," (map name (sort produces)))))])
+                           (map (fn [{:keys [label] :as action}]
+                                  [label (action-form action)])
                                 candidates))]
     (when-not (= labels (:options question))
       (fail! :mithril.jev/candidate-mismatch "question options do not match candidates" {}))
-    {:model bot/jev-model
-     :state state
-     :questions {question-id
-                 {:type "choice"
-                  :instructions (:instructions question)
-                  :criteria descriptions}}}))
+    (let [input (decision-input/build run-state candidates)]
+      {:input input
+       :request {:model bot/jev-model
+                 :state (:text input)
+                 :questions {question-id
+                             {:type "choice"
+                              :instructions (:instructions question)
+                              :criteria descriptions}}}})))
+
+(defn decision-request [plan]
+  (:request (checked-request plan)))
 
 (defn normalize-response [response]
   (when-not (map? response)
@@ -71,7 +80,8 @@
      (fail! :mithril.jev/missing-credential "OPENROUTER_API_KEY is unavailable" {}))
    (let [controller (js/AbortController.)
          timer (js/setTimeout #(.abort controller) timeout-ms)
-         body (.stringify js/JSON (clj->js (decision-request plan)))]
+         {:keys [request input]} (checked-request plan)
+         body (.stringify js/JSON (clj->js request))]
      (-> (fetch-fn bot/jev-endpoint
                    #js {:method "POST"
                         :headers #js {"authorization" (str "Bearer " api-key)
@@ -89,5 +99,11 @@
                                         (str "OpenRouter returned HTTP " (.-status response))
                                         {:status (.-status response)
                                          :body (subs body 0 (min 300 (count body)))})))))))
-         (.then #(normalize-response (js->clj % :keywordize-keys true)))
+         (.then (fn [response]
+                  (update (normalize-response (js->clj response :keywordize-keys true))
+                          :audit assoc
+                          :decision-state-digest (:form-digest input)
+                          :domain-graph-digest (:graph-digest input)
+                          :domain-ontology-digest (:ontology-digest input)
+                          :semantic-nodes (:checked-nodes input))))
          (.finally #(js/clearTimeout timer))))))
