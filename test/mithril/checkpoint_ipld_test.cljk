@@ -5,7 +5,8 @@
             [mithril.checkpoint :as checkpoint]
             [mithril.checkpoint-ipld :as store]
             [mithril.execution :as execution]
-            [mithril.form :as form]))
+            [mithril.form :as form]
+            [mithril.state-node :as state-node]))
 
 (def fs (js/require "node:fs"))
 (def schema (checkpoint/schema (.readFileSync fs checkpoint/ontology-path "utf8")))
@@ -124,12 +125,12 @@
                                    (assoc :format "https://mithril.fund/state/bot-run-v2"))
                                []))))))
 
-(deftest semantic-v2-binds-absolute-iri-context-and-reads-v1
+(deftest semantic-v4-reconstructs-from-rdf-and-reads-v1-v2-v3
   (let [{:keys [put-fn get-fn]} (fixture)
         s (state)
         current (store/put! put-fn get-fn schema s [])
-        v3 (store/read! get-fn schema current)
-        v3-node (ipld/get-node get-fn current)
+        v4 (store/read! get-fn schema current)
+        v4-node (ipld/get-node get-fn current)
         shipped (js->clj (js/JSON.parse
                           (.readFileSync fs "resources/context-bot-checkpoint-v1.jsonld"
                                          "utf8")))
@@ -143,20 +144,30 @@
                   "source" (:source block)
                   "parents" []}
         old (ipld/node->block old-node)
+        v3-node (-> v4-node
+                    (dissoc "stateDataset")
+                    (assoc "format" store/format-v3
+                           "stateNode" (state-node/encode-value s)))
+        v3 (ipld/node->block v3-node)
         v2-node (-> v3-node
                     (dissoc "stateNode")
                     (assoc "format" store/format-v2
                            "stateEdn" (execution/canonical-edn-text s)))
         v2 (ipld/node->block v2-node)]
     (put-fn (:cid old) (:bytes old))
+    (put-fn (:cid v3) (:bytes v3))
     (put-fn (:cid v2) (:bytes v2))
     (is (= checkpoint/semantic-context-document shipped))
-    (is (= store/format-id (:format v3)))
-    (is (not (contains? v3-node "stateEdn")))
-    (is (map? (get v3-node "stateNode")))
+    (is (= store/format-id (:format v4)))
+    (is (not (contains? v4-node "stateEdn")))
+    (is (not (contains? v4-node "stateNode")))
+    (is (map? (get v4-node "stateDataset")))
+    (is (= s (:state v4)))
     (is (= checkpoint/semantic-context-uri
-           (get (form/parse (:semantic-source v3)) "@context")))
-    (is (re-matches #"sha256:[0-9a-f]{64}" (:semantic-graph-digest v3)))
+           (get (form/parse (:semantic-source v4)) "@context")))
+    (is (re-matches #"sha256:[0-9a-f]{64}" (:semantic-graph-digest v4)))
+    (is (= store/format-v3 (:format (store/read! get-fn schema (:cid v3)))))
+    (is (= s (:state (store/read! get-fn schema (:cid v3)))))
     (is (= store/format-v2 (:format (store/read! get-fn schema (:cid v2)))))
     (is (= s (:state (store/read! get-fn schema (:cid v2)))))
     (is (= store/format-v1 (:format (store/read! get-fn schema (:cid old)))))

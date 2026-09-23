@@ -59,7 +59,7 @@
                      (reason #(session/load! store schema state-path)))))))
       (finally (.rmSync fs directory #js {:recursive true :force true})))))
 
-(deftest primary-session-continues-a-verified-v2-head-into-v3
+(deftest primary-session-continues-a-verified-v2-head-into-v4
   (let [directory (.mkdtempSync fs (.join path (.tmpdir os) "mithril-ipld-upgrade-"))]
     (try
       (let [state-path (.join path directory "run.edn")
@@ -74,7 +74,7 @@
             base (session/save! store schema state-path nil s0)
             base-id (:stateCid base)
             v2-node (-> (ipld-core/get-node #(local/get-block store %) base-id)
-                        (dissoc "stateNode")
+                        (dissoc "stateDataset")
                         (assoc "format" ipld/format-v2
                                "stateEdn" (execution/canonical-edn-text s0)
                                "parents" [(ipld-core/link base-id)]))

@@ -1,0 +1,57 @@
+(ns mithril.state-rdf-test
+  (:require [cljs.test :refer [deftest is]]
+            [mithril.bot :as bot]
+            [mithril.state-rdf :as rdf]))
+
+(def fs (js/require "node:fs"))
+(defn- reason [f]
+  (try (f) nil (catch :default error (:reason (ex-data error)))))
+
+(deftest complete-bot-state-roundtrips-through-rdf-quads
+  (let [artifact (bot/compile-text "examples/governed-coding-bot.mith"
+                                   (.readFileSync fs "examples/governed-coding-bot.mith" "utf8"))
+        state (bot/start-run artifact
+                             {:id "rdf-state-test" :workspace "/tmp"
+                              :goal "full RDF state"}
+                             "rdf-state-test" 1000)
+        document (rdf/document state)
+        quads (rdf/quads document)
+        packed (rdf/pack-quads quads)]
+    (is (> (count quads) 100))
+    (is (= state (rdf/decode-quads! quads)))
+    (is (= state (rdf/decode-quads! (vec (reverse quads)))))
+    (is (= state (rdf/decode-document! document)))
+    (is (= state (rdf/decode-packed! packed)))
+    (is (= (set quads) (set (rdf/unpack-quads! packed))))
+    (is (re-matches #"sha256:[0-9a-f]{64}" (rdf/graph-digest document)))
+    (is (= (rdf/graph-digest document)
+           (rdf/graph-digest (rdf/document (into {} (reverse (seq state)))))))
+    (is (= :cardinality
+           (reason #(rdf/decode-quads!
+                     (vec (remove (fn [quad]
+                                    (= (str rdf/base "index")
+                                       (get-in quad [:predicate :value]))) quads))))))
+    (is (= :noncanonical-jsonld-state
+           (reason #(rdf/decode-document! (assoc document "unmapped" "ignored")))))
+    (is (= :noncanonical-packed-dataset
+           (reason #(rdf/decode-packed!
+                     (update packed "triples" (comp vec reverse))))))
+    (is (= :invalid-jsonld-context
+           (reason #(rdf/decode-document!
+                     {"@context" "https://example.invalid/remote"
+                      "@graph" []}))))))
+
+(deftest state-rdf-rejects-readdressed-content-and-unsupported-values
+  (let [state {:id "x" :nested {:facts #{:a/b :c/d}
+                                 :values [nil true false 42 "text"]}}
+        document (rdf/document state)
+        changed (update document "@graph"
+                        (fn [nodes]
+                          (mapv (fn [node]
+                                  (if (= "text" (get node "text"))
+                                    (assoc node "text" "changed") node)) nodes)))]
+    (is (= state (rdf/decode-document! document)))
+    (is (= :noncanonical-rdf-state
+           (reason #(rdf/decode-document! changed))))
+    (is (= :unsupported-value
+           (reason #(rdf/document {:code '(+ 1 2)}))))))
