@@ -141,12 +141,14 @@
       (let [profile (assoc (coding-profile workspace artifacts)
                            :proposer {:program "/bin/echo" :profile "typed-mithril-v1"
                                       :timeout-ms 5000})
+            prompt-seen (atom nil)
             effect (assoc base-effect :id "mismatch" :run-id "sha256:mismatch-run"
                           :workspace workspace :operation :llm/propose-patch
                           :tool-profile-digest (hermes/tool-profile-digest profile))
             call (fn [program args cwd timeout-ms]
                    (if (= program "/bin/echo")
                      (do
+                       (reset! prompt-seen (nth args (inc (.indexOf (clj->js args) "-z"))))
                        (.writeFileSync fs (str cwd "/app.mith") "value 2\n" "utf8")
                        (.stringify js/JSON
                                    (clj->js {:status "proposed" :path "app.mith"
@@ -156,6 +158,8 @@
                                     #js {:cwd cwd :encoding "utf8" :timeout timeout-ms})))
             result (hermes/execute-effect effect {:profile profile :exec-fn call})]
         (is (= :failed (get-in result [:receipt :status])))
+        (is (re-find #"^Goal: " @prompt-seen))
+        (is (not (re-find #"patch tool|answer DONE" @prompt-seen)))
         (is (= :mithril.hermes/typed-edit-mismatch (get-in result [:audit :error])))
         (is (= "value 1\n" (.readFileSync fs (str workspace "/app.mith") "utf8"))))
       (finally

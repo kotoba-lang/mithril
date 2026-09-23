@@ -302,7 +302,10 @@
         (let [record (with-ipld-witness
                        {:format (if (:coding? contract)
                                   scheduler/coding-receipt-format scheduler/receipt-format)
-                        :status "completed" :runStatus (name (:status state))
+                        :status (if (= :failed-effect outcome)
+                                  "effect-failed" "completed")
+                        :effectStatus (name (:status receipt))
+                        :runStatus (name (:status state))
                         :executionId execution-id
                         :source "builtin" :jobId (:job-id contract)
                         :scheduledInstant (:scheduled_instant claim)
@@ -316,8 +319,10 @@
                         :step (:step state)} witness)]
           (.writeFileSync fs receipt-path (str (json record) "\n")
                           #js {:encoding "utf8" :flag "wx"})
-          (println (json {:status "completed" :executionId execution-id
-                          :effect effect-name :receipt receipt-path})))))))
+          (println (json {:status (:status record) :executionId execution-id
+                          :effect effect-name :receipt receipt-path}))
+          (when (= :failed-effect outcome)
+            (set! (.-exitCode js/process) 1)))))))
 
 (let [[command contract-path bot-path profiles-root manifest-dir state-dir & extra]
       *command-line-args*]
