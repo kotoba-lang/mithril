@@ -5,9 +5,11 @@
                :clj [clojure.edn :as reader])
             [mithril.bot :as bot]
             [mithril.decision-input :as decision-input]
+            [mithril.decision-semantic :as semantic]
             [mithril.execution :as execution]))
 
-(def format-id "https://mithril.fund/receipt/jev-decision-v1")
+(def legacy-format-id "https://mithril.fund/receipt/jev-decision-v1")
+(def format-id "https://mithril.fund/receipt/jev-decision-v2")
 
 (defn- refuse! [reason]
   (throw (ex-info "Mithril Jev decision proof refused"
@@ -33,7 +35,7 @@
                       (bot/admit-decision state model-result owner admitted-at))
                    (<= (count result-source) 8192))
       (refuse! :decision-evidence-mismatch))
-    {:format format-id
+    {:format legacy-format-id
      :run-id (:run-id state) :step (:step state)
      :state-digest (execution/digest state)
      :decision-state-digest (:form-digest input)
@@ -46,18 +48,36 @@
      :effect-id (:id effect)
      :owner owner :admitted-at admitted-at :requested-at requested-at}))
 
-(defn request-effect
-  "Admit exactly one Jev-chosen effect and append its typed proof to the
-  executable state before that state is CID-committed or the host is called."
-  [prior admitted model-result audit grants owner admitted-at requested-at]
+(defn- ontology-source []
+  #?(:cljs (.readFileSync (js/require "node:fs") semantic/ontology-path "utf8")
+     :clj (slurp semantic/ontology-path)))
+
+(defn- semantic-evidence [proof admitted model-result]
+  (let [output (semantic/build (semantic/schema (ontology-source))
+                               proof admitted model-result)]
+    (assoc proof :format format-id
+           :output-ontology-digest (:ontology-digest output)
+           :output-graph-digest (:graph-digest output)
+           :output-source (:source output))))
+
+(defn- request-effect* [prior admitted model-result audit grants owner admitted-at requested-at legacy?]
   (let [{requested-state :state effect :effect :as requested}
         (bot/request-effect prior admitted grants owner requested-at)
-        proof (evidence prior admitted model-result audit effect owner
-                        admitted-at requested-at)
+        base-proof (evidence prior admitted model-result audit effect owner
+                             admitted-at requested-at)
+        proof (if legacy? base-proof
+                  (semantic-evidence base-proof admitted model-result))
         record {:operation :decide/jev :status :admitted
                 :output-digest (execution/digest proof)
                 :proof proof}]
     (assoc requested :state (update requested-state :semantic-receipts conj record))))
+
+(defn request-effect
+  "Admit exactly one Jev-chosen effect and append its typed proof to the
+  executable state before that state is CID-committed or the host is called."
+  [prior admitted model-result audit grants owner admitted-at requested-at]
+  (request-effect* prior admitted model-result audit grants owner admitted-at
+                   requested-at false))
 
 (defn verify-transition!
   "Recompute a newly appended Jev decision from the immutable parent state.
@@ -82,20 +102,21 @@
                        (map? proof)
                        (= (execution/digest proof) (:output-digest record))
                        (= source (execution/canonical-edn-text model-result))
-                       (= format-id (:format proof))
+                       (contains? #{legacy-format-id format-id} (:format proof))
                        (= (:run-id prior) (:run-id proof))
                        (= (:step prior) (:step proof))
                        (= (execution/digest prior) (:state-digest proof)))
           (refuse! :invalid-decision-record))
         (let [expected (try
-                         (request-effect prior
+                         (request-effect* prior
                                          (bot/admit-decision prior model-result
                                                              (:owner proof)
                                                              (:admitted-at proof))
                                          model-result audit
                                          #{(get-in child [:awaiting :operation])}
                                          (:owner proof) (:admitted-at proof)
-                                         (:requested-at proof))
+                                         (:requested-at proof)
+                                         (= legacy-format-id (:format proof)))
                          (catch #?(:cljs :default :clj Exception) _
                            (refuse! :decision-replay-failed)))]
           (when-not (and (= proof (get-in expected [:state :semantic-receipts

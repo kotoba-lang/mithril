@@ -1,12 +1,15 @@
 (ns mithril.decision-proof-test
   (:require [cljs.test :refer [deftest is]]
+            [clojure.string :as str]
             [mithril.bot :as bot]
             [mithril.checkpoint :as checkpoint]
             [mithril.checkpoint-ipld :as ipld]
             [mithril.checkpoint-ipld-fs :as local]
             [mithril.decision-input :as decision-input]
             [mithril.decision-proof :as proof]
+            [mithril.decision-semantic :as semantic]
             [mithril.execution :as execution]
+            [mithril.form :as form]
             [mithril.ipld-session :as session]
             [mithril.scheduler-ipld :as scheduler]))
 
@@ -68,6 +71,11 @@
                                          "proof-worker" 1004)
         applied (ipld/put! put get-block schema applied-state [requested])]
     (is (= :admitted (:status record)))
+    (is (= proof/format-id (get-in record [:proof :format])))
+    (is (= semantic/context-uri
+           (get (form/parse (get-in record [:proof :output-source])) "@context")))
+    (is (re-matches #"sha256:[0-9a-f]{64}"
+                    (get-in record [:proof :output-graph-digest])))
     (is (= (:id effect) (get-in record [:proof :effect-id])))
     (is (= (:decision-state-digest audit)
            (get-in record [:proof :decision-state-digest])))
@@ -90,6 +98,54 @@
                                       (dec (count (:semantic-receipts state)))
                                       :proof :request-id] "tampered")
                      [base]))))))
+
+(deftest decision-output-is-declared-owl-shacl-and-rdf
+  (let [{:keys [state model-result audit admitted]} (fixture)
+        requested (proof/request-effect state admitted model-result audit
+                                        #{:workspace/read} "proof-worker" 1002 1003)
+        proof-data (:proof (last (get-in requested [:state :semantic-receipts])))
+        schema (semantic/schema (.readFileSync fs semantic/ontology-path "utf8"))
+        rebuilt (semantic/build schema proof-data admitted model-result)
+        document (form/parse (:output-source proof-data))
+        shipped (js->clj (js/JSON.parse
+                          (.readFileSync fs "resources/context-jev-decision-v2.jsonld"
+                                           "utf8")))]
+    (is (= semantic/context-document shipped))
+    (is (= "JevDecision" (get document "@type")))
+    (is (= (set (concat ["@id" "@context" "@type"] (vals semantic/fields)))
+           (set (keys document))))
+    (is (= (:ontology-digest schema) (:output-ontology-digest proof-data)))
+    (is (= (:graph-digest rebuilt) (:output-graph-digest proof-data)))
+    (is (true? (get-in rebuilt [:shape-report :valid?])))
+    (is (= :invalid-ontology
+           (reason #(semantic/schema
+                     (str/replace (.readFileSync fs semantic/ontology-path "utf8")
+                                  ":sh/target-class \"https://mithril.fund/ns/v1#JevDecision\""
+                                  ":sh/target-class \"https://mithril.fund/ns/v1#OtherDecision\"")))))
+    (is (= :mithril.decision-semantic/shacl-violation
+           (reason #(semantic/build schema (assoc proof-data :request-id nil)
+                                    admitted model-result))))
+    (is (= :rdf-field-loss
+           (reason #(with-redefs [semantic/context-document
+                                  (update semantic/context-document "@context"
+                                          dissoc "effectId")]
+                      (semantic/build schema proof-data admitted model-result)))))))
+
+(deftest rewritten-output-cannot-pass-parent-replay
+  (let [{:keys [state model-result audit admitted]} (fixture)
+        child (:state (proof/request-effect state admitted model-result audit
+                                            #{:workspace/read} "proof-worker" 1002 1003))
+        index (dec (count (:semantic-receipts child)))
+        rewritten (-> child
+                      (assoc-in [:semantic-receipts index :proof :output-graph-digest]
+                                (execution/digest :other-graph))
+                      (assoc-in [:semantic-receipts index :proof :output-source]
+                                "(mithril/jev-decision :id \"forged\")"))
+        rewritten (assoc-in rewritten [:semantic-receipts index :output-digest]
+                            (execution/digest
+                             (get-in rewritten [:semantic-receipts index :proof])))]
+    (is (= :decision-transition-mismatch
+           (reason #(proof/verify-transition! state rewritten))))))
 
 (deftest mismatched-ontology-input-or-choice-is-refused-before-effect
   (let [{:keys [state model-result audit admitted]} (fixture)]

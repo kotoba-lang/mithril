@@ -1,0 +1,19 @@
+{
+  "@context": {
+    "mith": "https://mithril.fund/ns/v1#",
+    "xsd": "http://www.w3.org/2001/XMLSchema#",
+    "JevDecision": "https://mithril.fund/ns/v1#JevDecision",
+    "runId": "https://mithril.fund/ns/v1#runId",
+    "step": {"@id": "https://mithril.fund/ns/v1#step", "@type": "http://www.w3.org/2001/XMLSchema#integer"},
+    "stateDigest": "https://mithril.fund/ns/v1#stateDigest",
+    "decisionStateDigest": "https://mithril.fund/ns/v1#decisionStateDigest",
+    "domainGraphDigest": "https://mithril.fund/ns/v1#domainGraphDigest",
+    "domainOntologyDigest": "https://mithril.fund/ns/v1#domainOntologyDigest",
+    "modelResultDigest": "https://mithril.fund/ns/v1#modelResultDigest",
+    "selectedAction": "https://mithril.fund/ns/v1#selectedAction",
+    "effectId": "https://mithril.fund/ns/v1#effectId",
+    "requestId": "https://mithril.fund/ns/v1#requestId",
+    "modelId": "https://mithril.fund/ns/v1#modelId",
+    "confidence": {"@id": "https://mithril.fund/ns/v1#confidence", "@type": "http://www.w3.org/2001/XMLSchema#integer"}
+  }
+}

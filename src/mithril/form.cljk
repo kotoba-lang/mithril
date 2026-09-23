@@ -22,6 +22,7 @@
    'mithril/bot-checkpoint-semantic "BotCheckpoint"
    'mithril/growth-profile "GrowthProfile"
    'mithril/growth-decision "GrowthDecision"
+   'mithril/jev-decision "JevDecision"
    'mithril/hermes-profile "HermesProfile"
    'mithril/hermes-bpmn-scheduler-contract "HermesBpmnSchedulerContract"
    'mithril/hermes-bpmn-coding-scheduler-contract "HermesBpmnCodingSchedulerContract"
@@ -95,6 +96,10 @@
    :definition-digest "definitionDigest"
    :observation-digest "observationDigest"
    :model-result-digest "modelResultDigest"
+   :decision-state-digest "decisionStateDigest"
+   :domain-graph-digest "domainGraphDigest"
+   :domain-ontology-digest "domainOntologyDigest"
+   :effect-id "effectId"
    :receipt-digest "receiptDigest"
    :selected-action "selectedAction"
    :model-id "modelId"
@@ -176,6 +181,8 @@
       (assoc body "@context" (cond
                                 (= tag 'mithril/growth-decision)
                                 "https://mithril.fund/context/growth-decision/v1"
+                                (= tag 'mithril/jev-decision)
+                                "https://mithril.fund/context/jev-decision/v2"
                                 (= tag 'mithril/bot-checkpoint-semantic)
                                 "https://mithril.fund/context/bot-checkpoint/v1"
                                 :else "https://mithril.fund/context/v1")

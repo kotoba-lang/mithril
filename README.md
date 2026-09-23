@@ -760,6 +760,17 @@ altered or missing decision evidence is refused. This is local causal replay,
 not a provider-signed response or proof that the model's choice was correct.
 The domain RDF projection still describes facts and effects rather than
 individual decision receipts, and older checkpoint formats remain readable.
+New Jev decisions additionally carry a v2 `mithril/jev-decision` output form.
+[`jev-decision-v2.mith`](ontology/jev-decision-v2.mith) declares its own
+`JevDecision` class, `SemanticDecision` superclass, and exact-field SHACL
+shape; the output is lowered to JSON-LD with a pinned context, expanded to
+RDF, and given a canonical graph digest. The writer executes the declared
+SHACL subset and an OWL 2 RL entailment/SPARQL query before committing the
+proof. Parent replay regenerates the output and rejects changes even if an
+attacker recomputes the proof's outer digest. Historical v1 decision proofs
+continue to replay without being recast as v2. This is a semantic projection
+of the decision result, not proof of a provider-signed Jev response, full
+OWL 2/SHACL Core support, or an RDF-only executable state.
 An isolated live OpenRouter `ipld-execute` check on 2026-09-24 selected
 `workspace-inspect` with confidence 0.99 and completed a real read-only
 `workspace/read` effect. A fresh process verified its three-block causal
