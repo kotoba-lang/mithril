@@ -23,7 +23,7 @@
             state (bot/start-run artifact
                                  {:id "cli-ipld" :workspace "/tmp" :goal "branch facts"}
                                  "cli-ipld" 1000)
-            source (checkpoint/form-text (checkpoint/projection state nil))
+            source (checkpoint/semantic-form-text (checkpoint/projection state nil))
             source-file (.join path directory "state.mith")
             state-file (.join path directory "state.edn")]
         (.writeFileSync fs source-file (str source "\n"))
@@ -41,8 +41,13 @@
           (is (= 0 (.-status verified)) (output verified))
           (is (re-find #"\"blocks\":4" (output verified)))
           (is (= 0 (.-status shown)) (output shown))
+          (is (re-find #"mithril/bot-checkpoint-semantic" (output shown)))
           (is (re-find #"review/approved" (output shown)))
           (is (re-find #"source/verified" (output shown))))
+        (.writeFileSync fs source-file
+                        (str (checkpoint/form-text (checkpoint/projection state nil)) "\n"))
+        (is (= 0 (.-status (invoke "import" source-file state-file
+                                  directory "legacy-source"))))
         (.writeFileSync fs source-file "(wrong-source)\n")
         (let [rejected (invoke "import" source-file state-file directory "other")]
           (is (= 1 (.-status rejected)))

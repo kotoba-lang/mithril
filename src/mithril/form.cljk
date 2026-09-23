@@ -19,6 +19,7 @@
    'mithril/app-agent "AppAgentApplication"
    'mithril/bot-profile "BotProfile"
    'mithril/bot-checkpoint "BotCheckpoint"
+   'mithril/bot-checkpoint-semantic "BotCheckpoint"
    'mithril/growth-profile "GrowthProfile"
    'mithril/growth-decision "GrowthDecision"
    'mithril/hermes-profile "HermesProfile"
@@ -172,9 +173,12 @@
         body (fields (rest form))]
     (cond
       (contains? top-level-tags tag)
-      (assoc body "@context" (if (= tag 'mithril/growth-decision)
+      (assoc body "@context" (cond
+                                (= tag 'mithril/growth-decision)
                                 "https://mithril.fund/context/growth-decision/v1"
-                                "https://mithril.fund/context/v1")
+                                (= tag 'mithril/bot-checkpoint-semantic)
+                                "https://mithril.fund/context/bot-checkpoint/v1"
+                                :else "https://mithril.fund/context/v1")
                   "@type" (get top-level-tags tag))
 
       (= 'mithril/task tag)

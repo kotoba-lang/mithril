@@ -38,8 +38,10 @@
             (throw (ex-info "Mithril input must be .mith or .mithril"
                             {:reason :invalid-extension})))
           (let [state (reader/read-string (text state-path))
-                expected (checkpoint/form-text (checkpoint/projection state nil))]
-            (when-not (= expected (str/trim (text source-path)))
+                projected (checkpoint/projection state nil)
+                accepted-sources #{(checkpoint/form-text projected)
+                                   (checkpoint/semantic-form-text projected)}]
+            (when-not (contains? accepted-sources (str/trim (text source-path)))
               (throw (ex-info "Mithril input differs from checked state projection"
                               {:reason :source-state-mismatch})))
             (let [store (local/open! directory)
@@ -76,8 +78,10 @@
                 saved (ipld-checkpoint/read!
                        #(local/get-block store %) schema (:head history))]
             (println (json {:status "verified" :ref name :cid (:cid saved)
+                            :format (:format saved)
                             :blocks (:blocks history)
                             :graphDigest (:graph-digest saved)
+                            :semanticGraphDigest (:semantic-graph-digest saved)
                             :runStatus (clojure.core/name (get-in saved [:state :status]))}))))
 
         "show"
@@ -86,7 +90,7 @@
           (let [store (local/open! directory)
                 saved (ipld-checkpoint/read!
                        #(local/get-block store %) schema (local/read-ref store name))]
-            (println (:source saved))))
+            (println (or (:semantic-source saved) (:source saved)))))
 
         (usage!)))
     (catch :default error

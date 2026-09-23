@@ -266,6 +266,25 @@ general Unison merge or a distributed store. It does not yet make the RDF
 graph the execution state of record, sync refs between machines, provide
 crash-durable fsync, or establish fleet-wide Hermes profile equivalence.
 
+New checkpoint blocks use v2. Alongside the legacy `graphDigest`, v2 stores a
+separate `semanticGraphDigest` computed from the
+[`bot-checkpoint` context](resources/context-bot-checkpoint-v1.jsonld) with
+absolute predicate IRIs and an explicit RDF field-loss check. The CID binds
+the ontology source and `.mith` semantic projection. Existing v1 blocks remain
+readable but do not acquire the stronger semantic digest retroactively. A
+legacy `bot-run-v1` state may omit `task-digest`; the checkpoint derives it
+from the preserved task value, while a mismatching declared digest or a
+non-legacy omission is rejected.
+
+On 2026-09-23, the actual `mithril-jev-readonly-canary` Hermes state was
+imported unchanged into a private v2 store and independently verified as one
+CID block with `runStatus=completed` and three effect receipts. Its latest
+Hermes `source=builtin` execution was `completed`; the corresponding output
+reported `idempotent-terminal` with the same run ID and status. This proves
+that one existing scheduler-driven Mithril run can be rechecked as ontology-
+projected content-addressed state. It does not prove equivalence for arbitrary
+Hermes profiles, externally visible effects, or cross-host mutable refs.
+
 ### Replayable Jev decision evidence (experimental)
 
 The legacy growth proposal receipt contains an RDF projection digest but not
