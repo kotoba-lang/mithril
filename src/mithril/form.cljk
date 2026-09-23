@@ -26,6 +26,7 @@
    'mithril/hermes-profile "HermesProfile"
    'mithril/hermes-bpmn-scheduler-contract "HermesBpmnSchedulerContract"
    'mithril/hermes-bpmn-coding-scheduler-contract "HermesBpmnCodingSchedulerContract"
+   'mithril/edit-proposal "EditProposal"
    'mithril/desktop-application "DesktopApplication"
    'mithril/ontology "Ontology"})
 

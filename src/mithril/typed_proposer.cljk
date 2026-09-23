@@ -1,0 +1,111 @@
+(ns mithril.typed-proposer
+  "A model proposes one inert Mithril edit form; this module alone applies it
+  to a disposable, explicitly allowlisted workspace. The host Governor still
+  validates the resulting Git patch before touching the target workspace."
+  (:require [clojure.string :as str]
+            [mithril.execution :as execution]
+            [mithril.form :as form]))
+
+(def fs (js/require "node:fs"))
+(def path (js/require "node:path"))
+
+(def edit-shape
+  {:shacl/type :node-shape
+   :target-class :mithril/EditProposal
+   :property [{:path :path :datatype :string :min-count 1 :max-count 1}
+              {:path :old :datatype :string :min-count 1 :max-count 1}
+              {:path :new :datatype :string :min-count 1 :max-count 1}]})
+
+(defn- refuse! [reason]
+  (throw (ex-info "typed edit proposal refused"
+                  {:mithril/error :mithril.proposer/refused :reason reason})))
+
+(defn relative-file? [value]
+  (and (string? value)
+       (not (str/blank? value))
+       (not (.isAbsolute path value))
+       (not (str/includes? value "\\"))
+       (not (str/includes? value "\u0000"))
+       (every? #(and (not (str/blank? %))
+                     (not (contains? #{"." ".."} %)))
+               (str/split value #"/" -1))))
+
+(defn validated-paths [value]
+  (let [allowed (:allowed value)
+        read-paths (:read value)]
+    (when-not (and (map? value)
+                   (= #{:allowed :read} (set (keys value)))
+                   (vector? allowed) (seq allowed)
+                   (vector? read-paths)
+                   (every? relative-file? (concat allowed read-paths))
+                   (= (count (concat allowed read-paths))
+                      (count (set (concat allowed read-paths)))))
+      (refuse! :invalid-allowlist))
+    value))
+
+(defn parse-proposal [text allowed]
+  (let [doc (form/parse text)]
+    (when-not (= #{"@context" "@type" "path" "old" "new"} (set (keys doc)))
+      (refuse! :invalid-shape))
+    (when-not (:valid? (execution/validate-shape
+                          edit-shape
+                          {:path (get doc "path")
+                           :old (get doc "old")
+                           :new (get doc "new")}))
+      (refuse! :shacl-violation))
+    (when-not (and (= "https://mithril.fund/context/v1" (get doc "@context"))
+                   (= "EditProposal" (get doc "@type"))
+                   (relative-file? (get doc "path"))
+                   (contains? (set allowed) (get doc "path"))
+                   (string? (get doc "old"))
+                   (not (str/blank? (get doc "old")))
+                   (string? (get doc "new"))
+                   (not= (get doc "old") (get doc "new"))
+                   (<= (count (get doc "new")) 16384)
+                   (not (str/includes? (get doc "new") "\u0000")))
+      (refuse! :invalid-edit))
+    doc))
+
+(defn- checked-file [workspace relative]
+  (when-not (relative-file? relative) (refuse! :invalid-path))
+  (let [root (.realpathSync fs workspace)
+        file (.resolve path root relative)
+        real (.realpathSync fs file)
+        stat (.lstatSync fs file)]
+    (when-not (and (str/starts-with? real (str root (.-sep path)))
+                   (= real file)
+                   (.isFile stat)
+                   (not (.isSymbolicLink stat)))
+      (refuse! :unsafe-path))
+    file))
+
+(defn snapshot [workspace paths max-bytes]
+  (loop [remaining paths total 0 result []]
+    (if-let [relative (first remaining)]
+      (let [file (checked-file workspace relative)
+            content (.readFileSync fs file "utf8")
+            next-total (+ total (.byteLength js/Buffer content "utf8"))]
+        (when (> next-total max-bytes) (refuse! :context-budget))
+        (recur (rest remaining) next-total
+               (conj result {:path relative :content content})))
+      result)))
+
+(defn replaced-content [before doc]
+  (let [old (get doc "old")
+        new (get doc "new")
+        first-at (.indexOf before old)]
+    (when (or (neg? first-at)
+              (not (neg? (.indexOf before old (+ first-at (count old))))))
+      (refuse! :nonunique-old))
+    (str (subs before 0 first-at) new
+         (subs before (+ first-at (count old))))))
+
+(defn apply-proposal! [workspace allowed doc]
+  (let [relative (get doc "path")]
+    (when-not (contains? (set allowed) relative) (refuse! :path-denied))
+    (let [file (checked-file workspace relative)
+          before (.readFileSync fs file "utf8")
+          after (replaced-content before doc)]
+        (.writeFileSync fs file after "utf8")
+        {:path relative :before-bytes (.byteLength js/Buffer before "utf8")
+         :after-bytes (.byteLength js/Buffer after "utf8")})))

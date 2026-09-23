@@ -9,7 +9,8 @@
             [clojure.set :as set]
             [clojure.string :as str]
             [mithril.bot :as bot]
-            [mithril.execution :as execution]))
+            [mithril.execution :as execution]
+            [mithril.typed-proposer :as typed-proposer]))
 
 (def adapter-format "https://mithril.fund/adapter/hermes-coding-v1")
 (def tool-profile-format "https://mithril.fund/profile/coding-tools-v1")
@@ -274,16 +275,48 @@
         (str/trim (git! ctx (:workspace profile) "rev-parse" "HEAD"))]
        (:workspace profile) 30000))
     (let [untracked (git! ctx proposal-workspace "ls-files" "--others" "--exclude-standard")
-          current-diff (git! ctx proposal-workspace "diff" "--binary" "--")]
-      (when (and (str/blank? current-diff) (str/blank? untracked))
-        (try
-          ((:exec-fn ctx) program
-           ["-p" proposer-profile "--ignore-rules" "-t" "file" "--in" proposal-workspace
-            "-z" (proposal-prompt effect files diagnostic)]
-           proposal-workspace timeout-ms)
-          (catch :default _
-            (fail! :mithril.hermes/proposer-failed
-                   "Hermes proposer did not complete within its governed invocation" {}))))
+          current-diff (git! ctx proposal-workspace "diff" "--binary" "--")
+          proposer-output
+          (when (and (str/blank? current-diff) (str/blank? untracked))
+            (try
+              ((:exec-fn ctx) program
+               (cond-> ["-p" proposer-profile "--ignore-rules" "-t" "file"
+                        "--in" proposal-workspace
+                        "-z" (proposal-prompt effect files diagnostic)]
+                 (= "typed-mithril-v1" proposer-profile)
+                 (into ["--paths-json"
+                        (.stringify js/JSON
+                                    (clj->js {:allowed (:allowed-paths profile)
+                                              :read (or (:read-paths profile) [])}))]))
+               proposal-workspace timeout-ms)
+              (catch :default error
+                (let [stderr (if-let [value (.-stderr error)]
+                               (.toString value "utf8") "")
+                      reason (second (re-find #"(?m)^REFUSE\t([a-z0-9-]+)$" stderr))]
+                  (fail! :mithril.hermes/proposer-failed
+                         "proposer did not complete within its governed invocation"
+                         (cond-> {} reason (assoc :proposer-reason reason)))))))
+          _ (when (and (= "typed-mithril-v1" proposer-profile)
+                       (nil? proposer-output))
+              (fail! :mithril.hermes/typed-proposal-missing
+                     "typed proposal cannot be reconstructed from scratch changes alone" {}))
+          typed-output
+          (when (and (= "typed-mithril-v1" proposer-profile) proposer-output)
+            (try
+              (let [metadata (js->clj (js/JSON.parse (str/trim proposer-output))
+                                      :keywordize-keys true)
+                    form (:form metadata)
+                    doc (typed-proposer/parse-proposal form (:allowed-paths profile))]
+                (when-not (and (= "proposed" (:status metadata))
+                               (= (:path metadata) (get doc "path"))
+                               (string? (:model metadata)))
+                  (fail! :mithril.hermes/invalid-proposer-output
+                         "typed proposer metadata does not match its form" {}))
+                {:form form :document-digest (execution/digest doc) :document doc
+                 :model (:model metadata) :usage (:usage metadata)})
+              (catch :default _
+                (fail! :mithril.hermes/invalid-proposer-output
+                       "typed proposer did not return one valid Mithril edit form" {}))))]
       (let [untracked-before-intent (->> (str/split-lines
                                            (git! ctx proposal-workspace "ls-files" "--others" "--exclude-standard"))
                                          (remove str/blank?) set)
@@ -300,12 +333,22 @@
                           (git! ctx proposal-workspace "diff" "--name-only" "--"))
                          (remove str/blank?) set)
             patch (git! ctx proposal-workspace "diff" "--binary" "--")]
+        (when typed-output
+          (let [doc (:document typed-output)
+                relative (get doc "path")
+                before (:content (first (filter #(= relative (:path %)) files)))
+                actual ((:read-fn ctx) ((:join-fn ctx) proposal-workspace relative))]
+            (when-not (and (= #{relative} changed)
+                           (string? before)
+                           (= (typed-proposer/replaced-content before doc) actual))
+              (fail! :mithril.hermes/typed-edit-mismatch
+                     "typed edit form and proposal workspace differ" {}))))
         (when-not (and (str/blank? untracked-after)
                        (seq changed)
                        (every? (into (set (:allowed-paths profile)) creatable) changed))
           (fail! :mithril.hermes/proposer-workspace-denied
                  "proposer changed an untracked or non-allowlisted path" {}))
-        patch))))
+        {:patch patch :typed-output (dissoc typed-output :document)}))))
 
 (defn- diff-paths! [profile patch]
   (when (or (str/blank? patch)
@@ -332,20 +375,27 @@
         diagnostic-file (diagnostic-path profile effect (:join-fn ctx))
         diagnostic (when ((:exists-fn ctx) diagnostic-file)
                      ((:read-fn ctx) diagnostic-file))
-        patch (if-let [propose-fn (:propose-fn ctx)]
-                (propose-fn {:effect effect :profile profile :files files
-                             :prompt (proposal-prompt effect files diagnostic)
-                             :diagnostic diagnostic})
-                (default-propose! ctx profile effect files diagnostic))
+        proposal-result (if-let [propose-fn (:propose-fn ctx)]
+                          (propose-fn {:effect effect :profile profile :files files
+                                       :prompt (proposal-prompt effect files diagnostic)
+                                       :diagnostic diagnostic})
+                          (default-propose! ctx profile effect files diagnostic))
+        patch (if (map? proposal-result) (:patch proposal-result) proposal-result)
+        typed-output (when (map? proposal-result) (:typed-output proposal-result))
         paths (diff-paths! profile patch)
-        proposal {:format proposal-format :run-id (:run-id effect) :base-head head
-                  :profile-digest (tool-profile-digest profile)
-                  :patch-digest (execution/digest patch) :patch patch}
+        proposal (cond-> {:format proposal-format :run-id (:run-id effect) :base-head head
+                          :profile-digest (tool-profile-digest profile)
+                          :patch-digest (execution/digest patch) :patch patch}
+                   typed-output (assoc :edit-form (:form typed-output)
+                                       :edit-document-digest (:document-digest typed-output)))
         file (artifact-path profile effect (:join-fn ctx))]
     ((:write-fn ctx) file (pr-str proposal))
     (completed effect (dissoc proposal :patch)
-               {:proposal-digest (:patch-digest proposal) :files (count paths)
-                :bytes (byte-count patch)})))
+               (cond-> {:proposal-digest (:patch-digest proposal) :files (count paths)
+                        :bytes (byte-count patch)}
+                 typed-output (assoc :edit-document-digest (:document-digest typed-output)
+                                     :proposer-model (:model typed-output)
+                                     :proposer-usage (:usage typed-output))))))
 
 (defn- read-proposal! [effect profile ctx]
   (let [file (artifact-path profile effect (:join-fn ctx))
@@ -353,12 +403,18 @@
             (fail! :mithril.hermes/proposal-missing
                    "proposal artifact is absent; an in-flight effect cannot be assumed complete" {}))
         proposal (reader/read-string ((:read-fn ctx) file))]
-    (when-not (and (= #{:format :run-id :base-head :profile-digest :patch-digest :patch}
-                      (set (keys proposal)))
+    (when-not (and (contains? #{#{:format :run-id :base-head :profile-digest :patch-digest :patch}
+                                #{:format :run-id :base-head :profile-digest :patch-digest :patch
+                                  :edit-form :edit-document-digest}}
+                             (set (keys proposal)))
                    (= proposal-format (:format proposal))
                    (= (:run-id effect) (:run-id proposal))
                    (= (tool-profile-digest profile) (:profile-digest proposal))
-                   (= (execution/digest (:patch proposal)) (:patch-digest proposal)))
+                   (= (execution/digest (:patch proposal)) (:patch-digest proposal))
+                   (or (nil? (:edit-form proposal))
+                       (let [doc (typed-proposer/parse-proposal
+                                   (:edit-form proposal) (:allowed-paths profile))]
+                         (= (execution/digest doc) (:edit-document-digest proposal)))))
       (fail! :mithril.hermes/proposal-integrity "proposal artifact failed identity checks" {}))
     proposal))
 
@@ -549,4 +605,7 @@
            (failed effect (or (:mithril/error (ex-data error))
                               (if (contains? read-only-effects (:operation effect))
                                 :host-read-failed
-                                :host-effect-failed)))))))))
+                                :host-effect-failed))
+                   (cond-> {}
+                     (get (ex-data error) :proposer-reason)
+                     (assoc :proposer-reason (get (ex-data error) :proposer-reason))))))))))
