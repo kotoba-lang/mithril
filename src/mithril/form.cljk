@@ -18,6 +18,7 @@
    'mithril/graph-agent "GraphAgentApplication"
    'mithril/app-agent "AppAgentApplication"
    'mithril/bot-profile "BotProfile"
+   'mithril/growth-profile "GrowthProfile"
    'mithril/hermes-profile "HermesProfile"
    'mithril/desktop-application "DesktopApplication"
    'mithril/ontology "Ontology"})
@@ -25,7 +26,8 @@
 (def ^:private nested-tags
   #{'mithril/choice 'mithril/export 'mithril/import 'mithril/route
     'mithril/source 'mithril/loop 'mithril/app 'mithril/page
-    'mithril/agent-loop 'mithril/bot-policy 'mithril/hermes-job
+    'mithril/agent-loop 'mithril/bot-policy 'mithril/growth-policy
+    'mithril/growth-action 'mithril/hermes-job
     'mithril/actor 'mithril/activity 'rdf/node})
 
 (def ^:private typed-node-tags

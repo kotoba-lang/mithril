@@ -1,0 +1,69 @@
+(ns mithril.growth-test
+  (:require [cljs.test :refer [deftest is testing]]
+            [clojure.string :as str]
+            [mithril.bot :as bot]
+            [mithril.growth :as growth]))
+
+(def source
+  "(mithril/growth-profile
+     :id \"https://mithril.fund/id/growth/test\"
+     :goal \"https://mithril.fund/id/goal/user-acquisition\"
+     :ontology \"3539fef6d1f26c012d4305a55a3782902ff8de47e56901e619ea0cde30ece918\"
+     :policy (mithril/growth-policy
+       :metric \"activated-users\"
+       :authority \"propose-only\"
+       :confidence-floor 3000
+       :actions [(mithril/growth-action :id \"https://mithril.fund/id/action/fix-entry\" :label \"fix-entry\" :effect \"proposal/record\" :target \"landing\" :description \"Repair the measured entry blocker\")
+                 (mithril/growth-action :id \"https://mithril.fund/id/action/hold\" :label \"hold\" :effect \"proposal/record\" :target \"none\" :description \"Hold when evidence is insufficient\")]))")
+
+(def observation {:id "obs-1" :measured-at "2026-09-23T00:00:00Z"
+                  :summary "landing is reachable" :values {:http 200}})
+(def fs (js/require "node:fs"))
+
+(defn error-code [f] (try (f) nil (catch :default e (:mithril/error (ex-data e)))))
+
+(defn model-result [choice probability confidence]
+  {:kind bot/model-kind :generated_text false :model "typesafe/jev-1.13-20260917"
+   :artifact {:provider bot/jev-provider :endpoint bot/jev-endpoint
+              :requested_model bot/jev-model :resolved_model "typesafe/jev-1.13-20260917"}
+   :decisions [{:choice choice :confidence confidence
+                :probabilities {"fix-entry" probability "hold" (- 1 probability)}}]})
+
+(deftest growth-profile-is-closed-and-propose-only
+  (let [artifact (growth/compile-text "growth.mith" source)
+        plan (growth/prepare-request artifact observation)
+        receipt (growth/admit-decision artifact observation (model-result "fix-entry" 0.8 0.7))]
+    (is (= growth/artifact-format (:format artifact)))
+    (is (= ["fix-entry" "hold"] (get-in plan [:questions 0 :options])))
+    (is (= growth/authority (:authority receipt)))
+    (is (= :proposal/record (get-in receipt [:action :effect])))
+    (is (= 7000 (:confidence receipt)))
+    (is (string? (:proposal-id receipt)))))
+
+(deftest growth-profile-refuses-send-authority-and-open-choice
+  (is (= :mithril.growth/authority
+         (error-code #(growth/compile-text "growth.mith"
+                                           (str/replace source ":authority \"propose-only\""
+                                                        ":authority \"send\"")))))
+  (let [artifact (growth/compile-text "growth.mith" source)]
+    (is (= :mithril.growth/invalid-decision
+           (error-code #(growth/admit-decision artifact observation
+                                               (model-result "invented" 0.8 0.7)))))
+    (is (= :mithril.growth/confidence-below-floor
+           (error-code #(growth/admit-decision artifact observation
+                                               (model-result "fix-entry" 0.8 0.2)))))))
+
+(deftest observation-has-an-evidence-floor
+  (let [artifact (growth/compile-text "growth.mith" source)]
+    (is (= :mithril.growth/invalid-observation
+           (error-code #(growth/prepare-request artifact (assoc observation :summary "")))))
+    (is (= :mithril.growth/invalid-observation
+           (error-code #(growth/prepare-request artifact (dissoc observation :values)))))))
+
+(deftest shipped-growth-profiles-cover-the-three-goals
+  (let [paths ["examples/itonami-labor-liberation.mith"
+               "examples/murakumo-advertiser-acquisition.mith"
+               "examples/murakumo-user-acquisition.mith"]
+        artifacts (mapv #(growth/compile-text % (.readFileSync fs % "utf8")) paths)]
+    (is (= growth/goals (set (map #(get-in % [:growth-ir :goal]) artifacts))))
+    (is (every? #(= growth/authority (get-in % [:growth-ir :authority])) artifacts))))

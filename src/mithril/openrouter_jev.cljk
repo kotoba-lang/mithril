@@ -19,10 +19,11 @@
   (let [question (first questions)
         labels (mapv :label candidates)
         descriptions (into {}
-                           (map (fn [{:keys [label effect requires produces]}]
-                                  [label (str "Effect " (name effect)
-                                              "; requires " (str/join "," (map name (sort requires)))
-                                              "; produces " (str/join "," (map name (sort produces))))])
+                           (map (fn [{:keys [label effect requires produces description]}]
+                                  [label (or description
+                                             (str "Effect " (name effect)
+                                                  "; requires " (str/join "," (map name (sort requires)))
+                                                  "; produces " (str/join "," (map name (sort produces)))))])
                                 candidates))]
     (when-not (= labels (:options question))
       (fail! :mithril.jev/candidate-mismatch "question options do not match candidates" {}))

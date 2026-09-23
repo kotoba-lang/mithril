@@ -1,0 +1,28 @@
+(mithril/growth-profile
+  :id "https://mithril.fund/id/growth/murakumo-advertiser-acquisition"
+  :goal "https://mithril.fund/id/goal/advertiser-acquisition"
+  :ontology "3539fef6d1f26c012d4305a55a3782902ff8de47e56901e619ea0cde30ece918"
+  :policy
+  (mithril/growth-policy
+    :metric "advertiser-funded-campaigns"
+    :authority "propose-only"
+    :confidence-floor 3000
+    :actions
+    [(mithril/growth-action
+       :id "https://mithril.fund/id/action/prepare-advertiser-intake"
+       :label "prepare-advertiser-intake"
+       :effect "proposal/record"
+       :target "https://murakumo.cloud/advertise"
+       :description "Prepare one validated intake proposal for the largest measured lead cluster")
+     (mithril/growth-action
+       :id "https://mithril.fund/id/action/improve-advertiser-sdk"
+       :label "improve-advertiser-sdk"
+       :effect "proposal/record"
+       :target "https://murakumo.cloud/sdk/x402-agent.mjs"
+       :description "Propose one SDK or documentation repair when advertiser integration is the measured blocker")
+     (mithril/growth-action
+       :id "https://mithril.fund/id/action/hold-for-evidence"
+       :label "hold-for-evidence"
+       :effect "proposal/record"
+       :target "none"
+       :description "Record a hold when the advertiser surface could not be measured")]))
