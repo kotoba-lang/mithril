@@ -12,6 +12,7 @@
 
 (defn- usage! []
   (println "usage: mithril-hermes tick <profile.mith> <task.json> <state.edn> <owner> <grants.csv> <shadow|execute> [coding-tools.json]")
+  (println "       mithril-hermes migrate <profile.mith> <task.json> <state.edn> <owner>")
   (println "       mithril-hermes profile-digest <coding-tools.json>")
   (js/process.exit 2))
 
@@ -162,15 +163,64 @@
                 "\t" (.-message error)))
   (set! (.-exitCode js/process) 1))
 
+(defn- migrate-checkpoint! [profile-path task-path state-path owner]
+  (let [lock (try (acquire-lock! state-path) (catch :default error (refuse! error) nil))]
+    (when lock
+      (try
+        (when-not (.existsSync fs state-path)
+          (throw (ex-info "checkpoint migration requires an existing state"
+                          {:mithril/error :mithril.hermes/missing-checkpoint})))
+        (let [artifact (bot/compile-text profile-path (read-text profile-path))
+              task (js->clj (js/JSON.parse (read-text task-path)) :keywordize-keys true)
+              state (reader/read-string (read-text state-path))
+              now (.now js/Date)
+              run (bot/resume-or-start artifact task state owner now)]
+          (case (:disposition run)
+            :migrated
+            (let [migrated (:state run)]
+              (write-state! state-path migrated)
+              (append-audit! state-path
+                             {:at (.toISOString (js/Date.))
+                              :status :checkpoint-migrated
+                              :run-id (:run-id migrated)
+                              :step (:step migrated)
+                              :bpmn-definition (get-in migrated [:bpmn :definition])
+                              :bpmn-token-at
+                              (get-in migrated [:bpmn :token-state :bpmn/tokens 0 :bpmn/at])})
+              (println (json-line {:status :checkpoint-migrated
+                                   :run-id (:run-id migrated)
+                                   :step (:step migrated)
+                                   :run-status (:status migrated)})))
+
+            :resumed
+            (println (json-line {:status :already-current
+                                 :run-id (get-in run [:state :run-id])
+                                 :step (get-in run [:state :step])
+                                 :run-status (get-in run [:state :status])}))
+
+            (throw (ex-info "checkpoint is not a running migratable state"
+                            {:mithril/error :mithril.hermes/migration-not-required
+                             :disposition (:disposition run)}))))
+        (catch :default error (refuse! error))
+        (finally (release-lock! lock))))))
+
 (let [[command profile-path task-path state-path owner grants-csv mode tool-profile-path & extra]
       *command-line-args*]
-  (if (= "profile-digest" command)
+  (cond
+    (= "profile-digest" command)
     (if (and profile-path (nil? task-path))
       (try
         (println (hermes/tool-profile-digest
                   (js->clj (js/JSON.parse (read-text profile-path)) :keywordize-keys true)))
         (catch :default error (refuse! error)))
       (usage!))
+
+    (= "migrate" command)
+    (if (and profile-path task-path state-path owner (nil? grants-csv))
+      (migrate-checkpoint! profile-path task-path state-path owner)
+      (usage!))
+
+    :else
     (if-not (and (= "tick" command) profile-path task-path state-path owner grants-csv
                  (contains? #{"shadow" "execute"} mode) (empty? extra))
     (usage!)
