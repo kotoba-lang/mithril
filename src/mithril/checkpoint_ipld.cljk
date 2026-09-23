@@ -9,10 +9,14 @@
             [ipld.core :as ipld]
             [mithril.checkpoint :as checkpoint]
             [mithril.execution :as execution]
+            [mithril.state-node :as state-node]
             [multiformats.core :as multiformats]))
 
 (def format-v1 "https://mithril.fund/block/bot-checkpoint-ipld-v1")
-(def format-id "https://mithril.fund/block/bot-checkpoint-ipld-v2")
+(def format-v2 "https://mithril.fund/block/bot-checkpoint-ipld-v2")
+(def format-id "https://mithril.fund/block/bot-checkpoint-ipld-v3")
+(defn canonical-format? [value]
+  (contains? #{format-v2 format-id} value))
 (def node-keys-v1
   #{"format" "ontologyDigest" "checkpointDigest" "graphDigest"
     "stateDigest" "stateEdn" "source" "parents"})
@@ -20,6 +24,8 @@
   (into node-keys-v1
         #{"semanticOntologySource" "semanticContext" "semanticSource"
           "semanticGraphDigest"}))
+(def node-keys-v3
+  (conj (disj node-keys-v2 "stateEdn") "stateNode"))
 
 (defn- refuse! [reason]
   (throw (ex-info "Mithril IPLD checkpoint refused"
@@ -56,16 +62,22 @@
   (let [base (node-v1 schema state parents)
         semantic (checkpoint/semantic-graph state nil)]
     (assoc base
-           "format" format-id
+           "format" format-v2
            "semanticOntologySource" (:ontology-source schema)
            "semanticContext" checkpoint/semantic-context-uri
            "semanticSource" (:source semantic)
            "semanticGraphDigest" (:graph-digest semantic))))
 
+(defn- node-v3 [schema state parents]
+  (-> (node-v2 schema state parents)
+      (dissoc "stateEdn")
+      (assoc "format" format-id
+             "stateNode" (state-node/encode-value state))))
+
 (defn block
   "Create canonical DAG-CBOR bytes and a real CID for one checked state."
   [schema state parents]
-  (ipld/node->block (node-v2 schema state parents)))
+  (ipld/node->block (node-v3 schema state parents)))
 
 (defn read!
   "Resolve and rehash a CID, then rerun Mithril parsing, OWL, SPARQL and SHACL
@@ -75,29 +87,37 @@
   (let [value (ipld/get-node get-fn id)]
     (when-not value (refuse! :missing-block))
     (let [version (get value "format")
-          v2? (= format-id version)]
+          v3? (= format-id version)
+          semantic? (canonical-format? version)]
     (when-not (and (map? value)
-                   (contains? #{format-v1 format-id} version)
-                   (= (if v2? node-keys-v2 node-keys-v1) (set (keys value)))
+                   (contains? #{format-v1 format-v2 format-id} version)
+                   (= (cond v3? node-keys-v3
+                            semantic? node-keys-v2
+                            :else node-keys-v1)
+                      (set (keys value)))
                    (= (:ontology-digest schema) (get value "ontologyDigest"))
-                   (or (not v2?)
+                   (or (not semantic?)
                        (and (= (:ontology-source schema)
                                (get value "semanticOntologySource"))
                             (= checkpoint/semantic-context-uri
                                (get value "semanticContext"))
                             (string? (get value "semanticSource"))
                             (string? (get value "semanticGraphDigest"))))
-                   (string? (get value "stateEdn"))
+                   (if v3? (map? (get value "stateNode"))
+                       (string? (get value "stateEdn")))
                    (vector? (get value "parents"))
                    (every? ipld/link? (get value "parents")))
       (refuse! :invalid-node))
     (let [parents (mapv ipld/link-cid (get value "parents"))
           _ (valid-parents! parents)
-          state (try (reader/read-string (get value "stateEdn"))
-                     (catch #?(:cljs :default :clj Exception) _
-                       (refuse! :invalid-state-edn)))
-          expected (if v2? (node-v2 schema state parents)
-                       (node-v1 schema state parents))]
+          state (if v3?
+                  (state-node/decode-canonical! (get value "stateNode"))
+                  (try (reader/read-string (get value "stateEdn"))
+                       (catch #?(:cljs :default :clj Exception) _
+                         (refuse! :invalid-state-edn))))
+          expected (cond v3? (node-v3 schema state parents)
+                         semantic? (node-v2 schema state parents)
+                         :else (node-v1 schema state parents))]
       (when-not (= value expected) (refuse! :noncanonical-checkpoint))
       {:cid id :format version :parents parents :state state
        :source (get value "source")

@@ -223,7 +223,7 @@ not retried by a later cron tick. This is a bounded scheduler execution
 contract, not a claim that arbitrary coding jobs are now reliable.
 
 An opt-in `"checkpointMode":"ipld"` coding contract additionally records
-each post-tick state as a v2 ontology-validated DAG-CBOR block. The previous
+each post-tick state as a v3 ontology-validated DAG-CBOR block. The previous
 state must equal the verified CID head before the next effect; each successful
 scheduler receipt includes `stateCid` and `semanticGraphDigest`. The local ref
 update is serialized and compare-and-swap checked on one filesystem, not a
@@ -345,13 +345,18 @@ general Unison merge or a distributed store. It does not yet make the RDF
 graph the execution state of record, sync refs between machines, provide
 crash-durable fsync, or establish fleet-wide Hermes profile equivalence.
 
-New checkpoint blocks use v2. Alongside the legacy `graphDigest`, v2 stores a
-separate `semanticGraphDigest` computed from the
+New checkpoint blocks use v3. The complete executable state is a canonical,
+typed IPLD `stateNode`, not an EDN string. The reader still accepts v1/v2
+blocks and checks their original identity; it does not rewrite them as v3.
+Alongside the legacy `graphDigest`, v2 and v3 store a separate
+`semanticGraphDigest` computed from the
 [`bot-checkpoint` context](resources/context-bot-checkpoint-v1.jsonld) with
 absolute predicate IRIs and an explicit RDF field-loss check. The CID binds
 the ontology source and `.mith` semantic projection. Existing v1 blocks remain
-readable but do not acquire the stronger semantic digest retroactively. A
-legacy `bot-run-v1` state may omit `task-digest`; the checkpoint derives it
+readable but do not acquire the stronger semantic digest retroactively.
+The RDF graph remains a checked, lossy semantic summary; the typed IPLD node,
+not RDF alone, reconstructs the complete runtime state. A legacy `bot-run-v1`
+state may omit `task-digest`; the checkpoint derives it
 from the preserved task value, while a mismatching declared digest or a
 non-legacy omission is rejected.
 

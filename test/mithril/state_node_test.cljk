@@ -1,0 +1,23 @@
+(ns mithril.state-node-test
+  (:require [cljs.test :refer [deftest is]]
+            [mithril.state-node :as node]))
+
+(defn- reason [f]
+  (try (f) nil (catch :default error (:reason (ex-data error)))))
+
+(deftest typed-node-is-lossless-canonical-and-data-only
+  (let [state {:run-id "run" :facts #{:a/b :c/d}
+               :task {:id "task" "external" [nil true 42 :x/y]}}
+        encoded (node/encode-value state)
+        reordered (into {} (reverse (seq state)))]
+    (is (= encoded (node/encode-value reordered)))
+    (is (= state (node/decode-canonical! encoded)))
+    (is (= :unsupported-value (reason #(node/encode-value '(+ 1 2)))))
+    (is (= :invalid-map-key (reason #(node/encode-value {42 "bad"}))))
+    (is (= :noncanonical-state-node
+           (reason #(node/decode-canonical!
+                     {"$map" (vec (reverse (get encoded "$map")))}))))
+    (is (= :duplicate-set-item
+           (reason #(node/decode-canonical! {"$map" [[{"$keyword" "facts"}
+                                                        {"$set" [{"$keyword" "a/b"}
+                                                                 {"$keyword" "a/b"}]}]]}))))))

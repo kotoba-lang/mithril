@@ -1,0 +1,83 @@
+(ns mithril.state-node
+  "Lossless canonical IPLD Data Model representation of executable Mithril
+  state. Keywords, maps and sets are explicit tagged values; no reader, code
+  evaluation, or EDN string is needed to reconstruct a state."
+  (:require [clojure.string :as str]))
+
+(defn- refuse! [reason]
+  (throw (ex-info "Mithril typed state node refused"
+                  {:mithril/error :mithril.state-node/refused :reason reason})))
+
+(defn- safe-int? [value]
+  (and (integer? value) (js/Number.isSafeInteger value)))
+
+(declare encode-value)
+
+(defn encode-value [value]
+  (cond
+    (nil? value) nil
+    (boolean? value) value
+    (string? value) value
+    (safe-int? value) value
+    (keyword? value) {"$keyword" (subs (str value) 1)}
+    (vector? value) (mapv encode-value value)
+    (set? value) {"$set" (->> value (map encode-value) (sort-by pr-str) vec)}
+    (map? value)
+    (do
+      (when-not (every? #(or (keyword? %) (string? %)) (keys value))
+        (refuse! :invalid-map-key))
+      {"$map" (->> value
+                    (map (fn [[key item]] [(encode-value key) (encode-value item)]))
+                    (sort-by (comp pr-str first))
+                    vec)})
+    :else (refuse! :unsupported-value)))
+
+(declare decode-value)
+
+(defn decode-value [node]
+  (cond
+    (nil? node) nil
+    (boolean? node) node
+    (string? node) node
+    (safe-int? node) node
+    (vector? node) (mapv decode-value node)
+    (map? node)
+    (let [keys* (set (keys node))]
+      (cond
+        (= #{"$keyword"} keys*)
+        (let [value (get node "$keyword")
+              parsed (when (and (string? value) (not (str/blank? value)))
+                       (keyword value))]
+          (when-not (and parsed (= value (subs (str parsed) 1)))
+            (refuse! :invalid-keyword))
+          parsed)
+
+        (= #{"$set"} keys*)
+        (let [items (get node "$set")]
+          (when-not (vector? items) (refuse! :invalid-set))
+          (let [decoded (mapv decode-value items)]
+            (when-not (= (count decoded) (count (set decoded)))
+              (refuse! :duplicate-set-item))
+            (set decoded)))
+
+        (= #{"$map"} keys*)
+        (let [entries (get node "$map")]
+          (when-not (and (vector? entries)
+                         (every? #(and (vector? %) (= 2 (count %))) entries))
+            (refuse! :invalid-map))
+          (let [decoded (mapv (fn [[key value]]
+                                [(decode-value key) (decode-value value)]) entries)
+                keys* (mapv first decoded)]
+            (when-not (and (every? #(or (keyword? %) (string? %)) keys*)
+                           (= (count keys*) (count (set keys*))))
+              (refuse! :invalid-or-duplicate-map-key))
+            (into {} decoded)))
+
+        :else (refuse! :unknown-tag)))
+    :else (refuse! :unsupported-node)))
+
+(defn decode-canonical! [node]
+  (let [state (decode-value node)]
+    (when-not (and (map? state) (= node (encode-value state)))
+      (refuse! :noncanonical-state-node))
+    state))

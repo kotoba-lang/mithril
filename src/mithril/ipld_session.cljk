@@ -46,7 +46,7 @@
                                          (:head history))
             state (:state saved)
             projected (projection state-path)]
-        (when-not (= checkpoint-ipld/format-id (:format saved))
+        (when-not (checkpoint-ipld/canonical-format? (:format saved))
           (refuse! :legacy-block))
         (when (and projected (not= state projected))
           (refuse! :projection-diverged))
