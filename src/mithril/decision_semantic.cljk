@@ -1,0 +1,139 @@
+(ns mithril.decision-semantic
+  "Versioned .mith/JSON-LD decision output with RDF identity, declared SHACL
+  validation, and an executed OWL 2 RL/SPARQL entailment check."
+  (:require [clojure.string :as str]
+            [json-ld-api.core :as jsonld]
+            [json-ld-api.to-rdf :as to-rdf]
+            [rdf-canon.core :as rdf-canon]
+            [mithril.compiler :as compiler]
+            [mithril.execution :as execution]
+            [mithril.form :as form]
+            [oak.semantic :as oak]))
+
+(def ontology-path "ontology/jev-decision-v2.mith")
+(def context-uri "https://mithril.fund/context/jev-decision/v2")
+(def base "https://mithril.fund/ns/v1#")
+(def decision-class (str base "JevDecision"))
+(def super-class (str base "SemanticDecision"))
+(def shape-id (str base "JevDecisionShape"))
+(def fields
+  {:run-id "runId" :step "step" :state-digest "stateDigest"
+   :decision-state-digest "decisionStateDigest"
+   :domain-graph-digest "domainGraphDigest"
+   :domain-ontology-digest "domainOntologyDigest"
+   :model-result-digest "modelResultDigest"
+   :selected-action "selectedAction" :effect-id "effectId"
+   :request-id "requestId" :model-id "modelId"
+   :confidence "confidence"})
+(def integer-fields #{:step :confidence})
+(def context-document
+  {"@context"
+   (merge {"mith" base "xsd" "http://www.w3.org/2001/XMLSchema#"
+           "JevDecision" decision-class}
+          (into {}
+                (for [[_ label] fields]
+                  [label (if (contains? #{"step" "confidence"} label)
+                           {"@id" (str base label)
+                            "@type" "http://www.w3.org/2001/XMLSchema#integer"}
+                           (str base label))])))})
+
+(defn- refuse! [reason]
+  (throw (ex-info "Mithril Jev semantic output refused"
+                  {:mithril/error :mithril.decision-semantic/refused
+                   :reason reason})))
+
+(defn schema [source]
+  (let [artifact (compiler/compile-ontology-text ontology-path source)
+        graph (get-in artifact [:rdf-dataset "@graph"])
+        class-node (first (filter #(= decision-class (get % "@id")) graph))
+        shape-node (first (filter #(= shape-id (get % "@id")) graph))
+        properties (get shape-node "property")
+        expected (into {}
+                       (for [[field label] fields]
+                         [(str base label)
+                          (if (contains? integer-fields field)
+                            "http://www.w3.org/2001/XMLSchema#integer"
+                            "http://www.w3.org/2001/XMLSchema#string")]))]
+    (when-not (and (= super-class (get class-node "subClassOf"))
+                   (= decision-class (get shape-node "targetClass"))
+                   (= (count fields) (count properties))
+                   (= expected
+                      (into {}
+                            (for [p properties
+                                  :when (and (= 1 (get p "minCount"))
+                                             (= 1 (get p "maxCount")))]
+                              [(get p "propertyPath") (get p "datatype")]))))
+      (refuse! :invalid-ontology))
+    {:ontology-digest (:graph-digest artifact)
+     :shape {:shacl/type :node-shape
+             :property (mapv (fn [[field _]]
+                               {:path field
+                                :datatype (if (contains? integer-fields field)
+                                            :integer :string)
+                                :min-count 1 :max-count 1}) fields)}}))
+
+(defn- projection [proof admitted model-result]
+  (let [data (-> (select-keys proof [:run-id :step :state-digest
+                                    :decision-state-digest :domain-graph-digest
+                                    :domain-ontology-digest :effect-id :request-id])
+                 (assoc :model-result-digest (execution/digest model-result)
+                        :selected-action (:action-id proof)
+                        :model-id (:model proof)
+                        :confidence (:confidence admitted)))]
+    (when-not (= (set (keys fields)) (set (keys data)))
+      (refuse! :invalid-decision))
+    data))
+
+(defn- source-text [data]
+  (str "(mithril/jev-decision :id "
+       (pr-str (str "https://mithril.fund/id/jev-decision/"
+                    (subs (:state-digest data) 7) "/" (:step data)))
+       " "
+       (str/join " " (mapcat (fn [[field _]]
+                               [(str field) (pr-str (get data field))])
+                             (sort-by (comp str key) fields)))
+       ")"))
+
+(defn- graph-digest! [document]
+  (when-not (= context-uri (get document "@context"))
+    (refuse! :invalid-context))
+  (let [expanded (jsonld/expand document {:contexts {context-uri context-document}})
+        expected (set (concat ["@id" "@type"]
+                              (map #(str base %) (vals fields))))]
+    (when-not (and (= 1 (count expanded))
+                   (= expected (set (keys (first expanded)))))
+      (refuse! :rdf-field-loss))
+    (str "sha256:" (rdf-canon/canonical-hash (to-rdf/to-rdf expanded)))))
+
+(defn build [schema proof admitted model-result]
+  (let [data (projection proof admitted model-result)
+        report (execution/validate-shape (:shape schema) data)
+        triples #{(oak/triple :mithril/JevDecision :rdfs/subClassOf
+                             :mithril/SemanticDecision)
+                  (oak/triple :mithril/decision :rdf/type :mithril/JevDecision)}
+        inferred (oak/materialize :owl2-rl triples)
+        rows (oak/execute :owl2-rl
+                          [:sparql/project [:?node]
+                           [:sparql/bgp [:?node :rdf/type :mithril/SemanticDecision]]]
+                          triples)]
+    (when-not (:valid? report)
+      (throw (ex-info "Jev decision violates declared SHACL shape"
+                      {:mithril/error :mithril.decision-semantic/shacl-violation
+                       :report report})))
+    (when-not (and (every? (fn [[field value]]
+                             (if (contains? integer-fields field)
+                               (<= 0 value)
+                               (not (str/blank? value))))
+                           data)
+                   (<= (:confidence data) 10000))
+      (refuse! :invalid-decision))
+    (when-not (and (contains? inferred
+                             (oak/triple :mithril/decision :rdf/type
+                                         :mithril/SemanticDecision))
+                   (seq rows))
+      (refuse! :owl-entailment-failed))
+    (let [source (source-text data)
+          document (form/parse source)]
+      {:ontology-digest (:ontology-digest schema)
+       :graph-digest (graph-digest! document)
+       :source source :document document :shape-report report})))

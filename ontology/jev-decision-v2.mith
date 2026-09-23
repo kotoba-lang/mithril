@@ -1,0 +1,52 @@
+(mithril/ontology
+  :id "https://mithril.fund/ontology/jev-decision-v2"
+  :profile
+  ["https://www.w3.org/TR/rdf11-concepts/"
+   "https://www.w3.org/TR/owl2-profiles/#OWL_2_RL"
+   "https://www.w3.org/TR/shacl/"]
+  :graph
+  [(owl/class
+     :id "https://mithril.fund/ns/v1#SemanticDecision")
+   (owl/class
+     :id "https://mithril.fund/ns/v1#JevDecision"
+     :rdfs/sub-class-of "https://mithril.fund/ns/v1#SemanticDecision")
+   (shacl/node-shape
+     :id "https://mithril.fund/ns/v1#JevDecisionShape"
+     :sh/target-class "https://mithril.fund/ns/v1#JevDecision"
+     :sh/property
+     [(shacl/property-shape :sh/path "https://mithril.fund/ns/v1#runId"
+        :sh/datatype "http://www.w3.org/2001/XMLSchema#string"
+        :sh/min-count 1 :sh/max-count 1)
+      (shacl/property-shape :sh/path "https://mithril.fund/ns/v1#step"
+        :sh/datatype "http://www.w3.org/2001/XMLSchema#integer"
+        :sh/min-count 1 :sh/max-count 1)
+      (shacl/property-shape :sh/path "https://mithril.fund/ns/v1#stateDigest"
+        :sh/datatype "http://www.w3.org/2001/XMLSchema#string"
+        :sh/min-count 1 :sh/max-count 1)
+      (shacl/property-shape :sh/path "https://mithril.fund/ns/v1#decisionStateDigest"
+        :sh/datatype "http://www.w3.org/2001/XMLSchema#string"
+        :sh/min-count 1 :sh/max-count 1)
+      (shacl/property-shape :sh/path "https://mithril.fund/ns/v1#domainGraphDigest"
+        :sh/datatype "http://www.w3.org/2001/XMLSchema#string"
+        :sh/min-count 1 :sh/max-count 1)
+      (shacl/property-shape :sh/path "https://mithril.fund/ns/v1#domainOntologyDigest"
+        :sh/datatype "http://www.w3.org/2001/XMLSchema#string"
+        :sh/min-count 1 :sh/max-count 1)
+      (shacl/property-shape :sh/path "https://mithril.fund/ns/v1#modelResultDigest"
+        :sh/datatype "http://www.w3.org/2001/XMLSchema#string"
+        :sh/min-count 1 :sh/max-count 1)
+      (shacl/property-shape :sh/path "https://mithril.fund/ns/v1#selectedAction"
+        :sh/datatype "http://www.w3.org/2001/XMLSchema#string"
+        :sh/min-count 1 :sh/max-count 1)
+      (shacl/property-shape :sh/path "https://mithril.fund/ns/v1#effectId"
+        :sh/datatype "http://www.w3.org/2001/XMLSchema#string"
+        :sh/min-count 1 :sh/max-count 1)
+      (shacl/property-shape :sh/path "https://mithril.fund/ns/v1#requestId"
+        :sh/datatype "http://www.w3.org/2001/XMLSchema#string"
+        :sh/min-count 1 :sh/max-count 1)
+      (shacl/property-shape :sh/path "https://mithril.fund/ns/v1#modelId"
+        :sh/datatype "http://www.w3.org/2001/XMLSchema#string"
+        :sh/min-count 1 :sh/max-count 1)
+      (shacl/property-shape :sh/path "https://mithril.fund/ns/v1#confidence"
+        :sh/datatype "http://www.w3.org/2001/XMLSchema#integer"
+        :sh/min-count 1 :sh/max-count 1)])])
