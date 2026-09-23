@@ -1,0 +1,34 @@
+(mithril/growth-profile
+  :id "https://mithril.fund/id/growth/murakumo-user-acquisition"
+  :goal "https://mithril.fund/id/goal/user-acquisition"
+  :ontology "3539fef6d1f26c012d4305a55a3782902ff8de47e56901e619ea0cde30ece918"
+  :policy
+  (mithril/growth-policy
+    :metric "activated-inference-users"
+    :authority "propose-only"
+    :confidence-floor 3000
+    :actions
+    [(mithril/growth-action
+       :id "https://mithril.fund/id/action/repair-checkout"
+       :label "repair-checkout"
+       :effect "proposal/record"
+       :target "https://murakumo.cloud/#store"
+       :description "Propose repair of the measured checkout blocker before paid acquisition")
+     (mithril/growth-action
+       :id "https://mithril.fund/id/action/activate-after-inference"
+       :label "activate-after-inference"
+       :effect "proposal/record"
+       :target "https://murakumo.cloud/"
+       :description "Propose one usage-threshold activation path for a user who completed inference")
+     (mithril/growth-action
+       :id "https://mithril.fund/id/action/publish-onboarding-proof"
+       :label "publish-onboarding-proof"
+       :effect "proposal/record"
+       :target "https://murakumo.cloud/"
+       :description "Propose a verifiable onboarding proof using only current live capabilities")
+     (mithril/growth-action
+       :id "https://mithril.fund/id/action/hold-for-evidence"
+       :label "hold-for-evidence"
+       :effect "proposal/record"
+       :target "none"
+       :description "Record a hold when the user surface could not be measured")]))

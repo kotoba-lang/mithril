@@ -1,0 +1,143 @@
+(ns mithril.growth
+  "Closed, propose-only acquisition decisions for scheduled Mithril actors.
+
+  The profile supplies a finite intervention catalog. Jev may select one ID;
+  this module validates the full probability distribution and emits a typed
+  proposal receipt. It never sends outreach, publishes, or mutates a service."
+  (:require [clojure.string :as str]
+            [mithril.bot :as bot]
+            [mithril.compiler :as compiler]
+            [mithril.execution :as execution]))
+
+(def artifact-format "https://mithril.fund/artifact/growth-profile-v1")
+(def receipt-format "https://mithril.fund/receipt/growth-proposal-v1")
+(def goals
+  #{"https://mithril.fund/id/goal/labor-liberation"
+    "https://mithril.fund/id/goal/advertiser-acquisition"
+    "https://mithril.fund/id/goal/user-acquisition"})
+(def authority "propose-only")
+(def source-keys #{"@context" "@id" "@type" "goal" "ontology" "policy"})
+(def policy-keys #{"metric" "authority" "confidenceFloor" "actions"})
+(def action-keys #{"@id" "label" "effect" "target" "description"})
+
+(defn- fail! [code detail data]
+  (throw (ex-info detail (merge {:mithril/error code :detail detail} data))))
+
+(defn- sha256? [value]
+  (and (string? value) (boolean (re-matches #"[0-9a-f]{64}" value))))
+
+(defn- nonblank? [value]
+  (and (string? value) (not (str/blank? value))))
+
+(defn compile-document [path doc]
+  (when-not (compiler/source-path? path)
+    (fail! :mithril/unsupported-extension "growth profile must end in .mith or .mithril" {}))
+  (when-not (= compiler/context-uri (get doc "@context"))
+    (fail! :mithril/unpinned-context "growth profile must use the pinned context" {}))
+  (when-not (= "GrowthProfile" (get doc "@type"))
+    (fail! :mithril/unexpected-source-type "@type must be GrowthProfile" {}))
+  (when-not (= source-keys (set (keys doc)))
+    (fail! :mithril.growth/invalid-profile "growth profile has an unknown or missing key" {}))
+  (when-not (contains? goals (get doc "goal"))
+    (fail! :mithril.growth/unknown-goal "growth goal is outside the closed catalog" {}))
+  (when-not (sha256? (get doc "ontology"))
+    (fail! :mithril/invalid-ontology "ontology must be a 64-character SHA-256 identity" {}))
+  (let [policy (get doc "policy")
+        actions (get policy "actions")
+        floor (get policy "confidenceFloor")]
+    (when-not (= policy-keys (set (keys policy)))
+      (fail! :mithril.growth/invalid-policy "growth policy has an unknown or missing key" {}))
+    (when-not (= authority (get policy "authority"))
+      (fail! :mithril.growth/authority "v1 growth actors are propose-only" {}))
+    (when-not (and (nonblank? (get policy "metric"))
+                   (integer? floor) (<= 0 floor 10000)
+                   (vector? actions) (<= 2 (count actions) 16))
+      (fail! :mithril.growth/invalid-policy "metric, confidence floor, or action count is invalid" {}))
+    (doseq [action actions]
+      (when-not (and (= action-keys (set (keys action)))
+                     (every? nonblank? (map action action-keys))
+                     (str/starts-with? (get action "@id") "https://mithril.fund/id/action/"))
+        (fail! :mithril.growth/invalid-action "growth action is not a closed typed action" {})))
+    (let [labels (map #(get % "label") actions)
+          ids (map #(get % "@id") actions)]
+      (when-not (and (= (count labels) (count (set labels)))
+                     (= (count ids) (count (set ids))))
+        (fail! :mithril.growth/duplicate-action "growth action ids and labels must be unique" {})))
+    {:format artifact-format
+     :media-type compiler/media-type
+     :graph-digest (compiler/graph-digest doc)
+     :growth-ir {:version :mithril.growth/v1
+                 :goal (get doc "goal")
+                 :ontology (get doc "ontology")
+                 :metric (get policy "metric")
+                 :authority authority
+                 :confidence-floor floor
+                 :actions (mapv (fn [action]
+                                  {:id (get action "@id")
+                                   :label (get action "label")
+                                   :effect (keyword (get action "effect"))
+                                   :target (get action "target")
+                                   :description (get action "description")
+                                   :requires #{} :produces #{:proposal/recorded}})
+                                actions)}}))
+
+(defn compile-text [path text]
+  (compile-document path (compiler/parse-source text)))
+
+(def observation-keys #{:id :measured-at :summary :values})
+
+(defn prepare-request [artifact observation]
+  (when-not (= artifact-format (:format artifact))
+    (fail! :mithril.growth/invalid-artifact "artifact is not a growth profile" {}))
+  (when-not (and (= observation-keys (set (keys observation)))
+                 (every? nonblank? (map observation [:id :measured-at :summary]))
+                 (map? (:values observation))
+                 (<= (count (pr-str observation)) 32768))
+    (fail! :mithril.growth/invalid-observation "observation must be bounded measured state" {}))
+  (let [actions (get-in artifact [:growth-ir :actions])]
+    {:state (str "Goal " (get-in artifact [:growth-ir :goal])
+                 "; metric " (get-in artifact [:growth-ir :metric])
+                 "; authority propose-only; observation " (pr-str observation))
+     :questions [{:type "choice"
+                  :instructions "Select exactly one bounded proposal. Do not generate prose or send anything."
+                  :options (mapv :label actions)}]
+     :candidates actions}))
+
+(defn admit-decision [artifact observation model-result]
+  (let [{:keys [candidates]} (prepare-request artifact observation)
+        labels (set (map :label candidates))
+        decision (first (:decisions model-result))
+        probabilities (:probabilities decision)
+        choice (:choice decision)
+        confidence (:confidence decision)
+        selected (get probabilities choice)
+        winner (when (seq probabilities) (apply max (vals probabilities)))
+        basis-points (when (number? confidence) (js/Math.round (* confidence 10000)))
+        action (some #(when (= choice (:label %)) %) candidates)]
+    (when-not (and (= bot/model-kind (:kind model-result))
+                   (false? (:generated_text model-result))
+                   (= bot/jev-provider (get-in model-result [:artifact :provider]))
+                   (= bot/jev-endpoint (get-in model-result [:artifact :endpoint]))
+                   (= bot/jev-model (get-in model-result [:artifact :requested_model]))
+                   (str/starts-with? (get-in model-result [:artifact :resolved_model] "")
+                                     "typesafe/jev-1.13-")
+                   (= 1 (count (:decisions model-result))))
+      (fail! :mithril.growth/invalid-model-result "decision is not a pinned OpenRouter Jev result" {}))
+    (when-not (and (= labels (set (keys probabilities)))
+                   (every? #(and (number? %) (<= 0 % 1)) (vals probabilities))
+                   (< (js/Math.abs (- 1 (reduce + (vals probabilities)))) 0.0001)
+                   action (= selected winner) (number? confidence) (<= 0 confidence 1))
+      (fail! :mithril.growth/invalid-decision "choice and distribution must cover the exact action catalog" {}))
+    (when (< basis-points (get-in artifact [:growth-ir :confidence-floor]))
+      (fail! :mithril.growth/confidence-below-floor "choice is below the growth policy floor" {}))
+    {:format receipt-format
+     :proposal-id (execution/digest [(:graph-digest artifact) observation (:id action)])
+     :profile-digest (:graph-digest artifact)
+     :observation-id (:id observation)
+     :goal (get-in artifact [:growth-ir :goal])
+     :metric (get-in artifact [:growth-ir :metric])
+     :authority authority
+     :action (dissoc action :requires :produces)
+     :confidence basis-points
+     :probabilities (into (sorted-map) probabilities)
+     :model (select-keys model-result [:model :artifact])}))

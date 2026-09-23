@@ -435,6 +435,26 @@ host executes each admitted transition mechanically.
 - v1 composes a closed ontology catalog; it does not invent identifiers, text,
   algorithms, UI, or effects.
 
+## Governed growth loops
+
+`mithril/growth-profile` is the propose-only scheduler surface for bounded
+business interventions. A profile declares one metric and a finite catalog of
+typed actions. OpenRouter TypeSafe Jev selects one action directly; Mithril
+rejects generated text, incomplete probability distributions, candidates
+outside the catalog, low-confidence choices, and every authority other than
+`propose-only`. The CLI appends a content-bound JSONL receipt and never sends
+outreach, publishes content, or mutates a live service:
+
+```sh
+kbb --backend sci bin/mithril-growth.cljk decide \
+  examples/murakumo-advertiser-acquisition.mith \
+  observation.json receipts.jsonl
+```
+
+The shipped profiles cover labor liberation, advertiser acquisition, and user
+acquisition. Their action descriptions are decision criteria, not generated
+copy; external execution remains a separately governed effect.
+
 ## Run
 
 ```sh

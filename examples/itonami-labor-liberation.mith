@@ -1,0 +1,28 @@
+(mithril/growth-profile
+  :id "https://mithril.fund/id/growth/itonami-labor-liberation"
+  :goal "https://mithril.fund/id/goal/labor-liberation"
+  :ontology "3539fef6d1f26c012d4305a55a3782902ff8de47e56901e619ea0cde30ece918"
+  :policy
+  (mithril/growth-policy
+    :metric "verified-human-hours-removed"
+    :authority "propose-only"
+    :confidence-floor 3000
+    :actions
+    [(mithril/growth-action
+       :id "https://mithril.fund/id/action/select-next-vertical"
+       :label "select-next-vertical"
+       :effect "proposal/record"
+       :target "cloud-itonami-os"
+       :description "Propose the highest-evidence unconnected industry vertical from the maturity tick")
+     (mithril/growth-action
+       :id "https://mithril.fund/id/action/repair-activation-path"
+       :label "repair-activation-path"
+       :effect "proposal/record"
+       :target "itonami.cloud"
+       :description "Propose one measured activation blocker repair before acquisition")
+     (mithril/growth-action
+       :id "https://mithril.fund/id/action/hold-for-evidence"
+       :label "hold-for-evidence"
+       :effect "proposal/record"
+       :target "none"
+       :description "Record a hold when current evidence cannot justify either intervention")]))
