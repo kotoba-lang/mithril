@@ -43,9 +43,12 @@
         id (get record "traceCid")]
     (when-not (string? id) (refuse! :missing-trace-cid))
     (let [saved (trace/read! #(blocks/get-block store %) id)
-          expected (assoc (trace/json-value (:receipt saved))
-                          "traceCid" id
-                          "definitionDigest" (:definition-digest saved))]
+          expected (cond-> (assoc (trace/json-value (:receipt saved))
+                                  "traceCid" id
+                                  "definitionDigest" (:definition-digest saved))
+                     (= trace/format-id (:format saved))
+                     (assoc "semanticGraphDigest" (:semantic-graph-digest saved)
+                            "semanticOntologyDigest" (:semantic-ontology-digest saved)))]
       (when-not (= record expected) (refuse! :receipt-block-mismatch))
       saved)))
 
@@ -72,7 +75,9 @@
             saved (trace/read! #(blocks/get-block store %) id)
             full (assoc (trace/json-value receipt)
                         "traceCid" id
-                        "definitionDigest" (:definition-digest saved))]
+                        "definitionDigest" (:definition-digest saved)
+                        "semanticGraphDigest" (:semantic-graph-digest saved)
+                        "semanticOntologyDigest" (:semantic-ontology-digest saved))]
         (.mkdirSync fs (.dirname path receipt-file) #js {:recursive true :mode 448})
         (.appendFileSync fs receipt-file
                          (str (.stringify js/JSON (clj->js full)) "\n")
@@ -86,9 +91,12 @@
     (when (empty? entries) (refuse! :empty-ledger))
     (loop [entries entries prior nil count 0]
       (if (empty? entries)
-        {:head prior :receipts count
-         :blocks (:blocks (trace/verify-history!
-                           #(blocks/get-block store %) prior))}
+        (let [history (trace/verify-history!
+                       #(blocks/get-block store %) prior)]
+          {:head prior :receipts count
+           :blocks (:blocks history)
+           :semantic-blocks (:semantic-blocks history)
+           :legacy-blocks (:legacy-blocks history)})
         (let [saved (verify-line! store (first entries))]
           (when-not (= current-profile-source (:profile-source saved))
             (refuse! :profile-source-drift))

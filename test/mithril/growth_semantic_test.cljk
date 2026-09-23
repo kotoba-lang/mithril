@@ -1,0 +1,66 @@
+(ns mithril.growth-semantic-test
+  (:require [cljs.test :refer [deftest is]]
+            [clojure.string :as str]
+            [mithril.form :as form]
+            [mithril.growth :as growth]
+            [mithril.growth-semantic :as semantic]
+            [mithril.growth-test :as fixture]))
+
+(def fs (js/require "node:fs"))
+(defn- text [file] (.readFileSync fs file "utf8"))
+(defn- schema [] (semantic/schema (text semantic/ontology-path)))
+(defn- receipt []
+  (let [artifact (growth/compile-text "growth.mith" fixture/source)
+        model (fixture/model-result "fix-entry" 0.8 0.7)]
+    (assoc (growth/admit-decision artifact fixture/observation model)
+           :decision-ms 10
+           :audit {:request-id "request-1" :model "typesafe/jev-1.13-20260917"})))
+(defn- build [schema receipt parent]
+  (let [artifact (growth/compile-text "growth.mith" fixture/source)]
+    (semantic/build schema (:graph-digest artifact)
+                    (:definition-digest artifact) fixture/observation
+                    (fixture/model-result "fix-entry" 0.8 0.7)
+                    receipt parent)))
+(defn- reason [f]
+  (try (f) nil (catch :default error (:reason (ex-data error)))))
+(defn- code [f]
+  (try (f) nil (catch :default error (:mithril/error (ex-data error)))))
+
+(deftest decision-form-jsonld-rdf-owl-and-declared-shacl-agree
+  (let [s (schema)
+        first-decision (build s (receipt) nil)
+        linked (build s (receipt) "bafyreitestparent")
+        different-request (build s (assoc-in (receipt) [:audit :request-id]
+                                              "request-2") nil)
+        document (form/parse (:source first-decision))
+        shipped (js->clj (js/JSON.parse (text "resources/context-growth-decision-v1.jsonld")))]
+    (is (= semantic/context-document shipped))
+    (is (= semantic/context-uri (get document "@context")))
+    (is (= "GrowthDecision" (get document "@type")))
+    (is (= (set (concat ["@id" "@type" "@context"] (keys semantic/fields)))
+           (set (keys (form/parse (:source linked))))))
+    (is (true? (get-in first-decision [:shape-report :valid?])))
+    (is (re-matches #"sha256:[0-9a-f]{64}" (:graph-digest first-decision)))
+    (is (not= (:graph-digest first-decision) (:graph-digest linked)))
+    (is (not= (:graph-digest first-decision)
+              (:graph-digest different-request)))))
+
+(deftest ontology-and-shacl-refuse-their-stated-violations
+  (let [s (schema)
+        changed (str/replace (text semantic/ontology-path)
+                             ":sh/target-class \"https://mithril.fund/ns/v1#GrowthDecision\""
+                             ":sh/target-class \"https://mithril.fund/ns/v1#OtherDecision\"")]
+    (is (not= (text semantic/ontology-path) changed))
+    (is (= :invalid-ontology (reason #(semantic/schema changed))))
+    (let [wrong-type (str/replace (text semantic/ontology-path)
+                                  "#requestId\"\n        :sh/datatype \"http://www.w3.org/2001/XMLSchema#string"
+                                  "#requestId\"\n        :sh/datatype \"http://www.w3.org/2001/XMLSchema#integer")]
+      (is (not= (text semantic/ontology-path) wrong-type))
+      (is (= :invalid-ontology (reason #(semantic/schema wrong-type)))))
+    (is (= :mithril.growth-semantic/shacl-violation
+           (code #(build s (assoc-in (receipt) [:audit :request-id] nil) nil))))
+    (is (= :rdf-field-loss
+           (reason #(with-redefs [semantic/context-document
+                                  (update semantic/context-document "@context"
+                                          dissoc "authority")]
+                      (build s (receipt) nil)))))))

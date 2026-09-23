@@ -58,6 +58,11 @@
             head (trace/read! #(blocks/get-block reopened %) (get second-line "traceCid"))]
         (is (= 2 (:receipts (local/verify-ledger! reopened ledger fixture/source))))
         (is (= 2 (:blocks (local/verify-ledger! reopened ledger fixture/source))))
+        (is (= 2 (:semantic-blocks (local/verify-ledger! reopened ledger fixture/source))))
+        (is (= 0 (:legacy-blocks (local/verify-ledger! reopened ledger fixture/source))))
+        (is (= trace/format-id (:format head)))
+        (is (re-matches #"sha256:[0-9a-f]{64}" (:semantic-graph-digest head)))
+        (is (str/includes? (:semantic-source head) "mithril/growth-decision"))
         (is (= (:definition-digest head) (get second-line "definitionDigest")))
         (is (= [(get first-line "traceCid")] (:parents head)))
         (is (= two (:observation head)))

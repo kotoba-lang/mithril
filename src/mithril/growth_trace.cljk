@@ -8,12 +8,18 @@
             [ipld.core :as ipld]
             [mithril.execution :as execution]
             [mithril.growth :as growth]
+            [mithril.growth-semantic :as semantic]
             [multiformats.core :as multiformats]))
 
-(def format-id "https://mithril.fund/block/growth-decision-trace-v1")
-(def node-keys
+(def format-v1 "https://mithril.fund/block/growth-decision-trace-v1")
+(def format-id "https://mithril.fund/block/growth-decision-trace-v2")
+(def node-keys-v1
   #{"format" "profilePath" "profileSource" "profileDigest" "definitionDigest"
     "observationEdn" "modelResultEdn" "receiptEdn" "parents"})
+(def node-keys-v2
+  (into node-keys-v1
+        #{"semanticOntologySource" "semanticOntologyDigest"
+          "semanticSource" "semanticGraphDigest"}))
 
 (defn- refuse! [reason]
   (throw (ex-info "Mithril growth trace refused"
@@ -44,10 +50,10 @@
       (refuse! :receipt-replay-mismatch))
     artifact))
 
-(defn- node [profile-path profile-source observation model-result receipt parents]
+(defn- node-v1 [profile-path profile-source observation model-result receipt parents]
   (valid-parents! parents)
   (let [artifact (replay! profile-path profile-source observation model-result receipt)]
-    {"format" format-id
+    {"format" format-v1
      "profilePath" profile-path
      "profileSource" profile-source
      "profileDigest" (:graph-digest artifact)
@@ -57,9 +63,28 @@
      "receiptEdn" (execution/canonical-edn-text receipt)
      "parents" (mapv ipld/link parents)}))
 
+(defn- ontology-source []
+  #?(:cljs (.readFileSync (js/require "node:fs") semantic/ontology-path "utf8")
+     :clj (slurp semantic/ontology-path)))
+
+(defn- node-v2 [profile-path profile-source observation model-result receipt parents
+                 semantic-ontology-source]
+  (let [base (node-v1 profile-path profile-source observation model-result receipt parents)
+        schema (semantic/schema semantic-ontology-source)
+        result (semantic/build schema (get base "profileDigest")
+                               (get base "definitionDigest")
+                               observation model-result receipt (first parents))]
+    (assoc base
+           "format" format-id
+           "semanticOntologySource" semantic-ontology-source
+           "semanticOntologyDigest" (:ontology-digest result)
+           "semanticSource" (:source result)
+           "semanticGraphDigest" (:graph-digest result))))
+
 (defn block [profile-path profile-source observation model-result receipt parents]
   (ipld/node->block
-   (node profile-path profile-source observation model-result receipt parents)))
+   (node-v2 profile-path profile-source observation model-result receipt parents
+            (ontology-source))))
 
 (defn- read-edn! [text]
   (try (reader/read-string text)
@@ -69,27 +94,40 @@
   (when-not (valid-cid? id) (refuse! :invalid-cid))
   (let [value (ipld/get-node get-fn id)]
     (when-not value (refuse! :missing-block))
-    (when-not (and (map? value)
-                   (= node-keys (set (keys value)))
-                   (= format-id (get value "format"))
+    (let [version (get value "format")
+          v2? (= format-id version)]
+      (when-not (and (map? value)
+                   (contains? #{format-v1 format-id} version)
+                   (= (if v2? node-keys-v2 node-keys-v1) (set (keys value)))
                    (every? string? (map #(get value %) ["profilePath" "profileSource"
                                                        "profileDigest" "definitionDigest" "observationEdn"
                                                        "modelResultEdn" "receiptEdn"]))
+                   (or (not v2?)
+                       (every? string? (map #(get value %)
+                                             ["semanticOntologySource" "semanticOntologyDigest"
+                                              "semanticSource" "semanticGraphDigest"])))
                    (vector? (get value "parents"))
                    (every? ipld/link? (get value "parents")))
       (refuse! :invalid-node))
-    (let [parents (mapv ipld/link-cid (get value "parents"))
+      (let [parents (mapv ipld/link-cid (get value "parents"))
           observation (read-edn! (get value "observationEdn"))
           model-result (read-edn! (get value "modelResultEdn"))
           receipt (read-edn! (get value "receiptEdn"))
-          expected (node (get value "profilePath") (get value "profileSource")
-                         observation model-result receipt parents)]
+          expected (if v2?
+                     (node-v2 (get value "profilePath") (get value "profileSource")
+                              observation model-result receipt parents
+                              (get value "semanticOntologySource"))
+                     (node-v1 (get value "profilePath") (get value "profileSource")
+                              observation model-result receipt parents))]
       (when-not (= expected value) (refuse! :noncanonical-trace))
-      {:cid id :parents parents :profile-path (get value "profilePath")
+      {:cid id :format version :parents parents :profile-path (get value "profilePath")
        :profile-source (get value "profileSource")
        :profile-digest (get value "profileDigest")
        :definition-digest (get value "definitionDigest")
-       :observation observation :model-result model-result :receipt receipt})))
+       :semantic-ontology-digest (get value "semanticOntologyDigest")
+       :semantic-source (get value "semanticSource")
+       :semantic-graph-digest (get value "semanticGraphDigest")
+       :observation observation :model-result model-result :receipt receipt}))))
 
 (defn put! [put-fn get-fn profile-path profile-source observation model-result receipt parents]
   (valid-parents! parents)
@@ -104,9 +142,11 @@
       cid)))
 
 (defn verify-history! [get-fn head]
-  (loop [id head seen #{} observation-ids #{}]
+  (loop [id head seen #{} observation-ids #{} semantic-blocks 0]
     (if-not id
-      {:head head :blocks (count seen) :observation-ids observation-ids}
+      {:head head :blocks (count seen) :observation-ids observation-ids
+       :semantic-blocks semantic-blocks
+       :legacy-blocks (- (count seen) semantic-blocks)}
       (do
         (when (or (contains? seen id) (>= (count seen) 256))
           (refuse! :invalid-history))
@@ -119,7 +159,9 @@
             (let [prior (read! get-fn parent)]
               (when-not (= (:definition-digest saved) (:definition-digest prior))
                 (refuse! :parent-profile-mismatch))))
-          (recur parent (conj seen id) (conj observation-ids obs-id)))))))
+          (recur parent (conj seen id) (conj observation-ids obs-id)
+                 (if (= format-id (:format saved))
+                   (inc semantic-blocks) semantic-blocks)))))))
 
 (defn json-value [value]
   (cond
