@@ -47,6 +47,16 @@
          (try (worker/reconcile-step 2 {:step 4}) nil
               (catch :default error (:mithril/error (ex-data error)))))))
 
+(deftest orphaned-running-handoff-is-the-only-auto-recovery-case
+  (let [properties (worker/parse-card-body body)
+        continuation (worker/continuation-body properties 4 "t_root")
+        running {:status "running" :body continuation}]
+    (is (true? (worker/replayable-handoff? running {:step 5})))
+    (is (false? (worker/replayable-handoff? running {:step 4})))
+    (is (false? (worker/replayable-handoff? running {:step 6})))
+    (is (false? (worker/replayable-handoff? (assoc running :status "ready") {:step 5})))
+    (is (false? (worker/replayable-handoff? (assoc running :body "not-a-card") {:step 5})))))
+
 (deftest coding-registry-is-closed-and-workspace-scoped
   (let [registry {:format worker/registry-format
                   :profiles [{:workspace "/tmp/a" :tool-profile "/tmp/a.json"}
