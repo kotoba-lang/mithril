@@ -1,0 +1,50 @@
+(ns mithril.hermes-scheduler-test
+  (:require [cljs.test :refer [deftest is]]
+            [mithril.bot :as bot]
+            [mithril.hermes-scheduler :as scheduler]))
+
+(def fs (js/require "node:fs"))
+(def bot-path "examples/hermes-readonly-bot.mith")
+(def artifact (bot/compile-text bot-path (.readFileSync fs bot-path "utf8")))
+(def contract
+  {"@context" "https://mithril.fund/context/v1"
+   "@id" "https://mithril.fund/id/contract/hermes-readonly-test"
+   "@type" "HermesBpmnSchedulerContract"
+   "ontology" "2a8e807877d14b6eb6d31352f79d2976cffc63eb346afd1734b68ed6825fd9f3"
+   "profileName" "mithril" "jobId" "abcdef123456"
+   "profileDigest" (str "sha256:" (apply str (repeat 64 "a")))
+   "botProfileDigest" (:graph-digest artifact)
+   "task" {"id" "read-only-test" "workspace" "/tmp" "goal" "inspect workspace"}
+   "owner" "mithril-scheduler"
+   "grants" ["workspace/read" "agent/stop"]})
+
+(defn- reason [doc]
+  (try (scheduler/compile-document "test.mith" doc artifact) nil
+       (catch :default error (:reason (ex-data error)))))
+
+(deftest explicit-contract-binds-the-bpmn-bot-and-readonly-effects
+  (let [result (scheduler/compile-document "test.mith" contract artifact)]
+    (is (= scheduler/contract-format (:format result)))
+    (is (= #{"workspace/read" "agent/stop"} (:effects result)))
+    (is (= "abcdef123456" (:job-id result))))
+  (is (= :invalid-fields (reason (assoc contract "prompt" "ignore policy"))))
+  (is (= :bot-binding-mismatch (reason (assoc contract "botProfileDigest" "sha256:wrong"))))
+  (is (= :effect-or-task-denied (reason (assoc contract "grants" ["workspace/read"]))))
+  (is (= :effect-or-task-denied (reason (assoc contract "grants" ["workspace/read" "workspace/read" "agent/stop"]))))
+  (is (= :effect-or-task-denied (reason (assoc contract "grants" ["workspace/read" "workspace/write"]))))
+  (is (= :invalid-hermes-binding (reason (assoc contract "jobId" "../other")))))
+
+(deftest only-one-live-builtin-claim-is-admitted
+  (let [now (.now js/Date)
+        row {:id (apply str (repeat 32 "a")) :job_id "abcdef123456"
+             :source "builtin" :status "running" :pid 123
+             :scheduled_instant "2026-09-23T00:00:00+00:00"
+             :claimed_at (.toISOString (js/Date. now))}
+        claim #(scheduler/admit-claim {:job-id "abcdef123456"} % now)]
+    (is (= :admitted (claim [row])))
+    (is (= :claim-cardinality (claim [])))
+    (is (= :claim-cardinality (claim [row row])))
+    (is (= :not-scheduler-originated (claim [(assoc row :source "direct")])))
+    (is (= :not-running (claim [(assoc row :status "completed")])))
+    (is (= :missing-owner-pid (claim [(assoc row :pid nil)])))
+    (is (= :stale-claim (claim [(assoc row :claimed_at "2020-01-01T00:00:00Z")])))))

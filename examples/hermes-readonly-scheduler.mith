@@ -1,0 +1,17 @@
+{
+  "@context": "https://mithril.fund/context/v1",
+  "@id": "https://mithril.fund/id/contract/hermes-readonly-scheduler-canary-v1",
+  "@type": "HermesBpmnSchedulerContract",
+  "ontology": "2a8e807877d14b6eb6d31352f79d2976cffc63eb346afd1734b68ed6825fd9f3",
+  "profileName": "mithril",
+  "jobId": "4f81b563837d",
+  "profileDigest": "sha256:25217009756536fb25693a7c4c19854857e68dd9798b2953ebd11b3d9406d8ac",
+  "botProfileDigest": "sha256:45627c8274dd2ec9e29f5880c61dab6051c42d6be7ad4e596cf37b801adfd2da",
+  "task": {
+    "id": "hermes-readonly-bpmn-canary",
+    "workspace": "/Users/junkawasaki/.hermes/runtime/mithril",
+    "goal": "Inspect the Mithril runtime workspace through one governed BPMN service task"
+  },
+  "owner": "mithril-scheduler",
+  "grants": ["workspace/read", "agent/stop"]
+}

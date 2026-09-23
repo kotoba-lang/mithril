@@ -154,6 +154,30 @@ The command deliberately takes an explicit profile and job ID; `plan-bpmn`
 eligibility is not permission to turn on all jobs. LLM-driven jobs and actual
 scheduler replacement remain separate migration phases.
 
+### Executing BPMN scheduler adapter (read-only v1)
+
+[`hermes-readonly-bot.mith`](examples/hermes-readonly-bot.mith) declares the
+ontology-bound BPMN process, action set, effect grants, and retry/step budget.
+[`hermes-readonly-scheduler.mith`](examples/hermes-readonly-scheduler.mith) is
+the closed JSON-LD `.mith` binding to one Hermes profile, job, and compiled
+bot digest. This is a canary contract, not a prompt-to-permission conversion.
+
+Install [`hermes-bpmn-adapter.sh`](scripts/hermes-bpmn-adapter.sh) into that
+profile's `scripts/mithril-bpmn-adapter.sh` and run the job as Hermes
+`--no-agent --script mithril-bpmn-adapter.sh`, with the Mithril checkout as
+`--workdir`. The adapter accepts exactly one fresh `source=builtin` running
+claim from that profile's execution database, verifies the live job and its
+compiled profile manifest, and performs at most one BPMN service task through
+the existing Jev decision, governor, and deterministic effect executor. It
+writes an occurrence-scoped attempt marker before any effect and a receipt
+only after the BPMN state advances. A lost receipt is uncertain and refuses
+automatic replay. Direct CLI calls with no scheduler claim are refused.
+
+`verify-profile` checks just the bound profile against its manifest (other
+profiles may change independently). V1 admits only `workspace/read`,
+`git/status`, and `agent/stop`; write, compile, test, and other coding effects
+need separate idempotency or reconciliation contracts before migration.
+
 ## Published Mithril code and libraries
 
 The repository now contains source authored in Mithril itself:

@@ -1,0 +1,26 @@
+(mithril/bot-profile
+  :id "https://mithril.fund/id/bot/hermes-readonly-cron-v1"
+  :goal "https://mithril.fund/id/goal/governed-coding-task"
+  :ontology "2a8e807877d14b6eb6d31352f79d2976cffc63eb346afd1734b68ed6825fd9f3"
+  :process
+  (bpmn/process
+    :id "https://mithril.fund/id/bpmn/hermes-readonly-cron-v1"
+    :ontology "2a8e807877d14b6eb6d31352f79d2976cffc63eb346afd1734b68ed6825fd9f3"
+    :nodes
+    [(bpmn/start-event :id "start")
+     (bpmn/exclusive-gateway :id "choose")
+     (bpmn/service-task :id "inspect" :action "https://mithril.fund/id/action/workspace-inspect")
+     (bpmn/service-task :id "stop" :action "https://mithril.fund/id/action/stop")
+     (bpmn/end-event :id "end")]
+    :flows
+    [(bpmn/sequence-flow :id "start-choose" :source "start" :target "choose" :condition "always")
+     (bpmn/sequence-flow :id "choose-inspect" :source "choose" :target "inspect" :condition "https://mithril.fund/id/action/workspace-inspect")
+     (bpmn/sequence-flow :id "choose-stop" :source "choose" :target "stop" :condition "https://mithril.fund/id/action/stop")
+     (bpmn/sequence-flow :id "inspect-choose" :source "inspect" :target "choose" :condition "always")
+     (bpmn/sequence-flow :id "stop-end" :source "stop" :target "end" :condition "always")])
+  :policy
+  (mithril/bot-policy
+    :max-steps 2 :max-retries 0 :lease-seconds 300 :confidence-floor 3000
+    :actions ["https://mithril.fund/id/action/workspace-inspect"
+              "https://mithril.fund/id/action/stop"]
+    :effects ["workspace/read" "agent/stop"]))
