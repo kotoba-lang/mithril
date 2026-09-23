@@ -37,14 +37,16 @@
 (deftest profile-compiles-and-discovers-actions
   (let [artifact (profile) actions (bot/discover-actions artifact)
         state (bot/start-run artifact (task) "worker-1" 1000)
-        ontology (compiler/parse-json (read-text "ontology/bot-agent-v1.mith"))]
+        ontology (compiler/parse-source (read-text "ontology/bpmn-agent-v1.mith"))]
     (is (= bot/artifact-format (:format artifact)))
     (is (= 8 (count actions)))
-    (is (= [:infer/owl2-rl :query/sparql :validate/shacl]
+    (is (= [:infer/owl2-rl :query/sparql :validate/shacl :execute/bpmn-token]
            (mapv :operation (:semantic-receipts state))))
     (is (= 0 (get-in state [:semantic-receipts 2 :metrics :violations])))
     (is (= (subs (compiler/graph-digest ontology) 7)
            (get-in artifact [:bot-ir :ontology])))
+    (is (= :mithril.bot/v2 (get-in artifact [:bot-ir :version])))
+    (is (= "https://mithril.fund/state/bot-run-v2" (:format state)))
     (is (= #{"workspace-inspect" "git-status" "stop"}
            (set (map :label (bot/available-actions state)))))))
 
@@ -95,10 +97,15 @@
            (error-code #(bot/apply-receipt s1 failed "worker-1" 1004))))))
 
 (deftest failed-build-enters-a-bounded-governed-repair-edge
-  (let [base (-> (bot/start-run (profile) (task) "worker-1" 1000)
-                 (assoc :step 4
-                        :facts #{:semantic/prefix-valid :workspace/inspected
-                                 :proposal/ready :workspace/changed :artifact/compiled}))
+  (let [s0 (bot/start-run (profile) (task) "worker-1" 1000)
+        s1 (complete s0 (bot/admit-decision s0 (model-result s0 "workspace-inspect" 0.8)
+                                            "worker-1" 1001) 1002)
+        s2 (complete s1 (bot/admit-decision s1 (model-result s1 "code-propose" 0.8)
+                                            "worker-1" 1004) 1005)
+        s3 (complete s2 (bot/admit-decision s2 (model-result s2 "patch-apply" 0.9)
+                                            "worker-1" 1007) 1008)
+        base (complete s3 (bot/admit-decision s3 (model-result s3 "amu-compile" 0.8)
+                                              "worker-1" 1010) 1011)
         test-action {:action (get bot/action-by-label "test-run")}
         requested (bot/request-effect base test-action (get-in base [:policy :effects])
                                       "worker-1" 2000)
@@ -162,3 +169,49 @@
     (is (= :mithril.bot/model-confidence-below-floor
            (error-code #(bot/admit-decision state (model-result state "stop" 0.8 0.2)
                                              "worker-1" 1001))))))
+
+(deftest bpmn-token-is-the-process-authority-through-terminal-stop
+  (let [advance (fn [state label now]
+                  (complete state
+                            (bot/admit-decision state (model-result state label 0.9)
+                                                "worker-1" now)
+                            (inc now)))
+        s0 (bot/start-run (profile) (task) "worker-1" 1000)
+        s1 (advance s0 "workspace-inspect" 1010)
+        s2 (advance s1 "code-propose" 1020)
+        s3 (advance s2 "patch-apply" 1030)
+        s4 (advance s3 "amu-compile" 1040)
+        s5 (advance s4 "test-run" 1050)
+        s6 (advance s5 "git-status" 1060)
+        s7 (advance s6 "stop" 1070)]
+    (is (= ["workspace-inspect" "git-status" "stop"]
+           (mapv :label (bot/available-actions s0))))
+    (is (= ["code-propose" "git-status" "stop"]
+           (mapv :label (bot/available-actions s1))))
+    (is (= ["patch-apply" "git-status" "stop"]
+           (mapv :label (bot/available-actions s2))))
+    (is (= ["amu-compile" "git-status" "stop"]
+           (mapv :label (bot/available-actions s3))))
+    (is (= ["test-run" "git-status" "stop"]
+           (mapv :label (bot/available-actions s4))))
+    (is (= ["git-status" "stop"]
+           (mapv :label (bot/available-actions s5))))
+    (is (= ["git-status" "stop"]
+           (mapv :label (bot/available-actions s6))))
+    (is (= :completed (:status s7)))
+    (is (true? (get-in s7 [:bpmn :token-state :bpmn/done?])))
+    (is (empty? (get-in s7 [:bpmn :token-state :bpmn/tokens])))
+    (is (= 7 (count (:receipts s7))))))
+
+(deftest bpmn-ontology-and-decision-edges-fail-closed
+  (let [doc (compiler/parse-source (read-text "examples/governed-coding-bot.mith"))]
+    (is (= :mithril.bpmn/ontology-mismatch
+           (error-code #(bot/compile-document
+                         "x.mith"
+                         (assoc-in doc ["process" "ontology"]
+                                   (apply str (repeat 64 "0")))))))
+    (is (= :mithril.bpmn/invalid-decision-flow
+           (error-code #(bot/compile-document
+                         "x.mith"
+                         (assoc-in doc ["process" "flows" 1 "condition"]
+                                   "https://mithril.fund/id/action/stop")))))))

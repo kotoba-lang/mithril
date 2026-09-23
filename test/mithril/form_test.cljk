@@ -30,6 +30,15 @@
     (is (= 5 (count (get-in artifact [:rdf-dataset "@graph"]))))
     (is (re-matches #"sha256:[0-9a-f]{64}" (:graph-digest artifact)))))
 
+(deftest bpmn-agent-ontology-is-a-compiled-rdf-owl-shacl-artifact
+  (let [artifact (compiler/compile-ontology-text
+                  "ontology/bpmn-agent-v1.mith"
+                  (read-text "ontology/bpmn-agent-v1.mith"))]
+    (is (= "https://mithril.fund/artifact/ontology-v1" (:format artifact)))
+    (is (= "sha256:2a8e807877d14b6eb6d31352f79d2976cffc63eb346afd1734b68ed6825fd9f3"
+           (:graph-digest artifact)))
+    (is (= 6 (count (get-in artifact [:rdf-dataset "@graph"]))))))
+
 (deftest form-reader-is-inert-and-fail-closed
   (testing "a second form is observable"
     (is (= :mithril.form/form-count

@@ -18,6 +18,7 @@
     "owl" "http://www.w3.org/2002/07/owl#"
     "sh" "http://www.w3.org/ns/shacl#"
     "xsd" "http://www.w3.org/2001/XMLSchema#"
+    "bpmn" "http://www.omg.org/spec/BPMN/20100524/MODEL#"
     "Program" "mith:Program"
     "Library" "mith:Library"
     "WebApplication" "mith:WebApplication"
@@ -92,6 +93,14 @@
     "maxRetries" {"@id" "mith:maxRetries" "@type" "http://www.w3.org/2001/XMLSchema#integer"}
     "leaseSeconds" {"@id" "mith:leaseSeconds" "@type" "http://www.w3.org/2001/XMLSchema#integer"}
     "effects" {"@id" "mith:effect" "@type" "@id" "@container" "@set"}
+    "process" "mith:process"
+    "nodes" {"@id" "mith:node" "@container" "@set"}
+    "flows" {"@id" "mith:flow" "@container" "@set"}
+    "source" {"@id" "bpmn:sourceRef" "@type" "@id"}
+    "target" {"@id" "bpmn:targetRef" "@type" "@id"}
+    "condition" "bpmn:conditionExpression"
+    "default" {"@id" "bpmn:default" "@type" "@id"}
+    "action" {"@id" "mith:actionBinding" "@type" "@id"}
     "policy" "mith:policy"
     "page" "mith:page"
     "actions" {"@id" "mith:action" "@type" "@id" "@container" "@list"}

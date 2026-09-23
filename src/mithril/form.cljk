@@ -35,7 +35,13 @@
    'owl/object-property "owl:ObjectProperty"
    'owl/datatype-property "owl:DatatypeProperty"
    'shacl/node-shape "sh:NodeShape"
-   'shacl/property-shape "sh:PropertyShape"})
+   'shacl/property-shape "sh:PropertyShape"
+   'bpmn/process "bpmn:Process"
+   'bpmn/start-event "bpmn:StartEvent"
+   'bpmn/end-event "bpmn:EndEvent"
+   'bpmn/exclusive-gateway "bpmn:ExclusiveGateway"
+   'bpmn/service-task "bpmn:ServiceTask"
+   'bpmn/sequence-flow "bpmn:SequenceFlow"})
 
 (def ^:private key-names
   {:id "@id"
@@ -74,6 +80,14 @@
    :max-retries "maxRetries"
    :lease-seconds "leaseSeconds"
    :effects "effects"
+   :process "process"
+   :nodes "nodes"
+   :flows "flows"
+   :source "source"
+   :target "target"
+   :condition "condition"
+   :default "default"
+   :action "action"
    :rdf/type "@type"
    :rdfs/sub-class-of "subClassOf"
    :rdfs/sub-property-of "subPropertyOf"

@@ -1,0 +1,245 @@
+(ns mithril.bpmn
+  "Ontology-bound BPMN process compilation and durable token transitions.
+
+  The process graph is data from a `.mith` document.  This namespace validates
+  the closed executable subset, delegates token movement to org-omg-bpmn, and
+  exposes only actions reachable from the current BPMN decision gateway.  Tool
+  effects remain outside the interpreter and advance the token only after a
+  matching host receipt commits."
+  (:require [bpmn.execute :as execute]
+            [bpmn.model :as model]
+            [bpmn.ports :as ports]
+            [bpmn.validate :as validate]
+            [clojure.string :as str]
+            [mithril.execution :as execution]))
+
+(def process-format "https://mithril.fund/artifact/bpmn-process-v1")
+(def state-format "https://mithril.fund/state/bpmn-token-v1")
+
+(def ^:private process-keys #{"@id" "@type" "ontology" "nodes" "flows"})
+(def ^:private type->kind
+  {"bpmn:StartEvent" :start-event
+   "bpmn:EndEvent" :end-event
+   "bpmn:ExclusiveGateway" :exclusive-gateway
+   "bpmn:ServiceTask" :service-task
+   "bpmn:SequenceFlow" :sequence-flow})
+
+(def process-shape
+  {:shacl/type :node-shape
+   :target-class :mithril/GovernedProcess
+   :property [{:path "@id" :datatype :string :min-count 1 :max-count 1}
+              {:path "@type" :datatype :string :min-count 1 :max-count 1
+               :in ["bpmn:Process"]}
+              {:path "ontology" :datatype :string :min-count 1 :max-count 1}
+              {:path "nodes" :datatype :map :min-count 3 :max-count 64}
+              {:path "flows" :datatype :map :min-count 2 :max-count 128}]})
+
+(defn- fail! [code detail data]
+  (throw (ex-info detail (merge {:mithril/error code :detail detail} data))))
+
+(defn- digest? [value]
+  (and (string? value) (boolean (re-matches #"[0-9a-f]{64}" value))))
+
+(defn- require-fields! [value required optional label]
+  (when-not (map? value)
+    (fail! :mithril.bpmn/invalid-node (str label " must be a map") {}))
+  (let [actual (set (keys value))]
+    (when-not (and (every? actual required)
+                   (empty? (remove (into required optional) actual)))
+      (fail! :mithril.bpmn/invalid-fields
+             (str label " has unknown or missing fields")
+             {:fields actual}))))
+
+(defn- compile-node [node action-by-id]
+  (let [type (get node "@type")
+        kind (get type->kind type)
+        action (get node "action")
+        required (if (= kind :service-task) #{"@id" "@type" "action"} #{"@id" "@type"})
+        optional (if (= kind :exclusive-gateway) #{"default"} #{})]
+    (require-fields! node required optional "BPMN node")
+    (when-not (contains? #{:start-event :end-event :exclusive-gateway :service-task} kind)
+      (fail! :mithril.bpmn/unsupported-node "node type is outside the governed BPMN subset"
+             {:type type}))
+    (when (and action (not (contains? action-by-id action)))
+      (fail! :mithril.bpmn/unknown-action "service task action is outside the bot catalog"
+             {:action action}))
+    (cond-> {:bpmn/id (get node "@id") :bpmn/type kind}
+      (get node "default") (assoc :bpmn/default (get node "default"))
+      action (assoc :mithril/action action))))
+
+(defn- compile-flow [flow]
+  (require-fields! flow #{"@id" "@type" "source" "target" "condition"} #{} "BPMN flow")
+  (when-not (= :sequence-flow (get type->kind (get flow "@type")))
+    (fail! :mithril.bpmn/unsupported-flow "flow must be a BPMN SequenceFlow" {}))
+  {:bpmn/id (get flow "@id")
+   :bpmn/type :sequence-flow
+   :bpmn/source (get flow "source")
+   :bpmn/target (get flow "target")
+   :bpmn/condition (get flow "condition")})
+
+(defn- duplicate-values [xs]
+  (->> xs frequencies (keep (fn [[value n]] (when (> n 1) value))) set))
+
+(defn compile-process
+  "Compile the nested JSON-LD-compatible BPMN value in a bot profile.
+
+  V1 deliberately admits one start, one end, exclusive decision gateways and
+  service tasks.  Every outgoing gateway flow names its target task's bound
+  Mithril action as its condition, making the selected transition explicit and
+  replayable instead of embedding routing in host code."
+  [doc action-by-id policy-action-ids]
+  (require-fields! doc process-keys #{} "BPMN process")
+  (when-not (= "bpmn:Process" (get doc "@type"))
+    (fail! :mithril.bpmn/not-a-process "process @type must be bpmn:Process" {}))
+  (when-not (digest? (get doc "ontology"))
+    (fail! :mithril.bpmn/invalid-ontology "process ontology must be a SHA-256 identity" {}))
+  (let [shape-report (execution/validate-shape process-shape doc)
+        nodes (get doc "nodes")
+        flows (get doc "flows")]
+    (when-not (:valid? shape-report)
+      (fail! :mithril.bpmn/shacl-violation
+             "BPMN process does not conform to the governed process shape"
+             {:report shape-report}))
+    (when-not (and (vector? nodes) (vector? flows) (seq nodes) (seq flows))
+      (fail! :mithril.bpmn/invalid-graph "process nodes and flows must be non-empty arrays" {}))
+    (let [node-ids (mapv #(get % "@id") nodes)
+          flow-ids (mapv #(get % "@id") flows)]
+      (when (or (some #(not (and (string? %) (not (str/blank? %)))) node-ids)
+                (some #(not (and (string? %) (not (str/blank? %)))) flow-ids)
+                (seq (duplicate-values node-ids))
+                (seq (duplicate-values flow-ids)))
+        (fail! :mithril.bpmn/invalid-identity "BPMN node and flow identities must be unique strings" {}))
+      (let [compiled-nodes (mapv #(compile-node % action-by-id) nodes)
+            compiled-flows (mapv compile-flow flows)
+            process (assoc (model/process (get doc "@id"))
+                           :bpmn/nodes (into {} (map (juxt :bpmn/id identity) compiled-nodes))
+                           :bpmn/flows (into {} (map (juxt :bpmn/id identity) compiled-flows)))
+            errors (validate/errors process)
+            starts (model/start-events process)
+            ends (model/end-events process)
+            bound-actions (set (keep :mithril/action compiled-nodes))]
+        (when (seq errors)
+          (fail! :mithril.bpmn/invalid-graph "BPMN structural validation failed" {:problems errors}))
+        (when-not (and (= 1 (count starts)) (= 1 (count ends)))
+          (fail! :mithril.bpmn/event-cardinality "BPMN v1 requires exactly one start and one end" {}))
+        (when-not (= (set policy-action-ids) bound-actions)
+          (fail! :mithril.bpmn/action-coverage
+                 "BPMN service tasks must cover the exact bot policy action set"
+                 {:expected (set policy-action-ids) :actual bound-actions}))
+        (doseq [gateway (model/nodes-of-type process :exclusive-gateway)]
+          (let [outgoing (model/outgoing process (:bpmn/id gateway))]
+            (when-not (<= 2 (count outgoing) 8)
+              (fail! :mithril.bpmn/gateway-cardinality
+                     "every decision gateway must expose two through eight choices"
+                     {:gateway (:bpmn/id gateway) :choices (count outgoing)}))
+            (doseq [flow outgoing]
+              (let [target (model/node process (:bpmn/target flow))]
+                (when-not (and (= :service-task (:bpmn/type target))
+                               (= (:mithril/action target) (:bpmn/condition flow)))
+                  (fail! :mithril.bpmn/invalid-decision-flow
+                         "gateway flow condition must equal its target service task action"
+                         {:gateway (:bpmn/id gateway) :flow (:bpmn/id flow)}))))))
+        (doseq [task (model/nodes-of-type process :service-task)]
+          (when-not (= 1 (count (model/outgoing process (:bpmn/id task))))
+            (fail! :mithril.bpmn/task-continuation
+                   "every BPMN service task must have exactly one continuation" {:task (:bpmn/id task)})))
+        {:format process-format
+         :ontology (get doc "ontology")
+         :digest (execution/digest process)
+         :model process
+         :shape-report shape-report
+         :problems (validate/problems process)}))))
+
+(defn- inert-ports [selected]
+  {:activity (reify ports/IActivity (perform [_ _ vars] vars))
+   :condition (reify ports/ICondition
+                (truthy? [_ condition _] (= selected condition)))})
+
+(defn- node-for-token [process token]
+  (model/node process (:bpmn/at token)))
+
+(defn- automatic-node? [node]
+  (contains? #{:start-event :end-event} (:bpmn/type node)))
+
+(defn settle
+  "Advance start/end bookkeeping to a decision gateway. Task effects and
+  gateways are never crossed speculatively."
+  [process state]
+  (loop [state state fuel 0]
+    (cond
+      (>= fuel 64)
+      (fail! :mithril.bpmn/settle-limit "automatic BPMN transition limit was exhausted" {})
+
+      (empty? (:bpmn/tokens state))
+      (assoc state :bpmn/done? true)
+
+      (every? #(automatic-node? (node-for-token process %)) (:bpmn/tokens state))
+      (recur (execute/advance (inert-ports nil) process state) (inc fuel))
+
+      :else state)))
+
+(defn start-state [compiled]
+  {:format state-format
+   :definition (:digest compiled)
+   :model (:model compiled)
+   :token-state (settle (:model compiled) (execute/start (:model compiled)))
+   :pending nil})
+
+(defn completed? [runtime]
+  (execute/completed? (:token-state runtime)))
+
+(defn- decision-targets [process token]
+  (let [node (node-for-token process token)]
+    (when (= :exclusive-gateway (:bpmn/type node))
+      (mapv (fn [flow] (model/node process (:bpmn/target flow)))
+            (model/outgoing process (:bpmn/id node))))))
+
+(defn enabled-action-ids
+  "Return the ontology-bound actions reachable from current BPMN gateway tokens."
+  [runtime]
+  (let [process (:model runtime)]
+    (->> (get-in runtime [:token-state :bpmn/tokens])
+         (mapcat #(or (decision-targets process %) []))
+         (keep :mithril/action)
+         distinct
+         vec)))
+
+(defn select-action
+  "Commit a gateway choice up to, but not across, its service task."
+  [runtime action-id]
+  (when (:pending runtime)
+    (fail! :mithril.bpmn/effect-in-flight "a BPMN service task is already pending" {}))
+  (let [process (:model runtime)
+        state (:token-state runtime)
+        indexed (map-indexed vector (:bpmn/tokens state))
+        match (first
+               (filter (fn [[_ token]]
+                         (some #(= action-id (:mithril/action %))
+                               (decision-targets process token)))
+                       indexed))]
+    (when-not match
+      (fail! :mithril.bpmn/action-not-enabled "action is not enabled by the BPMN token state"
+             {:action action-id}))
+    (let [[index token] match
+          tokens (:bpmn/tokens state)
+          ordered (into [token] (concat (subvec tokens 0 index) (subvec tokens (inc index))))
+          selected-state (execute/advance (inert-ports action-id) process
+                                          (assoc state :bpmn/tokens ordered))
+          selected-node (node-for-token process (first (:bpmn/tokens selected-state)))]
+      (when-not (= action-id (:mithril/action selected-node))
+        (fail! :mithril.bpmn/selection-mismatch "BPMN gateway did not reach the selected task" {}))
+      (assoc runtime :token-state selected-state
+                     :pending {:action action-id :prior state}))))
+
+(defn apply-outcome
+  "A completed receipt advances the selected service task and settles at the
+  next gateway. A failed receipt restores the prior gateway for bounded retry."
+  [runtime action-id completed?]
+  (let [pending (:pending runtime)]
+    (when-not (= action-id (:action pending))
+      (fail! :mithril.bpmn/receipt-mismatch "receipt does not match the pending BPMN task" {}))
+    (if-not completed?
+      (assoc runtime :token-state (:prior pending) :pending nil)
+      (let [process (:model runtime)
+            advanced (execute/advance (inert-ports action-id) process (:token-state runtime))]
+        (assoc runtime :token-state (settle process advanced) :pending nil)))))
