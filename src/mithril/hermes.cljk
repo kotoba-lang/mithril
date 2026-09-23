@@ -15,7 +15,8 @@
 (def tool-profile-format "https://mithril.fund/profile/coding-tools-v1")
 (def proposal-format "https://mithril.fund/artifact/patch-proposal-v1")
 (def read-only-effects #{:workspace/read :git/status :agent/stop})
-(def coding-effects #{:llm/propose-patch :workspace/apply-patch :amu/compile :test/run})
+(def coding-effects #{:llm/propose-patch :workspace/apply-patch :workspace/revert-patch
+                      :amu/compile :test/run})
 (def admitted-effects (into read-only-effects coding-effects))
 
 (defn- fail! [code detail data]
@@ -107,12 +108,15 @@
              :output-digest (execution/digest output)}
    :audit (merge {:adapter adapter-format :operation (:operation effect)} audit)})
 
-(defn- failed [effect code]
+(defn- failed
+  ([effect code] (failed effect code {}))
+  ([effect code audit]
   {:receipt {:format bot/receipt-format
              :effect-id (:id effect)
              :status :failed
              :output-digest (execution/digest {:error code})}
-   :audit {:adapter adapter-format :operation (:operation effect) :error code}})
+   :audit (merge {:adapter adapter-format :operation (:operation effect) :error code}
+                 audit)}))
 
 (defn- default-context []
   (let [fs (js/require "node:fs")
@@ -196,6 +200,10 @@
   (join-fn (:artifact-dir profile)
            (str (str/replace (:run-id effect) ":" "_") ".workspace")))
 
+(defn- diagnostic-path [profile effect join-fn]
+  (join-fn (:artifact-dir profile)
+           (str (str/replace (:run-id effect) ":" "_") ".diagnostic.txt")))
+
 (defn- git! [ctx workspace & args]
   ((:exec-fn ctx) "/usr/bin/git" (vec args) workspace 30000))
 
@@ -227,11 +235,14 @@
       (into result (map (fn [relative] {:path relative :content nil :create? true})
                         (or (:create-paths profile) [])))))))
 
-(defn- proposal-prompt [effect files]
+(defn- proposal-prompt [effect files diagnostic]
   (str "You are a patch advisor in an isolated disposable Git worktree. Use only relative paths and the file tools.\n"
        "Read-only <read-only-file> paths are context and must not change. Read/edit only <allowed-file> paths. You may create only <creatable-file> paths. Do not rename, delete, chmod, add any other file, add binaries, or add symlinks.\n"
        "Apply the requested edit with the patch tool, verify by reading the changed lines, then answer DONE.\n"
        "Goal: " (:goal effect) "\n"
+       (when diagnostic
+         (str "A previous governed compile/test failed. Repair this bounded diagnostic:\n"
+              "<diagnostic>" diagnostic "</diagnostic>\n"))
        (str/join "\n" (map (fn [{:keys [path create? read-only?]}]
                                (cond
                                  create? (str "<creatable-file>" path "</creatable-file>")
@@ -239,7 +250,7 @@
                                  :else (str "<allowed-file>" path "</allowed-file>")))
                              files))))
 
-(defn- default-propose! [ctx profile effect files]
+(defn- default-propose! [ctx profile effect files diagnostic]
   (let [{program :program proposer-profile :profile timeout-ms :timeout-ms} (:proposer profile)
         proposal-workspace (proposal-workspace-path profile effect (:join-fn ctx))]
     (when-not ((:exists-fn ctx) proposal-workspace)
@@ -253,7 +264,7 @@
         (try
           ((:exec-fn ctx) program
            ["-p" proposer-profile "--ignore-rules" "-t" "file" "--in" proposal-workspace
-            "-z" (proposal-prompt effect files)]
+            "-z" (proposal-prompt effect files diagnostic)]
            proposal-workspace timeout-ms)
           (catch :default _
             (fail! :mithril.hermes/proposer-failed
@@ -303,10 +314,14 @@
 (defn- propose! [effect profile ctx]
   (let [head (clean-head! ctx (:workspace profile))
         files (snapshot ctx profile)
+        diagnostic-file (diagnostic-path profile effect (:join-fn ctx))
+        diagnostic (when ((:exists-fn ctx) diagnostic-file)
+                     ((:read-fn ctx) diagnostic-file))
         patch (if-let [propose-fn (:propose-fn ctx)]
                 (propose-fn {:effect effect :profile profile :files files
-                             :prompt (proposal-prompt effect files)})
-                (default-propose! ctx profile effect files))
+                             :prompt (proposal-prompt effect files diagnostic)
+                             :diagnostic diagnostic})
+                (default-propose! ctx profile effect files diagnostic))
         paths (diff-paths! profile patch)
         proposal {:format proposal-format :run-id (:run-id effect) :base-head head
                   :profile-digest (tool-profile-digest profile)
@@ -354,6 +369,40 @@
                          :workspace-digest (execution/digest delta)}
                  {:files (count paths) :changed true}))))
 
+(defn- reverse-patch! [ctx workspace patch-file]
+  ((:exec-fn ctx) "/usr/bin/git" ["apply" "--reverse" "--check" "--" patch-file]
+   workspace 30000)
+  ((:exec-fn ctx) "/usr/bin/git" ["apply" "--reverse" "--" patch-file]
+   workspace 30000)
+  ;; Clear intent-to-add entries used to make newly-created files visible in
+  ;; the proposal diff. This changes only the private index, never file bytes.
+  ((:exec-fn ctx) "/usr/bin/git" ["reset" "--mixed"] workspace 30000)
+  (when-not (str/blank? (git! ctx workspace "status" "--porcelain=v1" "--untracked-files=all"))
+    (fail! :mithril.hermes/rollback-failed
+           "proposal rollback did not restore a clean admitted workspace" {})))
+
+(defn- revert-patch! [effect profile ctx]
+  (let [proposal (read-proposal! effect profile ctx)
+        _ (diff-paths! profile (:patch proposal))
+        patch-file (str (artifact-path profile effect (:join-fn ctx)) ".patch")
+        _ ((:write-fn ctx) patch-file (:patch proposal))
+        {:keys [head]} (git-state ctx (:workspace profile))
+        scratch (proposal-workspace-path profile effect (:join-fn ctx))]
+    (when-not (= head (:base-head proposal))
+      (fail! :mithril.hermes/stale-proposal "workspace HEAD changed before repair reset" {}))
+    (reverse-patch! ctx (:workspace profile) patch-file)
+    (when ((:exists-fn ctx) scratch)
+      (reverse-patch! ctx scratch patch-file))
+    (completed effect {:patch-digest (:patch-digest proposal) :reset true}
+               {:files (count (diff-paths! profile (:patch proposal))) :reset true})))
+
+(defn- bounded-diagnostic [profile error]
+  (let [parts [(some-> error .-stdout str) (some-> error .-stderr str)
+               (some-> error .-message str)]
+        text (str/join "\n" (remove str/blank? parts))
+        ceiling (min 32768 (:max-context-bytes profile))]
+    (subs text 0 (min ceiling (count text)))))
+
 (defn- tool! [effect profile ctx]
   (let [spec (get-in profile [:tools (:operation effect)])]
     (try
@@ -361,11 +410,16 @@
                     (:workspace profile) (:timeout-ms spec))]
         (completed effect {:tool (:operation effect) :output-digest (execution/digest output)}
                    {:tool (:operation effect) :exit 0 :output-bytes (byte-count output)}))
-      (catch :default _
-        (failed effect (case (:operation effect)
-                         :amu/compile :compile-failed
-                         :test/run :test-failed
-                         :tool-failed))))))
+      (catch :default error
+        (let [code (case (:operation effect)
+                     :amu/compile :compile-failed
+                     :test/run :test-failed
+                     :tool-failed)
+              diagnostic (bounded-diagnostic profile error)
+              file (diagnostic-path profile effect (:join-fn ctx))]
+          ((:write-fn ctx) file diagnostic)
+          (failed effect code {:diagnostic-digest (execution/digest diagnostic)
+                               :diagnostic-bytes (byte-count diagnostic)}))))))
 
 (defn execute-effect
   "Execute one closed host effect. Coding effects require a digest-bound tool
@@ -405,6 +459,7 @@
          :agent/stop (completed effect {:stopped true} {:stopped true})
          :llm/propose-patch (propose! effect profile ctx)
          :workspace/apply-patch (apply-patch! effect profile ctx)
+         :workspace/revert-patch (revert-patch! effect profile ctx)
          :amu/compile (tool! effect profile ctx)
          :test/run (tool! effect profile ctx))
        (catch :default error

@@ -183,3 +183,66 @@
       (finally
         (.rmSync fs workspace #js {:recursive true :force true})
         (.rmSync fs artifacts #js {:recursive true :force true})))))
+
+(deftest failed-test-diagnostic-is-private-and-drives-a-reset-reproposal
+  (let [fs (js/require "node:fs")
+        workspace (.mkdtempSync fs "/tmp/mithril-repair-workspace-")
+        artifacts (.mkdtempSync fs "/tmp/mithril-repair-artifacts-")]
+    (try
+      (.writeFileSync fs (str workspace "/app.mith") "value 1\n" "utf8")
+      (exec! workspace "/usr/bin/git" "init" "-q")
+      (exec! workspace "/usr/bin/git" "add" "app.mith")
+      (exec! workspace "/usr/bin/git" "-c" "user.name=Mithril Test"
+             "-c" "user.email=mithril@example.invalid" "commit" "-qm" "base")
+      (let [profile (assoc-in (coding-profile workspace artifacts) [:tools :test/run]
+                              {:program "/usr/bin/grep" :args ["-q" "value 3" "app.mith"]
+                               :timeout-ms 5000})
+            digest (hermes/tool-profile-digest profile)
+            effect (assoc base-effect :workspace workspace :run-id "sha256:repair-1"
+                          :tool-profile-digest digest)
+            patch-2 (str "diff --git a/app.mith b/app.mith\n"
+                         "index d00491f..0cfbf08 100644\n"
+                         "--- a/app.mith\n+++ b/app.mith\n"
+                         "@@ -1 +1 @@\n-value 1\n+value 2\n")
+            patch-3 (str "diff --git a/app.mith b/app.mith\n"
+                         "index d00491f..db7e272 100644\n"
+                         "--- a/app.mith\n+++ b/app.mith\n"
+                         "@@ -1 +1 @@\n-value 1\n+value 3\n")]
+        (is (= :completed (get-in (hermes/execute-effect
+                                    (assoc effect :id "p1" :operation :llm/propose-patch)
+                                    {:profile profile :propose-fn (fn [_] patch-2)})
+                                   [:receipt :status])))
+        (is (= :completed (get-in (hermes/execute-effect
+                                    (assoc effect :id "a1" :operation :workspace/apply-patch)
+                                    {:profile profile})
+                                   [:receipt :status])))
+        (let [failed (hermes/execute-effect
+                      (assoc effect :id "t1" :operation :test/run) {:profile profile})]
+          (is (= :failed (get-in failed [:receipt :status])))
+          (is (pos? (get-in failed [:audit :diagnostic-bytes])))
+          (is (not (some #(= "value 3" %) (tree-seq coll? seq failed)))))
+        (is (= :completed (get-in (hermes/execute-effect
+                                    (assoc effect :id "r1" :operation :workspace/revert-patch)
+                                    {:profile profile})
+                                   [:receipt :status])))
+        (is (= "value 1\n" (.readFileSync fs (str workspace "/app.mith") "utf8")))
+        (let [reproposal (hermes/execute-effect
+                          (assoc effect :id "p2" :operation :llm/propose-patch)
+                          {:profile profile
+                           :propose-fn (fn [{:keys [diagnostic prompt]}]
+                                         (is (string? diagnostic))
+                                         (is (str/includes? prompt "<diagnostic>"))
+                                         patch-3)})]
+          (is (= :completed (get-in reproposal [:receipt :status]))))
+        (is (= :completed (get-in (hermes/execute-effect
+                                    (assoc effect :id "a2" :operation :workspace/apply-patch)
+                                    {:profile profile})
+                                   [:receipt :status])))
+        (is (= :completed (get-in (hermes/execute-effect
+                                    (assoc effect :id "t2" :operation :test/run)
+                                    {:profile profile})
+                                   [:receipt :status])))
+        (is (= "value 3\n" (.readFileSync fs (str workspace "/app.mith") "utf8"))))
+      (finally
+        (.rmSync fs workspace #js {:recursive true :force true})
+        (.rmSync fs artifacts #js {:recursive true :force true})))))

@@ -353,6 +353,14 @@ choices; it is not used as mutation authority when the action catalog has not
 been calibrated. The audit distinguishes `deterministic-ontology-workflow`
 from an OpenRouter Jev decision.
 
+Compile or test failure enters a bounded repair edge instead of blindly
+re-running the same command. The host stores a size-limited diagnostic in the
+private artifact directory, records only its digest and byte count in the
+append-only audit, and exposes it only to the next patch advisor. A separate
+`patch-reset` effect reverses the exact digest-bound proposal in both target
+and disposable worktrees before the next proposal. `maxRetries` bounds this
+cycle; an exhausted run is held rather than reported as completed.
+
 The Hermes Desktop artifact embeds the same closed action/effect catalog. Cron
 creation refuses duplicate enabled routines and the configured active-job
 ceiling. Kanban task identity is SHA-256 derived from profile, workspace, title,
