@@ -956,6 +956,17 @@ choices; it is not used as mutation authority when the action catalog has not
 been calibrated. The audit distinguishes `deterministic-ontology-workflow`
 from an OpenRouter Jev decision.
 
+`examples/governed-coding-linear-bot.mith` is an opt-in, straight-through BPMN
+profile for a reviewed coding task. Its first gateway offers Jev the genuine
+choice to inspect or stop. Once inspection is admitted, one-way, checked BPMN
+gateways require proposal, patch application, compilation, test, Git review,
+and stop in that order. The executor still checks each action's prerequisites,
+capability grant, host receipt, and primary IPLD checkpoint; a one-way gateway
+is not ambient permission. This profile intentionally has no repair branch:
+failed effects stay subject to the bounded retry/hold policy. Use the general
+`governed-coding-bot.mith` profile for governed reset/reproposal. The reviewed
+proposer remains a separate tool; Jev selects an action, not a patch body.
+
 Compile or test failure enters a bounded repair edge instead of blindly
 re-running the same command. The host stores a size-limited diagnostic in the
 private artifact directory, records only its digest and byte count in the

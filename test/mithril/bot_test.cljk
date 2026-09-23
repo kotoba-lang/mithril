@@ -1,5 +1,6 @@
 (ns mithril.bot-test
   (:require [cljs.test :refer [deftest is testing]]
+            [mithril.bpmn :as bpmn]
             [mithril.bot :as bot]
             [mithril.compiler :as compiler]
             [mithril.execution :as execution]))
@@ -7,6 +8,9 @@
 (defn read-text [path] (.readFileSync (js/require "fs") path "utf8"))
 (defn profile [] (bot/compile-text "examples/governed-coding-bot.mith"
                                   (read-text "examples/governed-coding-bot.mith")))
+(defn linear-profile []
+  (bot/compile-text "examples/governed-coding-linear-bot.mith"
+                    (read-text "examples/governed-coding-linear-bot.mith")))
 (defn legacy-profile []
   (let [doc (compiler/parse-source (read-text "examples/governed-coding-bot.mith"))]
     (bot/compile-document "legacy.mith" (dissoc doc "process" "legacyProfiles"))))
@@ -52,6 +56,50 @@
     (is (= "https://mithril.fund/state/bot-run-v2" (:format state)))
     (is (= #{"workspace-inspect" "git-status" "stop"}
            (set (map :label (bot/available-actions state)))))))
+
+(deftest linear-bpmn-routes-mandatory-coding-effects-without-jev
+  (let [source (compiler/parse-source (read-text "examples/governed-coding-linear-bot.mith"))
+        artifact (linear-profile)
+        start (bot/start-run artifact (task) "worker-1" 1000)
+        inspected (complete start {:action (get bot/action-by-label "workspace-inspect")}
+                            1002)
+        expected ["code-propose" "patch-apply" "amu-compile" "test-run"
+                  "git-status" "stop"]
+        states (reductions (fn [state [index label]]
+                             (is (= [label] (mapv :label (bot/available-actions state))))
+                             (complete state {:action (get bot/action-by-label label)}
+                                       (+ 1004 (* index 2))))
+                           inspected (map-indexed vector expected))
+        terminal (last states)]
+    (is (= #{"workspace-inspect" "stop"}
+           (set (map :label (bot/available-actions start)))))
+    (is (= :mithril.bpmn/gateway-cardinality
+           (error-code #(bpmn/compile-process
+                         (get source "process") bot/action-by-id
+                         (get-in artifact [:bot-ir :policy :actions]) false)))
+        "one-way gateways are only admitted in the coding profile")
+    (is (= :mithril.bpmn/action-not-enabled
+           (error-code #(bot/request-effect inspected
+                                            {:action (get bot/action-by-label "stop")}
+                                            (get-in inspected [:policy :effects])
+                                            "worker-1" 1003))))
+    (is (= :mithril.bot/step-budget
+           (error-code #(bot/request-effect
+                         (assoc-in inspected [:policy :max-steps] 1)
+                         {:action (get bot/action-by-label "code-propose")}
+                         (get-in inspected [:policy :effects])
+                         "worker-1" 1003)))
+        "a deterministic BPMN edge cannot bypass the step ceiling")
+    (is (= :mithril.bot/not-running
+           (error-code #(bot/request-effect
+                         (assoc inspected :status :held)
+                         {:action (get bot/action-by-label "code-propose")}
+                         (get-in inspected [:policy :effects])
+                         "worker-1" 1003)))
+        "a held state cannot regain effect authority through a singleton edge")
+    (is (= :completed (:status terminal)))
+    (is (= 7 (:step terminal)))
+    (is (every? (:facts terminal) [:tests/passed :git/observed]))))
 
 (deftest jev-choice-is-closed-and-governed
   (let [state (bot/start-run (profile) (task) "worker-1" 1000)
