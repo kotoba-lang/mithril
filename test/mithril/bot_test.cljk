@@ -283,6 +283,12 @@
            (mapv :label (bot/available-actions s5))))
     (is (= ["git-status" "stop"]
            (mapv :label (bot/available-actions s6))))
+    (is (= "git-status" (:label (bot/deterministic-coding-action s5))))
+    (is (= "stop" (:label (bot/deterministic-coding-action s6)))
+        "the reviewed gateway must terminate rather than loop on git/status")
+    (is (= :mithril.bot/invalid-reviewed-gateway
+           (error-code #(bot/deterministic-coding-action
+                         (update s6 :facts disj :tests/passed)))))
     (is (= :completed (:status s7)))
     (is (true? (get-in s7 [:bpmn :token-state :bpmn/done?])))
     (is (empty? (get-in s7 [:bpmn :token-state :bpmn/tokens])))

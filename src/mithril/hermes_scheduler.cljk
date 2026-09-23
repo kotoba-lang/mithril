@@ -5,6 +5,7 @@
   receipt cannot safely repeat a non-idempotent write. Each cron occurrence may
   execute at most one BPMN service task."
   (:require [clojure.string :as str]
+            [mithril.bpmn :as bpmn]
             [mithril.compiler :as compiler]
             [mithril.execution :as execution]))
 
@@ -109,6 +110,27 @@
       (or (not (number? claimed)) (js/isNaN claimed)
           (< claimed (- now-ms 600000)) (> claimed (+ now-ms 30000))) :stale-claim
       :else :admitted)))
+
+(defn terminal-record
+  "A later builtin occurrence may acknowledge a completed coding session,
+  but must not claim that it executed another effect."
+  [contract claim execution-id state expected-task-digest]
+  (when-not (and (:coding? contract)
+                 (= :completed (:status state))
+                 (nil? (:awaiting state))
+                 (:bpmn state)
+                 (bpmn/completed? (:bpmn state))
+                 (= (:bot-profile-digest contract) (:profile-digest state))
+                 (= expected-task-digest (:task-digest state)))
+    (fail! :terminal-state-mismatch))
+  {:format coding-receipt-format
+   :status "terminal" :runStatus "completed" :source "builtin"
+   :executionId execution-id :jobId (:job-id contract)
+   :scheduledInstant (:scheduled_instant claim)
+   :contractDigest (:digest contract)
+   :botProfileDigest (:bot-profile-digest contract)
+   :stateDigest (execution/digest state)
+   :step (:step state)})
 
 (defn verify-tick-outcome
   "A held Jev decision is terminal but not a completed host effect. Keep the

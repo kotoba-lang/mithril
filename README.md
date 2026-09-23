@@ -209,8 +209,9 @@ to equal the task workspace. V1 remains read-only. Install
 `mithril-bpmn-coding-adapter.sh` in the Hermes profile, and supply the closed
 JSON-LD contract at `examples/hermes-coding-scheduler.mith` and coding tool
 profile at `examples/hermes-coding-tools.json` in the job workdir. These files
-must be bound to the actual job and workspace; the adapter does not generate
-authority from a prompt.
+must be generated for the actual job and workspace; they are not shipped as
+usable examples because their profile, task, and tool digests grant authority
+to exact local resources. The adapter does not generate authority from a prompt.
 
 V2 keeps one task and a profile/job-keyed BPMN state file across cron
 occurrences, including contract revisions, while writing
@@ -220,6 +221,25 @@ Before execution it rejects a prior unreceipted attempt, an in-flight effect,
 or a terminal state. A lost host receipt is held for explicit reconciliation,
 not retried by a later cron tick. This is a bounded scheduler execution
 contract, not a claim that arbitrary coding jobs are now reliable.
+
+An isolated Hermes `source=builtin` canary on 2026-09-23 exercised a real
+Mithril web-app edit over separate cron occurrences: `workspace/read`,
+`llm/propose-patch`, `workspace/apply-patch`, `amu/compile`, `test/run`, and
+`git/status`. The proposer was a fixed script in a disposable Git worktree;
+`amu/compile` was bound in this canary to Mithril `compile-web`, not Amu itself.
+The test dispatched `GET /hello` and checked the changed response. Every
+occurrence had its own scheduler receipt and the same ontology-validated
+semantic session lineage. Eight occurrences were all green while the bot was
+still `running`: the final BPMN gateway had selected repeatable `git/status`
+instead of `stop`. The coding selector now requires the tested/reviewed facts
+and chooses `stop` at that gateway. A second builtin occurrence advanced a
+verified fork of the step-8 immutable head to a `completed` run. A later
+builtin occurrence on that terminal state returned a `terminal` receipt with
+no effect ID and left the head unchanged. This establishes a bounded coding
+loop and no-effect terminal redelivery in isolation; it does not establish
+Jev-authored patches, actual Amu compilation, automatic distributed
+branch/merge, or fleet-wide Hermes replacement. Receipt `status=completed`
+means one effect completed; `runStatus` is the distinct workflow status.
 
 ## Published Mithril code and libraries
 

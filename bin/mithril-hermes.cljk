@@ -209,16 +209,8 @@
                 :model {:kind :deterministic/singleton}}
      :audit {:source "deterministic-singleton"}}))
 
-(def coding-action-order
-  ["workspace-inspect" "patch-reset" "code-propose" "patch-apply" "amu-compile"
-   "test-run" "git-status" "stop"])
-
 (defn- deterministic-coding [state]
-  (let [by-label (into {} (map (juxt :label identity) (bot/available-actions state)))
-        action (some by-label coding-action-order)]
-    (when-not action
-      (throw (ex-info "coding workflow has no admitted next action"
-                      {:mithril/error :mithril.hermes/no-coding-action})))
+  (let [action (bot/deterministic-coding-action state)]
     {:admitted {:action action :confidence 10000
                 :probabilities {(:label action) 1.0}
                 :model {:kind :deterministic/ontology-workflow}}
