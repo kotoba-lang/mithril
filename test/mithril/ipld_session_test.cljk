@@ -1,0 +1,59 @@
+(ns mithril.ipld-session-test
+  (:require [cljs.test :refer [deftest is]]
+            [mithril.bot :as bot]
+            [mithril.checkpoint :as checkpoint]
+            [mithril.checkpoint-ipld :as ipld]
+            [mithril.checkpoint-ipld-fs :as local]
+            [mithril.execution :as execution]
+            [mithril.ipld-session :as session]))
+
+(def fs (js/require "node:fs"))
+(def path (js/require "node:path"))
+(def os (js/require "node:os"))
+(defn- text [file] (.readFileSync fs file "utf8"))
+(defn- reason [f]
+  (try (f) nil (catch :default error (:reason (ex-data error)))))
+
+(deftest primary-session-records-effect-request-and-result-as-causal-cids
+  (let [directory (.mkdtempSync fs (.join path (.tmpdir os) "mithril-ipld-primary-"))]
+    (try
+      (let [state-path (.join path directory "run.edn")
+            store (local/open! (.join path directory "store"))
+            schema (checkpoint/schema (text checkpoint/ontology-path))
+            artifact (bot/compile-text "examples/governed-coding-bot.mith"
+                                       (text "examples/governed-coding-bot.mith"))
+            s0 (bot/start-run artifact
+                              {:id "primary-test" :workspace "/tmp" :goal "check CID state"}
+                              "primary-test" 1000)
+            requested (bot/request-effect
+                       s0 {:action (get bot/action-by-label "workspace-inspect")
+                           :confidence 10000}
+                       #{:workspace/read} "primary-test" 1001)
+            s1 (:state requested)
+            c1 (session/save! store schema state-path nil s1)]
+        (is (nil? (session/load! store schema (.join path directory "new.edn"))))
+        (is (= s1 (:state (session/load! store schema state-path))))
+        (is (= 1 (:blocks (session/load! store schema state-path))))
+        (.unlinkSync fs state-path)
+        (is (= s1 (:state (session/load! store schema state-path)))
+            "missing EDN projection is rebuilt from the CID head")
+        (let [s2 (bot/apply-receipt
+                  s1 {:format bot/receipt-format
+                      :effect-id (get-in requested [:effect :id])
+                      :status :completed :output-digest (execution/digest :inspected)}
+                  "primary-test" 1002)
+              c2 (session/save! store schema state-path c1 s2)
+              saved (ipld/read! #(local/get-block store %) schema (:stateCid c2))]
+          (is (= [(:stateCid c1)] (:parents saved)))
+          (is (= s2 (:state (session/load! store schema state-path))))
+          (is (= 2 (:blocks (session/load! store schema state-path))))
+          (is (= :ref-conflict
+                 (reason #(session/save! store schema state-path c1 s2))))
+          (.writeFileSync fs state-path (pr-str (assoc s2 :step 99)) "utf8")
+          (is (= :projection-diverged
+                 (reason #(session/load! store schema state-path))))
+          (.unlinkSync fs state-path)
+          (is (= :legacy-semantic-head
+                 (do (.writeFileSync fs (str state-path ".semantic-head") "other" "utf8")
+                     (reason #(session/load! store schema state-path)))))))
+      (finally (.rmSync fs directory #js {:recursive true :force true})))))

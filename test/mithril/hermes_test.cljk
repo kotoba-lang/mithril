@@ -70,6 +70,16 @@
            :test/run {:program "/usr/bin/grep" :args ["-q" "value 2" "app.mith"]
                       :timeout-ms 5000}}})
 
+(deftest coding-preflight-refuses-missing-artifact-directory-before-effect-request
+  (let [fs (js/require "node:fs")
+        workspace (.mkdtempSync fs "/tmp/mithril-preflight-workspace-")
+        missing (str workspace "-missing-artifacts")]
+    (try
+      (is (= :mithril.hermes/artifact-directory-unavailable
+             (error-code #(hermes/preflight-coding-profile!
+                           (coding-profile workspace missing)))))
+      (finally (.rmSync fs workspace #js {:recursive true :force true})))))
+
 (deftest coding-write-compile-and-test-use-a-digest-bound-catalog
   (let [fs (js/require "node:fs")
         workspace (.mkdtempSync fs "/tmp/mithril-coding-workspace-")

@@ -4,8 +4,11 @@
             [mithril.bot :as bot]
             [mithril.compiler :as compiler]
             [mithril.checkpoint :as checkpoint]
+            [mithril.checkpoint-ipld :as checkpoint-ipld]
+            [mithril.checkpoint-ipld-fs :as local]
             [mithril.execution :as execution]
-            [mithril.hermes :as hermes]))
+            [mithril.hermes :as hermes]
+            [mithril.ipld-session :as ipld-session]))
 
 (def fs (js/require "node:fs"))
 (def cp (js/require "node:child_process"))
@@ -60,6 +63,148 @@
                            #(vec (remove #{"https://mithril.fund/id/action/patch-reset"} %)))
                 (update-in [:policy :effects]
                            #(vec (remove #{:workspace/revert-patch} %))))}))
+
+(deftest ipld-execute-journals-the-request-before-the-real-host-effect
+  (let [dir (.mkdtempSync fs "/tmp/mithril-primary-cli-")
+        workspace (str dir "/workspace")
+        artifacts (str dir "/artifacts")
+        task-path (str dir "/task.json")
+        state-path (str dir "/state.edn")
+        tools-path (str dir "/tools.json")]
+    (try
+      (.mkdirSync fs workspace)
+      (.mkdirSync fs artifacts)
+      (.writeFileSync fs (str workspace "/app.mith") "value 1\n" "utf8")
+      (exec! workspace "/usr/bin/git" "init" "-q")
+      (exec! workspace "/usr/bin/git" "add" "app.mith")
+      (exec! workspace "/usr/bin/git" "-c" "user.name=Mithril Test"
+             "-c" "user.email=mithril@example.invalid" "commit" "-qm" "base")
+      (let [profile {:format hermes/tool-profile-format :workspace workspace
+                     :artifact-dir artifacts :allowed-paths ["app.mith"]
+                     :max-patch-bytes 8192 :max-context-bytes 8192
+                     :proposer {:program "/bin/echo" :profile "fixture" :timeout-ms 5000}
+                     :tools {:amu/compile {:program "/usr/bin/git" :args ["diff" "--check"]
+                                            :timeout-ms 5000}
+                             :test/run {:program "/usr/bin/grep"
+                                        :args ["-q" "value 1" "app.mith"]
+                                        :timeout-ms 5000}}}
+            task {:id "primary-cli" :workspace workspace :goal "Inspect workspace"
+                  :tool-profile-digest (hermes/tool-profile-digest profile)}
+            schema (checkpoint/schema (.readFileSync fs checkpoint/ontology-path "utf8"))
+            store (local/open! (str dir "/ipld-checkpoints"))]
+        (.writeFileSync fs task-path (.stringify js/JSON (clj->js task)) "utf8")
+        (.writeFileSync fs tools-path
+                        (.stringify js/JSON
+                                    (clj->js (assoc profile :tools
+                                                    {"amu/compile" (get-in profile [:tools :amu/compile])
+                                                     "test/run" (get-in profile [:tools :test/run])})))
+                        "utf8")
+        (let [tick (.spawnSync cp "kbb"
+                               #js ["--backend" "sci" "bin/mithril-hermes.cljk" "tick"
+                                    "examples/governed-coding-bot.mith" task-path state-path
+                                    "primary-cli" "workspace/read" "ipld-execute" tools-path]
+                               #js {:cwd (.cwd js/process) :encoding "utf8"})
+              result (when (= 0 (.-status tick))
+                       (js->clj (js/JSON.parse (.-stdout tick)) :keywordize-keys true))
+              current (when result (ipld-session/load! store schema state-path))]
+          (is (= 0 (.-status tick)) (str (.-stdout tick) (.-stderr tick)))
+          (when current
+            (let [saved (checkpoint-ipld/read!
+                         #(local/get-block store %) schema (:stateCid current))
+                  parent (checkpoint-ipld/read!
+                          #(local/get-block store %) schema (first (:parents saved)))]
+              (is (= 2 (:blocks current)))
+              (is (= (:state-cid result) (:stateCid current)))
+              (is (= 1 (count (:parents saved))))
+              (is (some? (get-in parent [:state :awaiting :id])))
+              (is (nil? (get-in saved [:state :awaiting])))
+              (is (= 1 (get-in saved [:state :step])))
+              (.unlinkSync fs state-path)
+              (is (= (:state saved) (:state (ipld-session/load! store schema state-path))))
+              (is (.existsSync fs state-path))))))
+      (finally (.rmSync fs dir #js {:recursive true :force true})))))
+
+(deftest primary-reconcile-consumes-an-existing-proposal-without-proposing-again
+  (let [dir (.mkdtempSync fs "/tmp/mithril-primary-reconcile-")
+        workspace (str dir "/workspace")
+        artifacts (str dir "/artifacts")
+        task-path (str dir "/task.json")
+        state-path (str dir "/state.edn")
+        tools-path (str dir "/tools.json")]
+    (try
+      (.mkdirSync fs workspace)
+      (.mkdirSync fs artifacts)
+      (.writeFileSync fs (str workspace "/app.mith") "value 1\n" "utf8")
+      (exec! workspace "/usr/bin/git" "init" "-q")
+      (exec! workspace "/usr/bin/git" "add" "app.mith")
+      (exec! workspace "/usr/bin/git" "-c" "user.name=Mithril Test"
+             "-c" "user.email=mithril@example.invalid" "commit" "-qm" "base")
+      (let [profile {:format hermes/tool-profile-format :workspace workspace
+                     :artifact-dir artifacts :allowed-paths ["app.mith"]
+                     :max-patch-bytes 8192 :max-context-bytes 8192
+                     :proposer {:program "/bin/echo" :profile "fixture" :timeout-ms 5000}
+                     :tools {:amu/compile {:program "/usr/bin/git" :args ["diff" "--check"]
+                                            :timeout-ms 5000}
+                             :test/run {:program "/usr/bin/grep"
+                                        :args ["-q" "value 2" "app.mith"]
+                                        :timeout-ms 5000}}}
+            task {:id "reconcile-cli" :workspace workspace :goal "Review a fixed patch"
+                  :tool-profile-digest (hermes/tool-profile-digest profile)}
+            artifact (bot/compile-text "examples/governed-coding-bot.mith"
+                                       (.readFileSync fs "examples/governed-coding-bot.mith" "utf8"))
+            s0 (bot/start-run artifact task "reconcile-cli" 1000)
+            read-request (bot/request-effect
+                          s0 {:action (get bot/action-by-label "workspace-inspect")
+                              :confidence 10000}
+                          #{:workspace/read} "reconcile-cli" 1001)
+            s1 (bot/apply-receipt
+                (:state read-request)
+                {:format bot/receipt-format
+                 :effect-id (get-in read-request [:effect :id])
+                 :status :completed :output-digest (execution/digest :inspected)}
+                "reconcile-cli" 1002)
+            proposal-request (bot/request-effect
+                              s1 {:action (get bot/action-by-label "code-propose")
+                                  :confidence 10000}
+                              #{:llm/propose-patch} "reconcile-cli" 1003)
+            pending (:state proposal-request)
+            effect (:effect proposal-request)
+            store (local/open! (str dir "/ipld-checkpoints"))
+            schema (checkpoint/schema (.readFileSync fs checkpoint/ontology-path "utf8"))
+            initial (ipld-session/save! store schema state-path nil pending)
+            patch (str "diff --git a/app.mith b/app.mith\n"
+                       "--- a/app.mith\n+++ b/app.mith\n"
+                       "@@ -1 +1 @@\n-value 1\n+value 2\n")]
+        (.writeFileSync fs task-path (.stringify js/JSON (clj->js task)) "utf8")
+        (.writeFileSync fs tools-path
+                        (.stringify js/JSON
+                                    (clj->js (assoc profile :tools
+                                                    {"amu/compile" (get-in profile [:tools :amu/compile])
+                                                     "test/run" (get-in profile [:tools :test/run])})))
+                        "utf8")
+        (is (= :completed
+               (get-in (hermes/execute-effect effect
+                                              {:profile profile
+                                               :propose-fn (fn [_] patch)})
+                       [:receipt :status])))
+        (let [reconciled (.spawnSync cp "kbb"
+                                     #js ["--backend" "sci" "bin/mithril-hermes.cljk"
+                                          "reconcile" "examples/governed-coding-bot.mith"
+                                          task-path state-path "reconcile-cli" tools-path]
+                                     #js {:cwd (.cwd js/process) :encoding "utf8"})
+              result (when (= 0 (.-status reconciled))
+                       (js->clj (js/JSON.parse (.-stdout reconciled))
+                                :keywordize-keys true))
+              current (ipld-session/load! store schema state-path)]
+          (is (= 0 (.-status reconciled))
+              (str (.-stdout reconciled) (.-stderr reconciled)))
+          (is (= 2 (:blocks current)))
+          (is (not= (:stateCid initial) (:stateCid current)))
+          (is (= (:state-cid result) (:stateCid current)))
+          (is (nil? (get-in current [:state :awaiting])))
+          (is (= "value 1\n" (.readFileSync fs (str workspace "/app.mith") "utf8"))
+              "reconciliation must not apply or regenerate the proposal")))
+      (finally (.rmSync fs dir #js {:recursive true :force true})))))
 
 (deftest semantic-execute-persists-and-verifies-one-real-host-effect
   (let [dir (.mkdtempSync fs "/tmp/mithril-semantic-cli-")

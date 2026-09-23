@@ -4,7 +4,8 @@
   EDN projection drift and links every accepted post-tick state to its parent."
   (:require [mithril.checkpoint-ipld :as ipld]
             [mithril.checkpoint-ipld-fs :as local]
-            [mithril.execution :as execution]))
+            [mithril.execution :as execution]
+            [mithril.ipld-session :as primary]))
 
 (defn- refuse! [reason]
   (throw (ex-info "Mithril scheduler IPLD witness refused"
@@ -138,3 +139,78 @@
                    (= semantic-state-digest (execution/digest state)))
       (refuse! :recovery-binding-mismatch))
     {:state state :verification verification}))
+
+(defn verify-primary-occurrences!
+  "Verify the CID-primary two-phase journal: one requested-effect block and
+  one applied-receipt block for every completed builtin occurrence."
+  [store schema state-path rows]
+  (let [history (local/verify-ref! store schema (primary/ref-name state-path))
+        builtin (filterv #(= "builtin" (get-in % [:execution :source])) rows)
+        completed (filterv #(= "completed" (get-in % [:receipt :status])) builtin)
+        terminal (filterv #(= "terminal" (get-in % [:receipt :status])) builtin)
+        direct (remove #(= "builtin" (get-in % [:execution :source])) rows)]
+    (when-not (and (seq completed)
+                   (= (count builtin) (+ (count completed) (count terminal)))
+                   (= (mapv #(get-in % [:receipt :status]) builtin)
+                      (vec (concat (repeat (count completed) "completed")
+                                   (repeat (count terminal) "terminal"))))
+                   (= (* 2 (count completed)) (:blocks history))
+                   (every? #(= "completed" (get-in % [:execution :status])) builtin)
+                   (every? #(= "failed" (get-in % [:execution :status])) direct)
+                   (every? (fn [{:keys [execution receipt]}]
+                             (and (= (:id execution) (:executionId receipt))
+                                  (= "builtin" (:source receipt))
+                                  (= (:scheduled_instant execution)
+                                     (:scheduledInstant receipt)))) builtin))
+      (refuse! :primary-scheduler-series-mismatch))
+    (let [last-cid
+          (loop [remaining completed previous nil index 1]
+            (if-let [{:keys [receipt]} (first remaining)]
+              (let [final-cid (:stateCid receipt)
+                    final (ipld/read! #(local/get-block store %) schema final-cid)
+                    request-cid (first (:parents final))
+                    requested (ipld/read! #(local/get-block store %) schema request-cid)
+                    state (:state final)
+                    pending (:state requested)
+                    effect (last (:receipts state))
+                    passed (last (filter #(= :pass (:bpmn/event %))
+                                         (get-in state [:bpmn :token-state :bpmn/trace])))
+                    action (get-in state [:bpmn :model :bpmn/nodes
+                                          (:bpmn/at passed) :mithril/action])]
+                (when-not (and (= ipld/format-id (:format final) (:format requested))
+                               (= [request-cid] (:parents final))
+                               (= (if previous [previous] []) (:parents requested))
+                               (= (:run-id pending) (:run-id state))
+                               (= (dec index) (:step pending))
+                               (= index (:step state) (count (:receipts state)))
+                               (= index (:step receipt))
+                               (= (:effect-id effect) (:effectId receipt)
+                                  (get-in pending [:awaiting :id]))
+                               (= (:output-digest effect) (:outputDigest receipt))
+                               (= (:semantic-graph-digest final)
+                                  (:semanticGraphDigest receipt))
+                               (= action (:action receipt))
+                               (= (name (:status state)) (:runStatus receipt))
+                               (nil? (:awaiting state)))
+                  (refuse! :primary-effect-or-cid-mismatch))
+                (recur (next remaining) final-cid (inc index)))
+              previous))
+          final (ipld/read! #(local/get-block store %) schema last-cid)]
+      (when-not (and (= last-cid (:head history))
+                     (every? (fn [{:keys [receipt]}]
+                               (and (= last-cid (:stateCid receipt))
+                                    (= (:semantic-graph-digest final)
+                                       (:semanticGraphDigest receipt))
+                                    (= "completed" (:runStatus receipt))
+                                    (nil? (:effectId receipt))
+                                    (= (count completed) (:step receipt)))) terminal))
+        (refuse! :primary-terminal-or-head-mismatch))
+      {:status "verified" :mode "ipld-primary"
+       :completedEffects (count completed)
+       :terminalDeliveries (count terminal)
+       :directExecutions (count direct)
+       :semanticBlocks (:blocks history)
+       :stateCid last-cid
+       :semanticGraphDigest (:semantic-graph-digest final)
+       :runStatus (name (get-in final [:state :status]))
+       :state (:state final)})))

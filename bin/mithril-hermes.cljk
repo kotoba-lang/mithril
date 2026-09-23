@@ -4,8 +4,10 @@
             [clojure.string :as str]
             [mithril.bot :as bot]
             [mithril.checkpoint :as checkpoint]
+            [mithril.checkpoint-ipld-fs :as ipld-store]
             [mithril.execution :as execution]
             [mithril.hermes :as hermes]
+            [mithril.ipld-session :as ipld-session]
             [mithril.openrouter-jev :as jev]))
 
 (def fs (js/require "node:fs"))
@@ -13,7 +15,7 @@
 (def cp (js/require "node:child_process"))
 
 (defn- usage! []
-  (println "usage: mithril-hermes tick <profile.mith> <task.json> <state.edn> <owner> <grants.csv> <shadow|execute|semantic-execute> [coding-tools.json]")
+  (println "usage: mithril-hermes tick <profile.mith> <task.json> <state.edn> <owner> <grants.csv> <shadow|execute|semantic-execute|ipld-execute> [coding-tools.json]")
   (println "       mithril-hermes migrate <profile.mith> <task.json> <state.edn> <owner>")
   (println "       mithril-hermes semantic-import <profile.mith> <task.json> <state.edn> <owner>")
   (println "       mithril-hermes semantic-restore <state.edn>")
@@ -365,9 +367,15 @@
                   (throw (ex-info "task does not bind coding tools"
                                   {:mithril/error :mithril.hermes/tool-profile-mismatch})))
               semantic? (.existsSync fs (semantic-head-path state-path))
-              schema (when semantic? (checkpoint/schema (read-text checkpoint/ontology-path)))
-              previous (when semantic? (semantic-load state-path schema))
-              saved (if semantic? (:state previous)
+              store-dir (.join path (.dirname path state-path) "ipld-checkpoints")
+              primary? (.existsSync fs (.join path store-dir "refs"
+                                              (ipld-session/ref-name state-path)))
+              store (when primary? (ipld-store/open! store-dir))
+              schema (when (or semantic? primary?)
+                       (checkpoint/schema (read-text checkpoint/ontology-path)))
+              previous (cond primary? (ipld-session/load! store schema state-path)
+                             semantic? (semantic-load state-path schema))
+              saved (if (or semantic? primary?) (:state previous)
                         (reader/read-string (read-text state-path)))
               _ (when-not (and (= :running (:status saved))
                                (= owner (get-in saved [:lease :owner]))
@@ -378,16 +386,20 @@
               effect (:awaiting state)
               {:keys [receipt audit]} (hermes/reconcile-effect effect {:profile profile})
               next-state (bot/apply-receipt state receipt owner (.now js/Date))]
-          (if semantic?
-            (semantic-save! state-path schema previous next-state)
-            (write-state! state-path next-state))
-          (append-audit! state-path {:at (.toISOString (js/Date.))
-                                     :status :reconciled :effect-id (:id effect)
-                                     :action (:action effect) :host audit
-                                     :output-digest (:output-digest receipt)})
-          (println (json-line {:status :reconciled :effect-id (:id effect)
-                               :step (:step next-state)
-                               :run-status (:status next-state)})))
+          (let [committed (cond primary?
+                                (ipld-session/save! store schema state-path previous next-state)
+                                semantic? (semantic-save! state-path schema previous next-state)
+                                :else (do (write-state! state-path next-state) nil))]
+          (append-audit! state-path
+                         (cond-> {:at (.toISOString (js/Date.))
+                                  :status :reconciled :effect-id (:id effect)
+                                  :action (:action effect) :host audit
+                                  :output-digest (:output-digest receipt)}
+                           primary? (assoc :state-cid (:stateCid committed))))
+          (println (json-line (cond-> {:status :reconciled :effect-id (:id effect)
+                                      :step (:step next-state)
+                                      :run-status (:status next-state)}
+                               primary? (assoc :state-cid (:stateCid committed)))))))
         (catch :default error (refuse! error))
         (finally (release-lock! lock))))))
 
@@ -430,7 +442,7 @@
 
     :else
     (if-not (and (= "tick" command) profile-path task-path state-path owner grants-csv
-                 (contains? #{"shadow" "execute" "semantic-execute"} mode) (empty? extra))
+                 (contains? #{"shadow" "execute" "semantic-execute" "ipld-execute"} mode) (empty? extra))
     (usage!)
     (let [lock (try (acquire-lock! state-path) (catch :default error (refuse! error) nil))]
       (when lock
@@ -440,8 +452,14 @@
                                      :owner-pid recovered-pid}))
         (try
           (let [semantic? (= "semantic-execute" mode)
-                schema (when semantic? (checkpoint/schema (read-text checkpoint/ontology-path)))
-                previous (when semantic? (semantic-load state-path schema))
+                primary? (= "ipld-execute" mode)
+                schema (when (or semantic? primary?)
+                         (checkpoint/schema (read-text checkpoint/ontology-path)))
+                store (when primary?
+                        (ipld-store/open! (.join path (.dirname path state-path)
+                                                  "ipld-checkpoints")))
+                previous (cond semantic? (semantic-load state-path schema)
+                               primary? (ipld-session/load! store schema state-path))
                 artifact (bot/compile-text profile-path (read-text profile-path))
                 task (js->clj (js/JSON.parse (read-text task-path)) :keywordize-keys true)
                 tool-profile (when tool-profile-path
@@ -453,11 +471,15 @@
                     (throw (ex-info "task does not bind the supplied coding tool profile"
                                     {:mithril/error :mithril.hermes/tool-profile-mismatch})))
                 now (.now js/Date)
-                run (if semantic?
+                run (if (or semantic? primary?)
                       (bot/resume-or-start artifact task (:state previous) owner now)
                       (load-or-start artifact task state-path owner now))
                 state (:state run)
-                grants (set (map keyword (remove str/blank? (str/split grants-csv #","))))]
+                grants (set (map keyword (remove str/blank? (str/split grants-csv #","))))
+                save! (fn [prior state]
+                        (cond semantic? (semantic-save! state-path schema prior state)
+                              primary? (ipld-session/save! store schema state-path prior state)
+                              :else (do (write-state! state-path state) nil)))]
             (when (and (not= :terminal (:disposition run)) (:awaiting state))
               (throw (ex-info "in-flight effect requires explicit reconciliation"
                               {:mithril/error :mithril.bot/effect-in-flight
@@ -470,9 +492,11 @@
                                            :task-digest (or (:task-digest state)
                                                             (bot/task-digest (:task state)))
                                            :run-status (:status state)})
-                (println (json-line {:status :idempotent-terminal
-                                     :run-id (:run-id state)
-                                     :run-status (:status state)}))
+                (println (json-line
+                          (cond-> {:status :idempotent-terminal
+                                   :run-id (:run-id state)
+                                   :run-status (:status state)}
+                            primary? (assoc :state-cid (:stateCid previous)))))
                 (release-lock! lock))
               (-> (decide! state owner now (boolean tool-profile))
                 (.then
@@ -480,9 +504,7 @@
                    (if held
                      (let [shadow? (= "shadow" mode)]
                        (when-not shadow?
-                         (if semantic?
-                           (semantic-save! state-path schema previous held)
-                           (write-state! state-path held)))
+                         (save! previous held))
                        (append-audit! state-path
                                       {:at (.toISOString (js/Date.))
                                        :mode mode :status (if shadow? :shadow-refused :held)
@@ -507,9 +529,7 @@
                                              :step (:step state) :run-status (:status state)})))
                        (let [{requested-state :state effect :effect}
                              (bot/request-effect state admitted grants owner (+ now 3))
-                             requested-checkpoint (if semantic?
-                                                    (semantic-save! state-path schema previous requested-state)
-                                                    (do (write-state! state-path requested-state) nil))
+                             requested-checkpoint (save! previous requested-state)
                              _ (append-audit! state-path
                                               (assoc base-audit :status :effect-requested
                                                      :effect-id (:id effect)))
@@ -517,16 +537,18 @@
                              (hermes/execute-effect effect (cond-> {}
                                                             tool-profile (assoc :profile tool-profile)))
                              next-state (bot/apply-receipt requested-state receipt owner (+ now 4))]
-                         (if semantic?
-                           (semantic-save! state-path schema requested-checkpoint next-state)
-                           (write-state! state-path next-state))
-                         (append-audit! state-path
-                                        (assoc base-audit :status (:status receipt)
-                                               :effect-id (:id effect) :host audit
-                                               :output-digest (:output-digest receipt)))
-                         (println (json-line {:status (:status receipt) :action (:label action)
-                                             :step (:step next-state)
-                                             :run-status (:status next-state)}))))))))
+                         (let [committed (save! requested-checkpoint next-state)]
+                           (append-audit! state-path
+                                          (cond-> (assoc base-audit :status (:status receipt)
+                                                          :effect-id (:id effect) :host audit
+                                                          :output-digest (:output-digest receipt))
+                                            primary? (assoc :state-cid (:stateCid committed))))
+                           (println (json-line
+                                     (cond-> {:status (:status receipt)
+                                              :action (:label action)
+                                              :step (:step next-state)
+                                              :run-status (:status next-state)}
+                                       primary? (assoc :state-cid (:stateCid committed))))))))))))
                 (.catch refuse!)
                 (.finally #(release-lock! lock)))))
           (catch :default error
