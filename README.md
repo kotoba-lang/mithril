@@ -241,6 +241,31 @@ Jev-authored patches, actual Amu compilation, automatic distributed
 branch/merge, or fleet-wide Hermes replacement. Receipt `status=completed`
 means one effect completed; `runStatus` is the distinct workflow status.
 
+### Private IPLD checkpoint branches (experimental)
+
+`mithril-checkpoint-ipld` stores an ontology-validated bot state in canonical
+DAG-CBOR blocks with real CID links to up to two parents. Each read rehashes the
+block and rechecks the `.mith` projection, OWL entailment, SPARQL facts, and
+SHACL shape. A private local adapter stores immutable blocks and named refs;
+its one-filesystem lock and ref compare-and-swap prevent two local writers from
+silently advancing the same name. For example:
+
+```sh
+kbb --backend sci bin/mithril-checkpoint-ipld.cljk import state.mith state.edn /absolute/private/store base
+kbb --backend sci bin/mithril-checkpoint-ipld.cljk fork /absolute/private/store base left
+kbb --backend sci bin/mithril-checkpoint-ipld.cljk assert /absolute/private/store left review/approved
+kbb --backend sci bin/mithril-checkpoint-ipld.cljk verify /absolute/private/store left
+kbb --backend sci bin/mithril-checkpoint-ipld.cljk show /absolute/private/store left
+```
+
+`import` requires the `.mith` file to be the exact projection of the paired
+execution-state EDN. `merge` accepts only additive facts on two branches of
+the same run; divergent effects, receipts, workflow tokens, or deletions are
+rejected. This is an immutable, content-addressed branch experiment, not a
+general Unison merge or a distributed store. It does not yet make the RDF
+graph the execution state of record, sync refs between machines, provide
+crash-durable fsync, or establish fleet-wide Hermes profile equivalence.
+
 ## Published Mithril code and libraries
 
 The repository now contains source authored in Mithril itself:

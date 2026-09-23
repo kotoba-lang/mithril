@@ -1,0 +1,97 @@
+#!/usr/bin/env kbb
+(ns mithril.checkpoint-ipld-cli
+  (:require [cljs.reader :as reader]
+            [clojure.string :as str]
+            [mithril.checkpoint :as checkpoint]
+            [mithril.checkpoint-ipld :as ipld-checkpoint]
+            [mithril.checkpoint-ipld-fs :as local]
+            [mithril.compiler :as compiler]))
+
+(def fs (js/require "node:fs"))
+(defn- text [file] (.readFileSync fs file "utf8"))
+(defn- json [value] (.stringify js/JSON (clj->js value)))
+(defn- usage! []
+  (println "usage: mithril-checkpoint-ipld import <checkpoint.mith> <state.edn> <store-dir> <ref>")
+  (println "       mithril-checkpoint-ipld fork <store-dir> <source-ref> <new-ref>")
+  (println "       mithril-checkpoint-ipld assert <store-dir> <ref> <fact/ns>")
+  (println "       mithril-checkpoint-ipld merge <store-dir> <base-ref> <left-ref> <right-ref> <output-ref>")
+  (println "       mithril-checkpoint-ipld verify <store-dir> <ref>")
+  (println "       mithril-checkpoint-ipld show <store-dir> <ref>")
+  (js/process.exit 2))
+
+(defn- fact [value]
+  (when-not (and (string? value)
+                 (re-matches #"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+" value))
+    (throw (ex-info "fact must be a namespace/name keyword"
+                    {:reason :invalid-fact})))
+  (keyword value))
+
+(let [[command & args] *command-line-args*]
+  (try
+    (let [schema (checkpoint/schema (text checkpoint/ontology-path))]
+      (case command
+        "import"
+        (let [[source-path state-path directory name & extra] args]
+          (when-not (and source-path state-path directory name (empty? extra))
+            (usage!))
+          (when-not (compiler/source-path? source-path)
+            (throw (ex-info "Mithril input must be .mith or .mithril"
+                            {:reason :invalid-extension})))
+          (let [state (reader/read-string (text state-path))
+                expected (checkpoint/form-text (checkpoint/projection state nil))]
+            (when-not (= expected (str/trim (text source-path)))
+              (throw (ex-info "Mithril input differs from checked state projection"
+                              {:reason :source-state-mismatch})))
+            (let [store (local/open! directory)
+                  cid (local/import-state! store schema name state)]
+              (println (json {:status "imported" :ref name :cid cid})))))
+
+        "fork"
+        (let [[directory source name & extra] args]
+          (when-not (and directory source name (empty? extra)) (usage!))
+          (let [store (local/open! directory)
+                cid (local/fork-ref! store source name)]
+            (println (json {:status "forked" :ref name :cid cid}))))
+
+        "assert"
+        (let [[directory name value & extra] args]
+          (when-not (and directory name value (empty? extra)) (usage!))
+          (let [store (local/open! directory)
+                cid (local/advance-fact! store schema name (fact value))]
+            (println (json {:status "asserted" :ref name :cid cid}))))
+
+        "merge"
+        (let [[directory base left right output & extra] args]
+          (when-not (and directory base left right output (empty? extra))
+            (usage!))
+          (let [store (local/open! directory)
+                cid (local/merge-refs! store schema base left right output)]
+            (println (json {:status "merged" :ref output :cid cid}))))
+
+        "verify"
+        (let [[directory name & extra] args]
+          (when-not (and directory name (empty? extra)) (usage!))
+          (let [store (local/open! directory)
+                history (local/verify-ref! store schema name)
+                saved (ipld-checkpoint/read!
+                       #(local/get-block store %) schema (:head history))]
+            (println (json {:status "verified" :ref name :cid (:cid saved)
+                            :blocks (:blocks history)
+                            :graphDigest (:graph-digest saved)
+                            :runStatus (clojure.core/name (get-in saved [:state :status]))}))))
+
+        "show"
+        (let [[directory name & extra] args]
+          (when-not (and directory name (empty? extra)) (usage!))
+          (let [store (local/open! directory)
+                saved (ipld-checkpoint/read!
+                       #(local/get-block store %) schema (local/read-ref store name))]
+            (println (:source saved))))
+
+        (usage!)))
+    (catch :default error
+      (println (str "REFUSE\t" (or (some-> error ex-data :reason name)
+                                    (some-> error ex-data :mithril/error name)
+                                    "checkpoint-ipld-error")
+                    "\t" (.-message error)))
+      (set! (.-exitCode js/process) 1))))

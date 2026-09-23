@@ -1,0 +1,157 @@
+(ns mithril.checkpoint-ipld
+  "Private IPLD blocks for ontology-validated bot state. Branches are immutable
+  CIDs; the bounded merge below admits only additive semantic facts, never
+  divergent tool effects. Mutable names and distributed synchronization are
+  deliberately outside this value layer."
+  (:require #?(:cljs [cljs.reader :as reader]
+               :clj [clojure.edn :as reader])
+            [clojure.set :as set]
+            [ipld.core :as ipld]
+            [mithril.checkpoint :as checkpoint]
+            [mithril.execution :as execution]
+            [multiformats.core :as multiformats]))
+
+(def format-id "https://mithril.fund/block/bot-checkpoint-ipld-v1")
+(def node-keys
+  #{"format" "ontologyDigest" "checkpointDigest" "graphDigest"
+    "stateDigest" "stateEdn" "source" "parents"})
+
+(defn- refuse! [reason]
+  (throw (ex-info "Mithril IPLD checkpoint refused"
+                  {:mithril/error :mithril.checkpoint-ipld/refused
+                   :reason reason})))
+
+(defn- valid-cid? [id]
+  (try
+    (and (string? id)
+         (= multiformats/codec-dag-cbor (ipld/cid-codec id)))
+    (catch #?(:cljs :default :clj Exception) _ false)))
+
+(defn- valid-parents! [parents]
+  (when-not (and (vector? parents)
+                 (<= (count parents) 2)
+                 (= parents (vec (sort (distinct parents))))
+                 (every? valid-cid? parents))
+    (refuse! :invalid-parents))
+  parents)
+
+(defn- node [schema state parents]
+  (valid-parents! parents)
+  (let [{:keys [digest block]} (checkpoint/build schema state nil)]
+    {"format" format-id
+     "ontologyDigest" (:ontology-digest schema)
+     "checkpointDigest" digest
+     "graphDigest" (:graph-digest block)
+     "stateDigest" (:state-digest block)
+     "stateEdn" (execution/canonical-edn-text state)
+     "source" (:source block)
+     "parents" (mapv ipld/link parents)}))
+
+(defn block
+  "Create canonical DAG-CBOR bytes and a real CID for one checked state."
+  [schema state parents]
+  (ipld/node->block (node schema state parents)))
+
+(defn read!
+  "Resolve and rehash a CID, then rerun Mithril parsing, OWL, SPARQL and SHACL
+  over its full state. Never trust the CID lookup or the stored projection alone."
+  [get-fn schema id]
+  (when-not (valid-cid? id) (refuse! :invalid-cid))
+  (let [value (ipld/get-node get-fn id)]
+    (when-not value (refuse! :missing-block))
+    (when-not (and (map? value)
+                   (= node-keys (set (keys value)))
+                   (= format-id (get value "format"))
+                   (= (:ontology-digest schema) (get value "ontologyDigest"))
+                   (string? (get value "stateEdn"))
+                   (vector? (get value "parents"))
+                   (every? ipld/link? (get value "parents")))
+      (refuse! :invalid-node))
+    (let [parents (mapv ipld/link-cid (get value "parents"))
+          _ (valid-parents! parents)
+          state (try (reader/read-string (get value "stateEdn"))
+                     (catch #?(:cljs :default :clj Exception) _
+                       (refuse! :invalid-state-edn)))
+          expected (node schema state parents)]
+      (when-not (= value expected) (refuse! :noncanonical-checkpoint))
+      {:cid id :parents parents :state state
+       :source (get value "source")
+       :graph-digest (get value "graphDigest")
+       :checkpoint-digest (get value "checkpointDigest")})))
+
+(defn put!
+  "Store a checked block through the injected CID/bytes port. Parents must
+  already resolve and share the exact run/profile/task binding."
+  [put-fn get-fn schema state parents]
+  (valid-parents! parents)
+  (doseq [parent parents]
+    (let [saved (:state (read! get-fn schema parent))]
+      (when-not (and (= (:run-id saved) (:run-id state))
+                     (= (:profile-digest saved) (:profile-digest state))
+                     (= (:task-digest saved) (:task-digest state))
+                     (<= (:step saved) (:step state)))
+        (refuse! :parent-binding-mismatch))))
+  (let [{:keys [cid bytes]} (block schema state parents)]
+    (put-fn cid bytes)
+    cid))
+
+(defn- ancestor? [get-fn schema ancestor descendant]
+  (loop [queue [descendant] seen #{}]
+    (cond
+      (empty? queue) false
+      (> (count seen) 256) (refuse! :ancestry-limit)
+      :else
+      (let [current (first queue)
+            remaining (subvec (vec queue) 1)]
+        (cond
+          (= ancestor current) true
+          (contains? seen current) (recur remaining seen)
+          :else (recur (into remaining (:parents (read! get-fn schema current)))
+                       (conj seen current)))))))
+
+(defn verify-history!
+  "Verify every reachable IPLD block and its checked semantic projection."
+  [get-fn schema head]
+  (loop [queue [head] seen #{}]
+    (cond
+      (empty? queue) {:head head :blocks (count seen)}
+      (> (count seen) 256) (refuse! :ancestry-limit)
+      :else
+      (let [current (first queue)
+            remaining (subvec (vec queue) 1)]
+        (if (contains? seen current)
+          (recur remaining seen)
+          (let [{:keys [state parents]} (read! get-fn schema current)]
+            (doseq [parent parents]
+              (let [prior (:state (read! get-fn schema parent))]
+                (when-not (and (= (:run-id prior) (:run-id state))
+                               (= (:profile-digest prior) (:profile-digest state))
+                               (= (:task-digest prior) (:task-digest state))
+                               (<= (:step prior) (:step state)))
+                  (refuse! :invalid-ancestry))))
+            (recur (into remaining parents) (conj seen current))))))))
+
+(defn merge-facts!
+  "Three-way merge of disjoint, additive facts over one immutable ancestor.
+  Effects, receipts, steps, leases, policy and BPMN token must be identical;
+  a workflow branch with divergent execution needs explicit reconciliation."
+  [put-fn get-fn schema base-id left-id right-id]
+  (when-not (and (ancestor? get-fn schema base-id left-id)
+                 (ancestor? get-fn schema base-id right-id))
+    (refuse! :not-common-ancestor))
+  (let [base (:state (read! get-fn schema base-id))
+        left (:state (read! get-fn schema left-id))
+        right (:state (read! get-fn schema right-id))
+        base-facts (:facts base)
+        left-facts (:facts left)
+        right-facts (:facts right)]
+    (when-not (and (= :running (:status base) (:status left) (:status right))
+                   (every? nil? (map :awaiting [base left right]))
+                   (= (dissoc base :facts) (dissoc left :facts) (dissoc right :facts))
+                   (set? base-facts) (set? left-facts) (set? right-facts)
+                   (set/subset? base-facts left-facts)
+                   (set/subset? base-facts right-facts))
+      (refuse! :non-additive-or-effect-conflict))
+    (put! put-fn get-fn schema
+          (assoc base :facts (set/union left-facts right-facts))
+          (vec (sort (distinct [left-id right-id]))))))

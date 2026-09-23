@@ -3,6 +3,8 @@
          "../org-w3-rdf-canon/src"
          "../org-w3-nquads/src"
          "../io-multiformats/src"
+         "../io-ipld/src"
+         "../org-ietf-cbor/src"
          "../org-nist-sha2/src"
          "../text/src"]
  :deps {io.github.kotoba-lang/org-w3-json-ld-api
@@ -28,4 +30,7 @@
          :git/sha "f64eb5cb510bdbdd2a780d30dab4b44bba124720"}
         io.github.kotoba-lang/sparql
         {:git/url "https://github.com/kotoba-lang/sparql.git"
-         :git/sha "8809be30fa48eb9a7e11c9a9cb054ea60740001e"}}}
+         :git/sha "8809be30fa48eb9a7e11c9a9cb054ea60740001e"}
+        io.github.kotoba-lang/io-ipld
+        {:git/url "https://github.com/kotoba-lang/io-ipld.git"
+         :git/sha "1b21025327e63652e533b54303b5e7b8e11f59ba"}}}

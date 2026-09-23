@@ -25,8 +25,26 @@
     (sequential? value) (mapv canonical-value value)
     :else value))
 
+(defn canonical-text [value]
+  (pr-str (canonical-value value)))
+
+(defn- canonical-edn-value [value]
+  (cond
+    (map? value) (into (sorted-map-by #(compare (pr-str %1) (pr-str %2)))
+                       (map (fn [[k v]] [k (canonical-edn-value v)])) value)
+    (set? value) (into (sorted-set-by #(compare (pr-str %1) (pr-str %2)))
+                       (map canonical-edn-value value))
+    (sequential? value) (mapv canonical-edn-value value)
+    :else value))
+
+(defn canonical-edn-text
+  "Canonical, reader-roundtrippable state text; unlike the digest projection,
+  it preserves set identity instead of turning sets into vectors."
+  [value]
+  (pr-str (canonical-edn-value value)))
+
 (defn digest [value]
-  (let [text (pr-str (canonical-value value))
+  (let [text (canonical-text value)
         bytes #?(:cljs (vec (js/Array.from (.encode (js/TextEncoder.) text)))
                  :clj (vec (.getBytes ^String text "UTF-8")))]
     (str "sha256:" (sha2/sha256-hex bytes))))
