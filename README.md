@@ -254,6 +254,32 @@ effect, one held delivery, and four causal blocks. The failed pre-fix
 occurrence remains in its isolated evidence directory and was not replayed.
 Neither canary proves Jev-selected patch proposal/write, an entire coding
 workflow, or fleet-wide Hermes parity.
+
+The optional `bin/mithril-openrouter-proposer.cljk` is a bounded generative
+advisor for the coding profile. Set `MITHRIL_PATCH_MODEL` to a configured
+OpenRouter chat model and supply `OPENROUTER_API_KEY` (or the existing exact
+Keychain item). Set the tool profile's proposer `program` to this executable
+and `profile` to `typed-mithril-v1`. It receives only the explicitly listed
+regular files, returns one inert `(mithril/edit-proposal :path ... :old ...
+:new ...)` form, and performs one exact, unique-span replacement in the
+disposable proposal worktree. The host independently validates the resulting
+patch, allowed paths and checked compile/test effects. The model receives no
+shell or file tools. The allowlist comes from the digest-bound tool profile
+as a separate typed argument, never from prompt markup. The edit shape is
+declared in `ontology/edit-proposal-v1.mith` with OWL and SHACL; the supported
+SHACL count/datatype subset is executed at admission. The proposal artifact
+stores the Mithril form, its canonical document digest and the patch digest;
+reconciliation verifies both. This document digest is not an RDF canonical
+dataset identity.
+
+An isolated 2026-09-24 **direct** Jev/IPLD loop used a real OpenRouter model
+proposal, then patch application, Mithril `compile-web`, request assertion,
+Git status and stop. Seven effects completed; the primary IPLD verifier
+accepted 15 causal blocks at the final CID. `GET /hello` returned the changed
+body while HEAD remained unchanged. This proves that bounded code proposal
+can use Mithril input/output in this one local case; it does **not** establish
+scheduler-originated real-model execution, arbitrary coding, Amu compiler
+parity, fleet migration, or full Hermes tool/delivery equivalence.
 Before execution it rejects a prior unreceipted attempt, an in-flight effect,
 or a terminal state. A lost host receipt is held for explicit reconciliation,
 not retried by a later cron tick. This is a bounded scheduler execution

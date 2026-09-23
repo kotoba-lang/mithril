@@ -1,0 +1,100 @@
+(ns mithril.typed-proposer-test
+  (:require [cljs.test :refer [deftest is testing]]
+            [mithril.compiler :as compiler]
+            [mithril.typed-proposer :as proposer]))
+
+(def fs (js/require "node:fs"))
+(def os (js/require "node:os"))
+(def path (js/require "node:path"))
+
+(defn error-reason [f]
+  (try (f) nil (catch :default error (:reason (ex-data error)))))
+
+(defn proposal [relative old new]
+  (str "(mithril/edit-proposal :path " (pr-str relative)
+       " :old " (pr-str old) " :new " (pr-str new) ")"))
+
+(deftest edit-proposal-ontology-compiles-with-owl-and-shacl
+  (let [source (.readFileSync fs "ontology/edit-proposal-v1.mith" "utf8")
+        document (compiler/parse-source source)
+        artifact (compiler/compile-ontology-text
+                   "ontology/edit-proposal-v1.mith" source)
+        shape (last (get document "@graph"))
+        declared (mapv (fn [property]
+                         [(last (.split (get property "propertyPath") "#"))
+                          (get property "minCount")
+                          (get property "maxCount")
+                          (get property "datatype")])
+                       (get shape "property"))
+        executed (mapv (fn [property]
+                         [(name (:path property))
+                          (:min-count property)
+                          (:max-count property)
+                          (case (:datatype property)
+                            :string "http://www.w3.org/2001/XMLSchema#string")])
+                       (:property proposer/edit-shape))]
+    (is (= "https://mithril.fund/artifact/ontology-v1" (:format artifact)))
+    (is (= 5 (count (get-in artifact [:rdf-dataset "@graph"]))))
+    (is (= "sh:NodeShape" (get shape "@type")))
+    (is (= declared executed) "executed SHACL subset must match the ontology declaration")
+    (is (re-matches #"sha256:[0-9a-f]{64}" (:graph-digest artifact)))))
+
+(deftest typed-mithril-proposal-is-inert-and-exact
+  (let [doc (proposer/parse-proposal
+             (proposal "examples/hello-web.mith" "Hello" "Hello, world")
+             ["examples/hello-web.mith"])]
+    (is (= "EditProposal" (get doc "@type")))
+    (is (= :invalid-edit
+           (error-reason #(proposer/parse-proposal
+                            (proposal "../outside" "a" "b") ["../outside"]))))
+    (is (= :invalid-edit
+           (error-reason #(proposer/parse-proposal
+                            (proposal "other.mith" "a" "b") ["file.mith"]))))
+    (is (= :invalid-shape
+           (error-reason #(proposer/parse-proposal
+                            "(mithril/edit-proposal :path \"x\" :old \"a\" :new \"b\" :command \"sh\")"
+                            ["x"]))))
+    (is (= :mithril.form/form-count
+           (try (proposer/parse-proposal
+                  (str (proposal "x" "a" "b") "\n" (proposal "x" "a" "b"))
+                  ["x"])
+                nil
+                (catch :default error (:mithril/error (ex-data error))))))))
+
+(deftest allowlist-is-a-separate-typed-argument-not-prompt-markup
+  (is (= {:allowed ["app.mith"] :read ["lib.mith"]}
+         (proposer/validated-paths
+           {:allowed ["app.mith"] :read ["lib.mith"]})))
+  (is (= :invalid-allowlist
+         (error-reason #(proposer/validated-paths
+                          {:allowed ["app.mith" "../secret.mith"] :read []}))))
+  (is (= :invalid-allowlist
+         (error-reason #(proposer/validated-paths
+                          {:allowed ["app.mith"] :read ["app.mith"]}))))
+  (is (= :invalid-allowlist
+         (error-reason #(proposer/validated-paths
+                          {:allowed ["app.mith"] :read [] :ambient "secret.mith"})))))
+
+(deftest proposal-application-requires-unique-span-and-regular-file
+  (let [dir (.mkdtempSync fs (.join path (.tmpdir os) "mithril-proposal-test-"))
+        file (.join path dir "app.mith")
+        outside (.join path dir "outside.mith")
+        link (.join path dir "link.mith")]
+    (try
+      (.writeFileSync fs file "one two three\n" "utf8")
+      (.writeFileSync fs outside "secret\n" "utf8")
+      (.symlinkSync fs outside link)
+      (let [doc (proposer/parse-proposal (proposal "app.mith" "two" "TWO") ["app.mith"])]
+        (is (= "app.mith" (:path (proposer/apply-proposal! dir ["app.mith"] doc))))
+        (is (= "one TWO three\n" (.readFileSync fs file "utf8"))))
+      (let [doc (proposer/parse-proposal (proposal "app.mith" "two" "TWO") ["app.mith"])]
+        (is (= :nonunique-old
+               (error-reason #(proposer/apply-proposal! dir ["app.mith"] doc)))))
+      (.writeFileSync fs file "one one\n" "utf8")
+      (let [doc (proposer/parse-proposal (proposal "app.mith" "one" "ONE") ["app.mith"])]
+        (is (= :nonunique-old
+               (error-reason #(proposer/apply-proposal! dir ["app.mith"] doc)))))
+      (is (= :unsafe-path
+             (error-reason #(proposer/snapshot dir ["link.mith"] 1024))))
+      (finally
+        (.rmSync fs dir #js {:recursive true :force true})))))

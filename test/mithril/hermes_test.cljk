@@ -1,7 +1,10 @@
 (ns mithril.hermes-test
   (:require [cljs.test :refer [deftest is testing]]
+            [cljs.reader :as reader]
             [clojure.string :as str]
             [mithril.bot :as bot]
+            [mithril.execution :as execution]
+            [mithril.form :as form]
             [mithril.hermes :as hermes]))
 
 (def base-effect
@@ -79,6 +82,85 @@
              (error-code #(hermes/preflight-coding-profile!
                            (coding-profile workspace missing)))))
       (finally (.rmSync fs workspace #js {:recursive true :force true})))))
+
+(deftest typed-edit-form-is-content-bound-to-the-proposal-artifact
+  (let [fs (js/require "node:fs")
+        workspace (.mkdtempSync fs "/tmp/mithril-typed-workspace-")
+        artifacts (.mkdtempSync fs "/tmp/mithril-typed-artifacts-")]
+    (try
+      (.writeFileSync fs (str workspace "/app.mith") "value 1\n" "utf8")
+      (exec! workspace "/usr/bin/git" "init" "-q")
+      (exec! workspace "/usr/bin/git" "add" "app.mith")
+      (exec! workspace "/usr/bin/git" "-c" "user.name=Mithril Test"
+             "-c" "user.email=mithril@example.invalid" "commit" "-qm" "base")
+      (let [profile (coding-profile workspace artifacts)
+            form-text "(mithril/edit-proposal :path \"app.mith\" :old \"value 1\" :new \"value 2\")"
+            document-digest (execution/digest (form/parse form-text))
+            patch (str "diff --git a/app.mith b/app.mith\n"
+                       "index d00491f..0cfbf08 100644\n"
+                       "--- a/app.mith\n+++ b/app.mith\n"
+                       "@@ -1 +1 @@\n-value 1\n+value 2\n")
+            effect (assoc base-effect :id "typed-propose" :run-id "sha256:typed-run"
+                          :workspace workspace :operation :llm/propose-patch
+                          :tool-profile-digest (hermes/tool-profile-digest profile))
+            result (hermes/execute-effect effect
+                                          {:profile profile
+                                           :propose-fn (fn [_]
+                                                         {:patch patch
+                                                          :typed-output
+                                                          {:form form-text
+                                                           :document-digest document-digest
+                                                           :model "test-model"
+                                                           :usage {:total_tokens 1}}})})
+            artifact-path (str artifacts "/sha256_typed-run.proposal.edn")
+            artifact (reader/read-string (.readFileSync fs artifact-path "utf8"))]
+        (is (= :completed (get-in result [:receipt :status])))
+        (is (= document-digest (:edit-document-digest artifact)))
+        (is (= "test-model" (get-in result [:audit :proposer-model])))
+        (is (= (:receipt result)
+               (:receipt (hermes/reconcile-effect effect {:profile profile}))))
+        (.writeFileSync fs artifact-path
+                        (pr-str (assoc artifact :edit-document-digest "sha256:tampered")) "utf8")
+        (is (= :mithril.hermes/proposal-integrity
+               (error-code #(hermes/reconcile-effect effect {:profile profile})))))
+      (finally
+        (.rmSync fs workspace #js {:recursive true :force true})
+        (.rmSync fs artifacts #js {:recursive true :force true})))))
+
+(deftest typed-form-cannot-claim-a-different-scratch-edit
+  (let [fs (js/require "node:fs")
+        cp (js/require "node:child_process")
+        workspace (.mkdtempSync fs "/tmp/mithril-mismatch-workspace-")
+        artifacts (.mkdtempSync fs "/tmp/mithril-mismatch-artifacts-")]
+    (try
+      (.writeFileSync fs (str workspace "/app.mith") "value 1\n" "utf8")
+      (exec! workspace "/usr/bin/git" "init" "-q")
+      (exec! workspace "/usr/bin/git" "add" "app.mith")
+      (exec! workspace "/usr/bin/git" "-c" "user.name=Mithril Test"
+             "-c" "user.email=mithril@example.invalid" "commit" "-qm" "base")
+      (let [profile (assoc (coding-profile workspace artifacts)
+                           :proposer {:program "/bin/echo" :profile "typed-mithril-v1"
+                                      :timeout-ms 5000})
+            effect (assoc base-effect :id "mismatch" :run-id "sha256:mismatch-run"
+                          :workspace workspace :operation :llm/propose-patch
+                          :tool-profile-digest (hermes/tool-profile-digest profile))
+            call (fn [program args cwd timeout-ms]
+                   (if (= program "/bin/echo")
+                     (do
+                       (.writeFileSync fs (str cwd "/app.mith") "value 2\n" "utf8")
+                       (.stringify js/JSON
+                                   (clj->js {:status "proposed" :path "app.mith"
+                                             :form "(mithril/edit-proposal :path \"app.mith\" :old \"value 1\" :new \"value 3\")"
+                                             :model "test-model" :usage {}})))
+                     (.execFileSync cp program (clj->js args)
+                                    #js {:cwd cwd :encoding "utf8" :timeout timeout-ms})))
+            result (hermes/execute-effect effect {:profile profile :exec-fn call})]
+        (is (= :failed (get-in result [:receipt :status])))
+        (is (= :mithril.hermes/typed-edit-mismatch (get-in result [:audit :error])))
+        (is (= "value 1\n" (.readFileSync fs (str workspace "/app.mith") "utf8"))))
+      (finally
+        (.rmSync fs workspace #js {:recursive true :force true})
+        (.rmSync fs artifacts #js {:recursive true :force true})))))
 
 (deftest coding-write-compile-and-test-use-a-digest-bound-catalog
   (let [fs (js/require "node:fs")

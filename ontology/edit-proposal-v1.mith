@@ -1,0 +1,40 @@
+(mithril/ontology
+  :id "https://mithril.fund/ontology/edit-proposal-v1"
+  :profile
+  ["https://www.w3.org/TR/rdf11-concepts/"
+   "https://www.w3.org/TR/owl2-profiles/#OWL_2_RL"
+   "https://www.w3.org/TR/shacl/"]
+  :graph
+  [(owl/class
+     :id "https://mithril.fund/ns/v1#EditProposal")
+   (owl/datatype-property
+     :id "https://mithril.fund/ns/v1#path"
+     :rdfs/domain "https://mithril.fund/ns/v1#EditProposal"
+     :rdfs/range "http://www.w3.org/2001/XMLSchema#string")
+   (owl/datatype-property
+     :id "https://mithril.fund/ns/v1#old"
+     :rdfs/domain "https://mithril.fund/ns/v1#EditProposal"
+     :rdfs/range "http://www.w3.org/2001/XMLSchema#string")
+   (owl/datatype-property
+     :id "https://mithril.fund/ns/v1#new"
+     :rdfs/domain "https://mithril.fund/ns/v1#EditProposal"
+     :rdfs/range "http://www.w3.org/2001/XMLSchema#string")
+   (shacl/node-shape
+     :id "https://mithril.fund/ns/v1#EditProposalShape"
+     :sh/target-class "https://mithril.fund/ns/v1#EditProposal"
+     :sh/property
+     [(shacl/property-shape
+        :sh/path "https://mithril.fund/ns/v1#path"
+        :sh/min-count 1
+        :sh/max-count 1
+        :sh/datatype "http://www.w3.org/2001/XMLSchema#string")
+      (shacl/property-shape
+        :sh/path "https://mithril.fund/ns/v1#old"
+        :sh/min-count 1
+        :sh/max-count 1
+        :sh/datatype "http://www.w3.org/2001/XMLSchema#string")
+      (shacl/property-shape
+        :sh/path "https://mithril.fund/ns/v1#new"
+        :sh/min-count 1
+        :sh/max-count 1
+        :sh/datatype "http://www.w3.org/2001/XMLSchema#string")])])
