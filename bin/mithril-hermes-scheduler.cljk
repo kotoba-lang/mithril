@@ -4,6 +4,7 @@
   (:require [cljs.reader :as reader]
             [clojure.string :as str]
             [mithril.bot :as bot]
+            [mithril.hermes :as hermes]
             [mithril.hermes-scheduler :as scheduler]))
 
 (def fs (js/require "node:fs"))
@@ -36,7 +37,8 @@
         jobs (:jobs (parse-json (text file)))
         job (first (filter #(= (:job-id contract) (str (:id %))) jobs))]
     (when-not (and job (:enabled job) (:no_agent job)
-                   (= "mithril-bpmn-adapter.sh" (:script job))
+                   (= (if (:coding? contract) "mithril-bpmn-coding-adapter.sh"
+                          "mithril-bpmn-adapter.sh") (:script job))
                    (= (js/process.cwd) (:workdir job)))
       (fail! :job-not-bound-to-adapter))
     profile-root))
@@ -55,13 +57,23 @@
            (catch :default _ (fail! :owner-pid-not-alive)))
       claim)))
 
-(defn- one-tick! [contract-path bot-path profiles-root manifest-dir state-dir]
+(defn- one-tick! [contract-path bot-path profiles-root manifest-dir state-dir tool-profile-path]
   (when-not (every? #(.isAbsolute path %)
-                    [contract-path bot-path profiles-root manifest-dir state-dir])
+                    (cond-> [contract-path bot-path profiles-root manifest-dir state-dir]
+                      tool-profile-path (conj tool-profile-path)))
     (fail! :paths-must-be-absolute))
   (let [artifact (bot/compile-text bot-path (text bot-path))
         contract (scheduler/compile-document
                   contract-path (js->clj (js/JSON.parse (text contract-path))) artifact)
+        _ (when-not (= (:coding? contract) (boolean tool-profile-path))
+            (fail! :tool-profile-mode-mismatch))
+        _ (when tool-profile-path
+            (let [profile (parse-json (text tool-profile-path))]
+              (when-not (and (= (:tool-profile-digest contract)
+                                (hermes/tool-profile-digest profile))
+                             (= (get-in contract [:task "workspace"])
+                                (:workspace profile)))
+                (fail! :tool-profile-binding-mismatch))))
         _ (verified-fleet! profiles-root manifest-dir contract)
         profile-root (live-job! profiles-root contract)
         claim (running-claim! profile-root contract)
@@ -69,7 +81,10 @@
         prefix (.join path state-dir execution-id)
         attempt-path (str prefix ".attempt.json")
         task-path (str prefix ".task.json")
-        state-path (str prefix ".edn")
+        state-path (if (:coding? contract)
+                     (.join path state-dir (str (:profile-name contract) "-"
+                                                (:job-id contract) ".session.edn"))
+                     (str prefix ".edn"))
         receipt-path (str prefix ".receipt.json")]
     (.mkdirSync fs state-dir #js {:recursive true})
     (when (.existsSync fs receipt-path)
@@ -81,34 +96,60 @@
         (js/process.exit 0)))
     ;; A crash after the effect but before its receipt is uncertain. Never
     ;; automatically repeat that occurrence, even when the host effect is read-only.
-    (when (or (.existsSync fs attempt-path) (.existsSync fs state-path))
+    (when (or (.existsSync fs attempt-path)
+              (and (not (:coding? contract)) (.existsSync fs state-path)))
       (fail! :uncertain-prior-attempt))
-    (let [task (assoc (:task contract) "id"
-                      (str (get-in contract [:task "id"]) "/" execution-id))]
+    (when (:coding? contract)
+      (let [previous (->> (.readdirSync fs state-dir)
+                          (filter #(str/ends-with? % ".attempt.json"))
+                          (map #(.join path state-dir %))
+                          (filter #(let [prior (parse-json (text %))]
+                                     (and (= (:job-id contract) (:jobId prior))
+                                          (= (:profile-name contract) (:profileName prior))))))]
+        (when (some #(not (.existsSync fs
+                                      (str/replace % #"\.attempt\.json$" ".receipt.json")))
+                    previous)
+          (fail! :unreconciled-prior-occurrence))))
+    (let [task (if (:coding? contract) (:task contract)
+                   (assoc (:task contract) "id"
+                          (str (get-in contract [:task "id"]) "/" execution-id)))
+          prior (when (.existsSync fs state-path) (reader/read-string (text state-path)))
+          before-step (or (:step prior) 0)
+          before-receipts (count (:receipts prior))]
+      (when (:awaiting prior) (fail! :effect-in-flight))
+      (when (and prior (not= :running (:status prior)))
+        (fail! :session-terminal))
       (.writeFileSync fs attempt-path
-                      (str (json {:format scheduler/receipt-format
+                      (str (json {:format (if (:coding? contract)
+                                            scheduler/coding-receipt-format
+                                            scheduler/receipt-format)
                                   :status "attempted" :executionId execution-id
+                                  :jobId (:job-id contract)
+                                  :profileName (:profile-name contract)
                                   :contractDigest (:digest contract)}) "\n")
                       #js {:encoding "utf8" :flag "wx"})
       (.writeFileSync fs task-path (str (json task) "\n")
                       #js {:encoding "utf8" :flag "wx"})
-      (let [stdout (run! "kbb" ["--backend" "sci" "bin/mithril-hermes.cljk" "tick"
-                                bot-path task-path state-path (:owner contract)
-                                (str/join "," (sort (:effects contract))) "execute"])
+      (let [stdout (run! "kbb" (cond-> ["--backend" "sci" "bin/mithril-hermes.cljk" "tick"
+                                         bot-path task-path state-path (:owner contract)
+                                         (str/join "," (sort (:effects contract))) "execute"]
+                                  tool-profile-path (conj tool-profile-path)))
             result (parse-json (last (remove str/blank? (str/split-lines stdout))))
             state (reader/read-string (text state-path))
-            receipt (first (:receipts state))
+            receipt (last (:receipts state))
             action (get bot/action-by-label (:action result))
             effect (some-> action :effect)
             effect-name (when effect (str (namespace effect) "/" (name effect)))]
         (when-not (and (= "completed" (:status result))
-                       (= 1 (:step state)) (= 1 (count (:receipts state)))
+                       (= (inc before-step) (:step state))
+                       (= (inc before-receipts) (count (:receipts state)))
                        (nil? (:awaiting state)) (:bpmn state)
                        (= (:bot-profile-digest contract) (:profile-digest state))
                        (= :completed (:status receipt))
                        (contains? (:effects contract) effect-name))
           (fail! :tick-or-receipt-mismatch))
-        (let [record {:format scheduler/receipt-format
+        (let [record {:format (if (:coding? contract)
+                                scheduler/coding-receipt-format scheduler/receipt-format)
                       :status "completed" :executionId execution-id
                       :source "builtin" :jobId (:job-id contract)
                       :scheduledInstant (:scheduled_instant claim)
@@ -128,10 +169,10 @@
 (let [[command contract-path bot-path profiles-root manifest-dir state-dir & extra]
       *command-line-args*]
   (if-not (and (= "tick" command) contract-path bot-path profiles-root
-               manifest-dir state-dir (empty? extra))
-    (do (println "usage: mithril-hermes-scheduler tick <contract.mith> <bot.mith> <profiles-root> <manifest-dir> <state-dir>")
+               manifest-dir state-dir (<= (count extra) 1))
+    (do (println "usage: mithril-hermes-scheduler tick <contract.mith> <bot.mith> <profiles-root> <manifest-dir> <state-dir> [coding-tools.json]")
         (js/process.exit 2))
-    (try (one-tick! contract-path bot-path profiles-root manifest-dir state-dir)
+    (try (one-tick! contract-path bot-path profiles-root manifest-dir state-dir (first extra))
          (catch :default error
            (println (str "REFUSE\t" (or (some-> error ex-data :reason name)
                                         (some-> error ex-data :mithril/error name)

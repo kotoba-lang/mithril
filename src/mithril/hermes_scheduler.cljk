@@ -1,5 +1,5 @@
 (ns mithril.hermes-scheduler
-  "Explicit, read-only Hermes cron to Mithril BPMN admission contract.
+  "Explicit Hermes cron to Mithril BPMN admission contracts.
 
   V1 deliberately excludes write effects: a scheduler retry after a lost host
   receipt cannot safely repeat a non-idempotent write. Each cron occurrence may
@@ -10,7 +10,12 @@
 
 (def contract-format "https://mithril.fund/contract/hermes-bpmn-scheduler-v1")
 (def receipt-format "https://mithril.fund/receipt/hermes-bpmn-scheduler-v1")
+(def coding-contract-format "https://mithril.fund/contract/hermes-bpmn-scheduler-v2")
+(def coding-receipt-format "https://mithril.fund/receipt/hermes-bpmn-scheduler-v2")
 (def readonly-effects #{"workspace/read" "git/status" "agent/stop"})
+(def coding-effects (into readonly-effects
+                          #{"llm/propose-patch" "workspace/apply-patch"
+                            "workspace/revert-patch" "amu/compile" "test/run"}))
 
 (def ^:private source-keys
   #{"@context" "@id" "@type" "ontology" "profileName" "jobId"
@@ -25,12 +30,18 @@
 
 (defn compile-document [path doc bot-artifact]
   (when-not (compiler/source-path? path) (fail! :invalid-extension))
-  (when-not (and (map? doc) (= source-keys (set (keys doc))))
+  (let [coding? (= "HermesBpmnCodingSchedulerContract" (get doc "@type"))]
+  (when-not (and (map? doc)
+                 (= (cond-> source-keys coding? (conj "toolProfileDigest"))
+                    (set (keys doc))))
     (fail! :invalid-fields))
   (when-not (= compiler/context-uri (get doc "@context"))
     (fail! :unpinned-context))
-  (when-not (= "HermesBpmnSchedulerContract" (get doc "@type"))
+  (when-not (contains? #{"HermesBpmnSchedulerContract"
+                         "HermesBpmnCodingSchedulerContract"} (get doc "@type"))
     (fail! :invalid-type))
+  (when (and coding? (not (digest? (get doc "toolProfileDigest"))))
+    (fail! :invalid-tool-profile-digest))
   (when-not (and (string? (get doc "@id"))
                  (str/starts-with? (get doc "@id") "https://mithril.fund/"))
     (fail! :invalid-identity))
@@ -51,26 +62,31 @@
                               (str effect)))
                           (get-in bot-artifact [:bot-ir :policy :effects])))]
     (when-not (and (map? task)
-                   (= #{"id" "workspace" "goal"} (set (keys task)))
+                   (= (cond-> #{"id" "workspace" "goal"}
+                        coding? (conj "tool-profile-digest")) (set (keys task)))
                    (every? #(and (string? %) (not (str/blank? %))) (vals task))
                    (str/starts-with? (get task "workspace") "/")
                    (vector? grants)
                    (= (count grants) (count effects))
                    (= (set grants) effects)
-                   (every? readonly-effects grants)
-                   (every? readonly-effects effects)
+                   (every? (if coding? coding-effects readonly-effects) grants)
+                   (every? (if coding? coding-effects readonly-effects) effects)
+                   (or (not coding?) (= (get doc "toolProfileDigest")
+                                        (get task "tool-profile-digest")))
                    (string? (get doc "owner"))
                    (not (str/blank? (get doc "owner"))))
       (fail! :effect-or-task-denied))
-    {:format contract-format
+    {:format (if coding? coding-contract-format contract-format)
+     :coding? coding?
      :digest (execution/digest doc)
      :profile-name (get doc "profileName")
      :job-id (get doc "jobId")
      :profile-digest (get doc "profileDigest")
      :bot-profile-digest (:graph-digest bot-artifact)
+     :tool-profile-digest (when coding? (get doc "toolProfileDigest"))
      :task task :owner (get doc "owner")
      :effects effects
-     :grants (set (map keyword grants))}))
+     :grants (set (map keyword grants))})))
 
 (defn admit-claim
   "Require exactly one fresh, scheduler-originated running occurrence."

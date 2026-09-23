@@ -198,6 +198,29 @@ compile, test, reset, and effects with ambiguous host state remain held. This
 is the underlying write-recovery primitive, **not** authorization to add those
 effects to the v1 scheduler contract or to auto-retry an uncertain occurrence.
 
+### BPMN coding scheduler contract (v2)
+
+The opt-in `HermesBpmnCodingSchedulerContract` adds an exact
+`toolProfileDigest` binding to the v1 job, compiled bot, owner, task, and
+effect grants. Its `task` includes the same `tool-profile-digest`; the adapter
+checks both against the validated coding tool profile and requires its workspace
+to equal the task workspace. V1 remains read-only. Install
+[`hermes-bpmn-coding-adapter.sh`](scripts/hermes-bpmn-coding-adapter.sh) as
+`mithril-bpmn-coding-adapter.sh` in the Hermes profile, and supply the closed
+JSON-LD contract at `examples/hermes-coding-scheduler.mith` and coding tool
+profile at `examples/hermes-coding-tools.json` in the job workdir. These files
+must be bound to the actual job and workspace; the adapter does not generate
+authority from a prompt.
+
+V2 keeps one task and a profile/job-keyed BPMN state file across cron
+occurrences, including contract revisions, while writing
+separate attempted/completed receipts for each scheduler execution. One
+`source=builtin` running claim can advance exactly one BPMN service task.
+Before execution it rejects a prior unreceipted attempt, an in-flight effect,
+or a terminal state. A lost host receipt is held for explicit reconciliation,
+not retried by a later cron tick. This is a bounded scheduler execution
+contract, not a claim that arbitrary coding jobs are now reliable.
+
 ## Published Mithril code and libraries
 
 The repository now contains source authored in Mithril itself:
