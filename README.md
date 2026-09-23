@@ -223,7 +223,7 @@ not retried by a later cron tick. This is a bounded scheduler execution
 contract, not a claim that arbitrary coding jobs are now reliable.
 
 An opt-in `"checkpointMode":"ipld"` coding contract additionally records
-each post-tick state as a v3 ontology-validated DAG-CBOR block. The previous
+each post-tick state as a v4 ontology-validated DAG-CBOR block. The previous
 state must equal the verified CID head before the next effect; each successful
 scheduler receipt includes `stateCid` and `semanticGraphDigest`. The local ref
 update is serialized and compare-and-swap checked on one filesystem, not a
@@ -287,6 +287,20 @@ verified CID head and the verifier reported a matching projection. A separate
 intentionally misbound job refused execution and then refused continuation
 without its prior receipt. This remains a fixed-proposer, single-host canary,
 not evidence of Jev-authored coding or fleet-wide parity.
+
+On 2026-09-24, isolated Hermes builtin job `929467bfa38b` exercised the
+v4 RDF-Dataset writer through all seven coding effects. The primary verifier
+accepted 14 linked request/result blocks and two later no-effect terminal
+deliveries at final CID
+`bafyreifwpidqiq6nor7distcg6ybh6r67tizo2uvo3gy2o6puuwxezcely`.
+All 14 blocks contained a compact `stateDataset`, with neither `stateEdn` nor
+`stateNode`; the `.mith` app returned HTTP 200 with the edited body. The
+second terminal delivery reconstructed a deliberately withheld EDN projection
+from the CID head. In one local final-state measurement, v4 used 92,031 bytes
+versus 37,009 for v3 on the same state (2.49x); an earlier single v4 block
+write/read measured 0.7/1.1 seconds. These are individual measurements, not
+fleet latency or cost qualification. The proposer was fixed, not Jev-authored;
+`amu/compile` invoked Mithril `compile-web`, not Amu.
 
 For a fresh coding run, the read-only reconciliation command compares every
 Hermes `source=builtin` execution with its scheduler receipt, the exact BPMN
@@ -355,21 +369,27 @@ kbb --backend sci bin/mithril-checkpoint-ipld.cljk show /absolute/private/store 
 execution-state EDN. `merge` accepts only additive facts on two branches of
 the same run; divergent effects, receipts, workflow tokens, or deletions are
 rejected. This is an immutable, content-addressed branch experiment, not a
-general Unison merge or a distributed store. It does not yet make the RDF
-graph the execution state of record, sync refs between machines, provide
-crash-durable fsync, or establish fleet-wide Hermes profile equivalence.
+general Unison merge or a distributed store. It does not sync refs between
+machines, provide crash-durable fsync, or establish fleet-wide Hermes profile
+equivalence.
 
-New checkpoint blocks use v3. The complete executable state is a canonical,
-typed IPLD `stateNode`, not an EDN string. The reader still accepts v1/v2
-blocks and checks their original identity; it does not rewrite them as v3.
-Alongside the legacy `graphDigest`, v2 and v3 store a separate
+New checkpoint blocks use v4. Their complete executable state is a canonical
+RDF Dataset stored as a compact IPLD `stateDataset` (term dictionary plus
+indexed triples). The reader expands its quads, reconstructs the state from
+them, and rejects noncanonical or orphaned graph nodes; it does not read an
+EDN string or v3 typed tree to recover v4. The same graph can be projected as
+JSON-LD. The reader continues to verify v1/v2/v3 blocks under their original
+identities rather than rewriting history. Alongside the legacy `graphDigest`,
+v2 through v4 store a separate
 `semanticGraphDigest` computed from the
 [`bot-checkpoint` context](resources/context-bot-checkpoint-v1.jsonld) with
 absolute predicate IRIs and an explicit RDF field-loss check. The CID binds
 the ontology source and `.mith` semantic projection. Existing v1 blocks remain
 readable but do not acquire the stronger semantic digest retroactively.
-The RDF graph remains a checked, lossy semantic summary; the typed IPLD node,
-not RDF alone, reconstructs the complete runtime state. A legacy `bot-run-v1`
+The domain-level OWL/SHACL graph remains a checked, lossy summary; v4's
+separate structural RDF Dataset carries the complete runtime state, but does
+not make every nested field independently queryable as a domain predicate or
+SHACL-validated property. A legacy `bot-run-v1`
 state may omit `task-digest`; the checkpoint derives it
 from the preserved task value, while a mismatching declared digest or a
 non-legacy omission is rejected.

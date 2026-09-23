@@ -1,0 +1,312 @@
+(ns mithril.state-rdf
+  "Lossless RDF Dataset view of a complete executable state. The JSON-LD
+  document is only an interchange form: decoding walks expanded RDF quads,
+  then checks that they reproduce the canonical typed state graph."
+  (:require [json-ld-api.core :as jsonld]
+            [json-ld-api.to-rdf :as to-rdf]
+            [mithril.execution :as execution]
+            [mithril.state-node :as state-node]
+            [rdf-canon.core :as rdf-canon]))
+
+(def base "https://mithril.fund/ns/state-graph/v1#")
+(def root-base "https://mithril.fund/state-graph/")
+(def rdf-type "http://www.w3.org/1999/02/22-rdf-syntax-ns#type")
+(def xsd "http://www.w3.org/2001/XMLSchema#")
+(def context
+  {"@context"
+   {"RootState" (str base "RootState")
+    "MapNode" (str base "MapNode")
+    "MapEntry" (str base "MapEntry")
+    "ListNode" (str base "ListNode")
+    "SetNode" (str base "SetNode")
+    "ListItem" (str base "ListItem")
+    "KeywordNode" (str base "KeywordNode")
+    "StringNode" (str base "StringNode")
+    "IntegerNode" (str base "IntegerNode")
+    "BooleanNode" (str base "BooleanNode")
+    "NullNode" (str base "NullNode")
+    "entry" {"@id" (str base "entry") "@type" "@id"}
+    "item" {"@id" (str base "item") "@type" "@id"}
+    "key" {"@id" (str base "key") "@type" "@id"}
+    "value" {"@id" (str base "value") "@type" "@id"}
+    "index" {"@id" (str base "index") "@type" (str xsd "integer")}
+    "text" (str base "text")
+    "integer" {"@id" (str base "integer") "@type" (str xsd "integer")}
+    "boolean" {"@id" (str base "boolean") "@type" (str xsd "boolean")}}})
+
+(defn- refuse! [reason]
+  (throw (ex-info "Mithril RDF state graph refused"
+                  {:mithril/error :mithril.state-rdf/refused :reason reason})))
+
+(defn- link [id] {"@id" id})
+
+(declare nodes)
+
+(defn- nodes [id value root?]
+  (cond
+    (and (map? value) (contains? value "$map"))
+    (let [entries (get value "$map")
+          own {"@id" id "@type" (if root? "RootState" "MapNode")
+               "entry" (mapv (fn [index _] (link (str id "/e" index)))
+                             (range (count entries)) entries)}]
+      (into [own]
+            (mapcat (fn [index [key item]]
+                      (let [entry-id (str id "/e" index)
+                            key-id (str entry-id "/k")
+                            value-id (str entry-id "/v")]
+                        (concat [{"@id" entry-id "@type" "MapEntry"
+                                  "index" index "key" (link key-id)
+                                  "value" (link value-id)}]
+                                (nodes key-id key false)
+                                (nodes value-id item false))))
+                    (range (count entries)) entries)))
+
+    (and (map? value) (contains? value "$set"))
+    (let [items (get value "$set")]
+      (into [{"@id" id "@type" "SetNode"
+              "item" (mapv (fn [index _] (link (str id "/i" index)))
+                           (range (count items)) items)}]
+            (mapcat (fn [index item]
+                      (let [item-id (str id "/i" index)
+                            value-id (str item-id "/v")]
+                        (concat [{"@id" item-id "@type" "ListItem"
+                                  "index" index "value" (link value-id)}]
+                                (nodes value-id item false))))
+                    (range (count items)) items)))
+
+    (and (map? value) (contains? value "$keyword"))
+    [{"@id" id "@type" "KeywordNode" "text" (get value "$keyword")}]
+
+    (vector? value)
+    (let [items value]
+      (into [{"@id" id "@type" "ListNode"
+              "item" (mapv (fn [index _] (link (str id "/i" index)))
+                           (range (count items)) items)}]
+            (mapcat (fn [index item]
+                      (let [item-id (str id "/i" index)
+                            value-id (str item-id "/v")]
+                        (concat [{"@id" item-id "@type" "ListItem"
+                                  "index" index "value" (link value-id)}]
+                                (nodes value-id item false))))
+                    (range (count items)) items)))
+
+    (nil? value) [{"@id" id "@type" "NullNode"}]
+    (string? value) [{"@id" id "@type" "StringNode" "text" value}]
+    (boolean? value) [{"@id" id "@type" "BooleanNode" "boolean" value}]
+    (integer? value) [{"@id" id "@type" "IntegerNode" "integer" value}]
+    :else (refuse! :unsupported-value)))
+
+(defn document [state]
+  (let [encoded (state-node/encode-value state)
+        digest (execution/digest state)]
+    (when-not (and (map? state) (map? encoded))
+      (refuse! :invalid-root))
+    {"@context" (get context "@context")
+     "@graph" (nodes (str root-base (subs digest 7)) encoded true)}))
+
+(defn quads [document]
+  (to-rdf/to-rdf (jsonld/expand document)))
+
+(defn graph-digest [document]
+  (str "sha256:" (rdf-canon/canonical-hash (quads document))))
+
+(declare iri! decode-quads!)
+
+(defn- root-id! [dataset]
+  (let [roots (filterv #(and (= rdf-type (get-in % [:predicate :value]))
+                             (= (str base "RootState")
+                                (get-in % [:object :value]))) dataset)]
+    (when-not (= 1 (count roots)) (refuse! :root-cardinality))
+    (iri! (:subject (first roots)))))
+
+(defn- packed-term [root term]
+  (case (:type term)
+    :iri (let [value (:value term)]
+           (if (or (= root value)
+                   (.startsWith value (str root "/")))
+             ["r" (subs value (count root))]
+             ["i" value]))
+    :literal (if (:language term)
+               (refuse! :unsupported-language)
+               ["l" (:value term) (or (:datatype term) "")])
+    (refuse! :unsupported-rdf-term)))
+
+(defn pack-quads [dataset]
+  (let [root (root-id! dataset)
+        statements (mapv (fn [{:keys [subject predicate object graph]}]
+                           (when graph (refuse! :named-graph-not-supported))
+                           [(packed-term root subject)
+                            (packed-term root predicate)
+                            (packed-term root object)]) dataset)
+        terms (->> statements (mapcat identity) distinct (sort-by pr-str) vec)
+        indexes (zipmap terms (range))
+        triples (->> statements
+                     (mapv (fn [statement] (mapv indexes statement)))
+                     (sort-by pr-str)
+                     vec)]
+    {"root" root "terms" terms "triples" triples}))
+
+(defn- unpack-term! [root value]
+  (when-not (vector? value) (refuse! :invalid-packed-term))
+  (case (first value)
+    "r" (do (when-not (and (= 2 (count value)) (string? (second value))
+                            (or (= "" (second value))
+                                (.startsWith (second value) "/")))
+              (refuse! :invalid-relative-iri))
+            {:type :iri :value (str root (second value))})
+    "i" (do (when-not (and (= 2 (count value)) (string? (second value)))
+              (refuse! :invalid-iri))
+            {:type :iri :value (second value)})
+    "l" (do (when-not (and (= 3 (count value))
+                            (string? (second value)) (string? (nth value 2)))
+              (refuse! :invalid-literal))
+            (cond-> {:type :literal :value (second value)}
+              (not= "" (nth value 2)) (assoc :datatype (nth value 2))))
+    (refuse! :invalid-packed-term)))
+
+(defn unpack-quads! [packed]
+  (when-not (and (map? packed)
+                 (= #{"root" "terms" "triples"} (set (keys packed)))
+                 (string? (get packed "root"))
+                 (vector? (get packed "terms"))
+                 (vector? (get packed "triples")))
+    (refuse! :invalid-packed-dataset))
+  (let [root (get packed "root")
+        terms (mapv #(unpack-term! root %) (get packed "terms"))
+        dataset (mapv (fn [triple]
+                        (when-not (and (vector? triple) (= 3 (count triple))
+                                       (every? #(and (integer? %) (<= 0 %)
+                                                      (< % (count terms))) triple))
+                          (refuse! :invalid-packed-triple))
+                        {:subject (nth terms (nth triple 0))
+                         :predicate (nth terms (nth triple 1))
+                         :object (nth terms (nth triple 2))})
+                      (get packed "triples"))]
+    (when-not (= packed (pack-quads dataset))
+      (refuse! :noncanonical-packed-dataset))
+    dataset))
+
+(defn decode-packed! [packed]
+  (let [dataset (unpack-quads! packed)
+        state (decode-quads! dataset)]
+    (when-not (= packed (pack-quads (quads (document state))))
+      (refuse! :noncanonical-packed-state))
+    state))
+
+(defn- iri! [term]
+  (when-not (= :iri (:type term)) (refuse! :expected-iri))
+  (:value term))
+
+(defn- literal! [term datatype]
+  (when-not (and (= :literal (:type term))
+                 (= datatype (or (:datatype term) (str xsd "string"))))
+    (refuse! :expected-literal))
+  (:value term))
+
+(defn- objects [graph id predicate]
+  (get-in graph [id predicate] []))
+
+(defn- one! [graph id predicate]
+  (let [values (objects graph id predicate)]
+    (when-not (= 1 (count values)) (refuse! :cardinality))
+    (first values)))
+
+(defn- indexed! [graph ids]
+  (let [pairs (mapv (fn [id]
+                      (let [lexical (literal! (one! graph id (str base "index"))
+                                              (str xsd "integer"))
+                            index (js/Number lexical)]
+                        (when-not (and (js/Number.isSafeInteger index)
+                                       (<= 0 index) (= lexical (str index)))
+                          (refuse! :invalid-index))
+                        [index id])) ids)
+        sorted (vec (sort-by first pairs))]
+    (when-not (= (mapv first sorted) (vec (range (count sorted))))
+      (refuse! :noncontiguous-index))
+    (mapv second sorted)))
+
+(defn- quad-graph [dataset]
+  (reduce (fn [graph {:keys [subject predicate object]}]
+            (let [id (iri! subject)
+                  property (iri! predicate)]
+              (update-in graph [id property] (fnil conj []) object)))
+          {} dataset))
+
+(declare decode-node!)
+
+(defn- decode-node! [graph visited id]
+  (when (contains? @visited id) (refuse! :shared-or-cyclic-node))
+  (swap! visited conj id)
+  (let [type (iri! (one! graph id rdf-type))]
+    (cond
+      (contains? #{(str base "RootState") (str base "MapNode")} type)
+      {"$map"
+       (mapv (fn [entry-id]
+               (when (contains? @visited entry-id) (refuse! :shared-or-cyclic-node))
+               (swap! visited conj entry-id)
+               (when-not (= (str base "MapEntry")
+                            (iri! (one! graph entry-id rdf-type)))
+                 (refuse! :invalid-entry))
+               [(decode-node! graph visited
+                              (iri! (one! graph entry-id (str base "key"))))
+                (decode-node! graph visited
+                              (iri! (one! graph entry-id (str base "value"))))])
+             (indexed! graph (mapv iri! (objects graph id (str base "entry")))))}
+
+      (contains? #{(str base "ListNode") (str base "SetNode")} type)
+      (let [items (mapv (fn [item-id]
+                          (when (contains? @visited item-id)
+                            (refuse! :shared-or-cyclic-node))
+                          (swap! visited conj item-id)
+                          (when-not (= (str base "ListItem")
+                                       (iri! (one! graph item-id rdf-type)))
+                            (refuse! :invalid-item))
+                          (decode-node! graph visited
+                                        (iri! (one! graph item-id
+                                                    (str base "value")))))
+                        (indexed! graph (mapv iri! (objects graph id (str base "item")))))]
+        (if (= type (str base "SetNode")) {"$set" items} items))
+
+      (= type (str base "KeywordNode"))
+      {"$keyword" (literal! (one! graph id (str base "text")) (str xsd "string"))}
+      (= type (str base "StringNode"))
+      (literal! (one! graph id (str base "text")) (str xsd "string"))
+      (= type (str base "IntegerNode"))
+      (let [lexical (literal! (one! graph id (str base "integer"))
+                              (str xsd "integer"))
+            value (js/Number lexical)]
+        (when-not (and (js/Number.isSafeInteger value) (= lexical (str value)))
+          (refuse! :invalid-integer))
+        value)
+      (= type (str base "BooleanNode"))
+      (let [value (literal! (one! graph id (str base "boolean"))
+                            (str xsd "boolean"))]
+        (case value "true" true "false" false (refuse! :invalid-boolean)))
+      (= type (str base "NullNode")) nil
+      :else (refuse! :unknown-node-type))))
+
+(defn decode-quads! [dataset]
+  (let [graph (quad-graph dataset)
+        roots (filterv (fn [[_ predicates]]
+                         (= [(str base "RootState")]
+                            (mapv iri! (get predicates rdf-type [])))) graph)]
+    (when-not (= 1 (count roots)) (refuse! :root-cardinality))
+    (let [visited (atom #{})
+          encoded (decode-node! graph visited (ffirst roots))
+          state (state-node/decode-canonical! encoded)
+          expected (quads (document state))]
+      (when-not (and (= @visited (set (keys graph)))
+                     (= (count dataset) (count (set dataset)))
+                     (= (set dataset) (set expected)))
+        (refuse! :noncanonical-rdf-state))
+      state)))
+
+(defn decode-document! [value]
+  (when-not (and (map? value)
+                 (= (get context "@context") (get value "@context"))
+                 (vector? (get value "@graph")))
+    (refuse! :invalid-jsonld-context))
+  (let [state (decode-quads! (quads value))]
+    (when-not (= value (document state))
+      (refuse! :noncanonical-jsonld-state))
+    state))
