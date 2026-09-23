@@ -271,7 +271,9 @@
                                            ("semantic" "ipld") "semantic-execute"
                                            "ipld-primary" "ipld-execute"
                                            "execute")]
-                                  tool-profile-path (conj tool-profile-path)))
+                                  tool-profile-path (conj tool-profile-path)
+                                  (= "jev" (:decision-mode contract))
+                                  (conj "jev")))
             result (parse-json (last (remove str/blank? (str/split-lines stdout))))
             primary-after (when primary?
                             (ipld-session/load! ipld-local ipld-schema state-path))

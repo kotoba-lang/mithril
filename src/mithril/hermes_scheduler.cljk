@@ -41,10 +41,12 @@
 (defn compile-document [path doc bot-artifact]
   (when-not (compiler/source-path? path) (fail! :invalid-extension))
   (let [coding? (= "HermesBpmnCodingSchedulerContract" (get doc "@type"))
-        keys* (cond-> source-keys coding? (conj "toolProfileDigest"))]
+        keys* (cond-> source-keys coding? (conj "toolProfileDigest"))
+        allowed-fields (cond-> #{keys* (conj keys* "checkpointMode")}
+                         coding? (conj (conj keys* "decisionMode")
+                                       (conj keys* "checkpointMode" "decisionMode")))]
   (when-not (and (map? doc)
-                 (contains? #{keys* (conj keys* "checkpointMode")}
-                            (set (keys doc))))
+                 (contains? allowed-fields (set (keys doc))))
     (fail! :invalid-fields))
   (when-not (and (contains? #{nil "legacy" "semantic" "ipld" "ipld-primary"}
                              (get doc "checkpointMode"))
@@ -57,6 +59,13 @@
     (fail! :invalid-type))
   (when (and coding? (not (digest? (get doc "toolProfileDigest"))))
     (fail! :invalid-tool-profile-digest))
+  (when (and coding?
+             (not (contains? #{nil "deterministic" "jev"}
+                            (get doc "decisionMode"))))
+    (fail! :invalid-decision-mode))
+  (when (and (= "jev" (get doc "decisionMode"))
+             (not= "ipld-primary" (get doc "checkpointMode")))
+    (fail! :jev-requires-primary-checkpoint))
   (when-not (and (string? (get doc "@id"))
                  (str/starts-with? (get doc "@id") "https://mithril.fund/"))
     (fail! :invalid-identity))
@@ -99,6 +108,8 @@
      :profile-digest (get doc "profileDigest")
      :bot-profile-digest (:graph-digest bot-artifact)
      :tool-profile-digest (when coding? (get doc "toolProfileDigest"))
+     :decision-mode (if coding? (or (get doc "decisionMode") "deterministic")
+                        "jev")
      :checkpoint-mode (or (get doc "checkpointMode") "legacy")
      :task task :owner (get doc "owner")
      :effects effects

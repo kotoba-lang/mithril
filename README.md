@@ -235,6 +235,25 @@ V2 keeps one task and a profile/job-keyed BPMN state file across cron
 occurrences, including contract revisions, while writing
 separate attempted/completed receipts for each scheduler execution. One
 `source=builtin` running claim can advance exactly one BPMN service task.
+Coding keeps its deterministic selector by default. A coding contract may
+explicitly set `"decisionMode":"jev"` only with
+`"checkpointMode":"ipld-primary"`: when BPMN exposes multiple admitted
+actions, OpenRouter Jev chooses one typed action ID from the ontology-checked
+state. The Governor still checks capabilities, and the v2 decision output is
+committed to the CID chain before the host effect. A singleton action stays
+deterministic. This option does not let Jev generate a code patch; the separate
+proposer and tool profile remain responsible for that effect.
+In an isolated 2026-09-24 builtin coding occurrence, Jev selected
+`workspace-inspect` from three BPMN-admitted actions. The scheduler executed
+`workspace/read`; independent primary verification matched one Hermes
+execution, the Jev v2 decision, host receipt, and three CID blocks. A second
+multi-occurrence canary reached `held` when Jev's next choice fell below the
+ontology confidence floor. The held transition is effect-free and now returns
+its CID; independent verification matched two builtin executions, one host
+effect, one held delivery, and four causal blocks. The failed pre-fix
+occurrence remains in its isolated evidence directory and was not replayed.
+Neither canary proves Jev-selected patch proposal/write, an entire coding
+workflow, or fleet-wide Hermes parity.
 Before execution it rejects a prior unreceipted attempt, an in-flight effect,
 or a terminal state. A lost host receipt is held for explicit reconciliation,
 not retried by a later cron tick. This is a bounded scheduler execution

@@ -16,7 +16,7 @@
 (def cp (js/require "node:child_process"))
 
 (defn- usage! []
-  (println "usage: mithril-hermes tick <profile.mith> <task.json> <state.edn> <owner> <grants.csv> <shadow|execute|semantic-execute|ipld-execute> [coding-tools.json]")
+  (println "usage: mithril-hermes tick <profile.mith> <task.json> <state.edn> <owner> <grants.csv> <shadow|execute|semantic-execute|ipld-execute> [coding-tools.json] [jev]")
   (println "       mithril-hermes migrate <profile.mith> <task.json> <state.edn> <owner>")
   (println "       mithril-hermes semantic-import <profile.mith> <task.json> <state.edn> <owner>")
   (println "       mithril-hermes semantic-restore <state.edn>")
@@ -219,18 +219,19 @@
                 :model {:kind :deterministic/ontology-workflow}}
      :audit {:source "deterministic-ontology-workflow"}}))
 
-(defn- decide! [state owner now coding?]
+(defn- decide! [state owner now coding? decision-mode]
   (let [actions (bot/available-actions state)]
     (cond
       (empty? actions)
       (js/Promise.reject
        (ex-info "no action is available" {:mithril/error :mithril.hermes/no-action}))
 
-      coding?
+      (and coding? (not= "jev" decision-mode))
       (js/Promise.resolve (deterministic-coding state))
 
       (= 1 (count actions))
-      (js/Promise.resolve (deterministic-stop state))
+      (js/Promise.resolve (if coding? (deterministic-coding state)
+                              (deterministic-stop state)))
 
       :else
       (let [plan (bot/prepare-request state owner (inc now))]
@@ -404,7 +405,8 @@
         (catch :default error (refuse! error))
         (finally (release-lock! lock))))))
 
-(let [[command profile-path task-path state-path owner grants-csv mode tool-profile-path & extra]
+(let [[command profile-path task-path state-path owner grants-csv mode tool-profile-path
+       decision-mode & extra]
       *command-line-args*]
   (cond
     (= "profile-digest" command)
@@ -443,7 +445,11 @@
 
     :else
     (if-not (and (= "tick" command) profile-path task-path state-path owner grants-csv
-                 (contains? #{"shadow" "execute" "semantic-execute" "ipld-execute"} mode) (empty? extra))
+                 (contains? #{"shadow" "execute" "semantic-execute" "ipld-execute"} mode)
+                 (empty? extra)
+                 (or (nil? decision-mode)
+                     (and (= "jev" decision-mode) tool-profile-path
+                          (= "ipld-execute" mode))))
     (usage!)
     (let [lock (try (acquire-lock! state-path) (catch :default error (refuse! error) nil))]
       (when lock
@@ -482,7 +488,8 @@
                               primary? (ipld-session/save! store schema state-path prior state)
                               :else (do (write-state! state-path state) nil)))
                 decision-baseline
-                (when (and primary? (nil? previous) (nil? tool-profile)
+                (when (and primary? (nil? previous)
+                           (or (nil? tool-profile) (= "jev" decision-mode))
                            (> (count (bot/available-actions state)) 1))
                   (save! previous state))]
             (when (and (not= :terminal (:disposition run)) (:awaiting state))
@@ -503,22 +510,25 @@
                                    :run-status (:status state)}
                             primary? (assoc :state-cid (:stateCid previous)))))
                 (release-lock! lock))
-              (-> (decide! state owner now (boolean tool-profile))
+              (-> (decide! state owner now (boolean tool-profile) decision-mode)
                 (.then
                  (fn [{:keys [admitted held reason audit model-result]}]
                    (if held
-                     (let [shadow? (= "shadow" mode)]
-                       (when-not shadow?
-                         (save! (or decision-baseline previous) held))
+                     (let [shadow? (= "shadow" mode)
+                           committed (when-not shadow?
+                                       (save! (or decision-baseline previous) held))]
                        (append-audit! state-path
                                       {:at (.toISOString (js/Date.))
                                        :mode mode :status (if shadow? :shadow-refused :held)
                                        :run-id (:run-id held) :step (:step held)
                                        :reason reason :model audit})
-                       (println (json-line {:status (if shadow? :shadow-refused :held)
-                                            :reason reason
-                                            :run-id (:run-id held)
-                                            :step (:step held)})))
+                       (println (json-line
+                                 (cond-> {:status (if shadow? :shadow-refused :held)
+                                          :reason reason
+                                          :run-id (:run-id held)
+                                          :step (:step held)}
+                                   (and primary? committed)
+                                   (assoc :state-cid (:stateCid committed))))))
                    (let [action (:action admitted)
                          base-audit {:at (.toISOString (js/Date.))
                                      :mode mode :run-id (:run-id state) :step (:step state)

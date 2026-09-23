@@ -191,3 +191,87 @@
                (reason #(verify (assoc-in rows [0 :execution :source]
                                           "direct"))))))
       (finally (.rmSync fs directory #js {:recursive true :force true})))))
+
+(deftest primary-scheduler-verifies-an-effect-free-jev-hold
+  (let [directory (.mkdtempSync fs (.join path (.tmpdir os) "mithril-primary-held-"))]
+    (try
+      (let [store (local/open! (.join path directory "blocks"))
+            state-path (.join path directory "run.edn")
+            initial (state)
+            c0 (primary/save! store schema state-path nil initial)
+            held (bot/hold-decision initial :model-confidence-below-floor
+                                    "scheduler-ipld-test" 1001)
+            c1 (primary/save! store schema state-path c0 held)
+            receipt {:status "held" :source "builtin" :executionId "held-1"
+                     :scheduledInstant "2026-09-23T00:00:00Z"
+                     :runStatus "held" :step 0
+                     :reason ":model-confidence-below-floor"
+                     :stateCid (:stateCid c1)
+                     :semanticGraphDigest (:semanticGraphDigest c1)}
+            rows [{:execution {:id "held-1" :source "builtin"
+                               :status "completed"
+                               :scheduled_instant "2026-09-23T00:00:00Z"}
+                   :receipt receipt}]
+            repeated (conj rows
+                           {:execution {:id "held-2" :source "builtin"
+                                        :status "completed"
+                                        :scheduled_instant "2026-09-23T00:01:00Z"}
+                            :receipt (assoc receipt
+                                            :executionId "held-2"
+                                            :scheduledInstant "2026-09-23T00:01:00Z")})
+            verify #(scheduler-ipld/verify-primary-occurrences!
+                     store schema state-path %)
+            verified (verify rows)
+            replayed (verify repeated)]
+        (is (= 2 (:semanticBlocks verified)))
+        (is (= 1 (:heldDeliveries verified)))
+        (is (= 2 (:heldDeliveries replayed)))
+        (is (= 2 (:semanticBlocks replayed)))
+        (is (= :held (get-in verified [:state :status])))
+        (is (= :primary-held-or-cid-mismatch
+               (reason #(verify (assoc-in rows [0 :receipt :reason]
+                                          ":outside-candidate-set"))))))
+      (finally (.rmSync fs directory #js {:recursive true :force true})))))
+
+(deftest primary-scheduler-verifies-a-hold-after-a-completed-effect
+  (let [directory (.mkdtempSync fs (.join path (.tmpdir os) "mithril-primary-effect-held-"))]
+    (try
+      (let [store (local/open! (.join path directory "blocks"))
+            state-path (.join path directory "run.edn")
+            requested (bot/request-effect
+                       (state) {:action (get bot/action-by-label "workspace-inspect")
+                                :confidence 10000}
+                       #{:workspace/read} "scheduler-ipld-test" 1001)
+            pending (:state requested)
+            c1 (primary/save! store schema state-path nil pending)
+            finished (after-read (state))
+            c2 (primary/save! store schema state-path c1 finished)
+            held (bot/hold-decision finished :model-confidence-below-floor
+                                    "scheduler-ipld-test" 1003)
+            c3 (primary/save! store schema state-path c2 held)
+            effect (last (:receipts finished))
+            occurrence (fn [id instant receipt]
+                         {:execution {:id id :source "builtin" :status "completed"
+                                      :scheduled_instant instant}
+                          :receipt (merge {:source "builtin" :executionId id
+                                           :scheduledInstant instant} receipt)})
+            rows [(occurrence "read-1" "2026-09-23T00:00:00Z"
+                              {:status "completed" :runStatus "running" :step 1
+                               :action "https://mithril.fund/id/action/workspace-inspect"
+                               :stateCid (:stateCid c2)
+                               :semanticGraphDigest (:semanticGraphDigest c2)
+                               :effectId (:effect-id effect)
+                               :outputDigest (:output-digest effect)})
+                  (occurrence "held-2" "2026-09-23T00:01:00Z"
+                              {:status "held" :runStatus "held" :step 1
+                               :reason ":model-confidence-below-floor"
+                               :stateCid (:stateCid c3)
+                               :semanticGraphDigest (:semanticGraphDigest c3)})]
+            verify #(scheduler-ipld/verify-primary-occurrences!
+                     store schema state-path %)
+            verified (verify rows)]
+        (is (= 3 (:semanticBlocks verified)))
+        (is (= 1 (:completedEffects verified)))
+        (is (= 1 (:heldDeliveries verified)))
+        (is (= (:stateCid c3) (:stateCid verified))))
+      (finally (.rmSync fs directory #js {:recursive true :force true})))))
