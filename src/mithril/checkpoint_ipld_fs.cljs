@@ -62,6 +62,11 @@
         (.closeSync fs fd)
         (.unlinkSync fs file)))))
 
+(defn with-store-lock! [store f]
+  "Serialize a small block/ref/receipt transaction on this one filesystem.
+  This is not a distributed lease or an fsync durability guarantee."
+  (with-write-lock store f))
+
 (defn read-ref [store name]
   (let [file (ref-path store name)]
     (when-not (.existsSync fs file) (refuse! :missing-ref))

@@ -1,0 +1,104 @@
+(ns mithril.growth-trace-test
+  (:require [cljs.test :refer [deftest is]]
+            [clojure.string :as str]
+            [mithril.checkpoint-ipld-fs :as blocks]
+            [mithril.growth :as growth]
+            [mithril.growth-test :as fixture]
+            [mithril.growth-trace :as trace]
+            [mithril.growth-trace-fs :as local]))
+
+(def fs (js/require "node:fs"))
+(def path (js/require "node:path"))
+(def os (js/require "node:os"))
+(def cp (js/require "node:child_process"))
+
+(defn- receipt [observation]
+  (assoc (growth/admit-decision
+          (growth/compile-text "growth.mith" fixture/source)
+          observation (fixture/model-result "fix-entry" 0.8 0.7))
+         :decision-ms 10
+         :audit {:request-id (str "request-" (:id observation))
+                 :model "typesafe/jev-1.13-20260917"
+                 :usage {:input_tokens 12 :output_tokens 3}}))
+
+(defn- reason [f]
+  (try (f) nil (catch :default error (:reason (ex-data error)))))
+
+(deftest complete-definition-digest-binds-policy-that-v1-rdf-context-omits
+  (let [changed (str/replace fixture/source "activated-users" "new-users")
+        before (growth/compile-text "growth.mith" fixture/source)
+        after (growth/compile-text "growth.mith" changed)
+        edits [["3000" "4000"]
+               ["fix-entry" "repair-entry"]
+               ["proposal/record" "proposal/audit"]
+               ["target \"landing\"" "target \"other-landing\""]
+               ["Repair the measured entry blocker" "Repair a different blocker"]]]
+    (is (= (:graph-digest before) (:graph-digest after))
+        "v1 RDF projection demonstrably does not bind this policy term")
+    (is (not= (:definition-digest before) (:definition-digest after)))
+    (doseq [[old new] edits]
+      (let [changed-source (str/replace fixture/source old new)
+            compiled (growth/compile-text "growth.mith" changed-source)]
+        (is (not= fixture/source changed-source))
+        (is (not= (:definition-digest before) (:definition-digest compiled)))))))
+
+(deftest traced-ledger-replays-input-model-and-receipt-after-reopen
+  (let [directory (.mkdtempSync fs (.join path (.tmpdir os) "mithril-growth-trace-"))]
+    (try
+      (let [store (blocks/open! (.join path directory "blocks-private"))
+            ledger (.join path directory "receipts.jsonl")
+            one fixture/observation
+            two (assoc one :id "obs-2" :measured-at "2026-09-23T01:00:00Z")
+            model (fixture/model-result "fix-entry" 0.8 0.7)
+            first-line (local/append! store ledger "growth.mith" fixture/source
+                                      one model (receipt one))
+            second-line (local/append! store ledger "growth.mith" fixture/source
+                                       two model (receipt two))
+            reopened (blocks/open! (.join path directory "blocks-private"))
+            head (trace/read! #(blocks/get-block reopened %) (get second-line "traceCid"))]
+        (is (= 2 (:receipts (local/verify-ledger! reopened ledger fixture/source))))
+        (is (= 2 (:blocks (local/verify-ledger! reopened ledger fixture/source))))
+        (is (= (:definition-digest head) (get second-line "definitionDigest")))
+        (is (= [(get first-line "traceCid")] (:parents head)))
+        (is (= two (:observation head)))
+        (is (= :duplicate-observation
+               (reason #(local/append! reopened ledger "growth.mith" fixture/source
+                                       one model (receipt one)))))
+        (is (= :receipt-replay-mismatch
+               (reason #(trace/block "growth.mith" fixture/source one model
+                                     (assoc (receipt one) :confidence 2000) []))))
+        (is (= :parent-profile-mismatch
+               (reason (fn [] (trace/put! (fn [id bytes]
+                                            (blocks/put-block! reopened id bytes))
+                                    (fn [id] (blocks/get-block reopened id)) "growth.mith"
+                                    (str/replace fixture/source
+                                                            "activated-users" "new-users")
+                                    two model (receipt two)
+                                    [(get first-line "traceCid")])))))
+        (is (= :profile-source-drift
+               (reason #(local/verify-ledger! reopened ledger "(different)"))))
+        (.writeFileSync fs ledger
+                        (str/replace (.readFileSync fs ledger "utf8")
+                                                "\"decision-ms\":10" "\"decision-ms\":11"))
+        (is (= :receipt-block-mismatch
+               (reason #(local/verify-ledger! reopened ledger fixture/source)))))
+      (finally (.rmSync fs directory #js {:recursive true :force true})))))
+
+(deftest verify-trace-cli-checks-complete-causal-ledger
+  (let [directory (.mkdtempSync fs (.join path (.tmpdir os) "mithril-growth-cli-"))]
+    (try
+      (let [profile (.join path directory "growth.mith")
+            ledger (.join path directory "receipts.jsonl")
+            store-dir (.join path directory "private")
+            store (blocks/open! store-dir)]
+        (.writeFileSync fs profile fixture/source)
+        (local/append! store ledger profile fixture/source fixture/observation
+                       (fixture/model-result "fix-entry" 0.8 0.7)
+                       (receipt fixture/observation))
+        (let [run (.spawnSync cp "kbb"
+                              (clj->js ["--backend" "sci" "bin/mithril-growth.cljk"
+                                        "verify-trace" profile ledger store-dir])
+                              #js {:cwd (.cwd js/process) :encoding "utf8"})]
+          (is (= 0 (.-status run)) (str (.-stdout run) (.-stderr run)))
+          (is (re-find #"\"receipts\":1" (.-stdout run)))))
+      (finally (.rmSync fs directory #js {:recursive true :force true})))))

@@ -1,0 +1,132 @@
+(ns mithril.growth-trace
+  "Recheckable, private IPLD evidence for one Mithril growth decision. A trace
+  records the actual bounded observation, normalized Jev result, and typed
+  receipt, then links to its predecessor. It proves deterministic replay of
+  Mithril admission, not provider identity or truth of the observation."
+  (:require #?(:cljs [cljs.reader :as reader]
+               :clj [clojure.edn :as reader])
+            [ipld.core :as ipld]
+            [mithril.execution :as execution]
+            [mithril.growth :as growth]
+            [multiformats.core :as multiformats]))
+
+(def format-id "https://mithril.fund/block/growth-decision-trace-v1")
+(def node-keys
+  #{"format" "profilePath" "profileSource" "profileDigest" "definitionDigest"
+    "observationEdn" "modelResultEdn" "receiptEdn" "parents"})
+
+(defn- refuse! [reason]
+  (throw (ex-info "Mithril growth trace refused"
+                  {:mithril/error :mithril.growth-trace/refused
+                   :reason reason})))
+
+(defn- valid-cid? [id]
+  (try
+    (and (string? id)
+         (= multiformats/codec-dag-cbor (ipld/cid-codec id)))
+    (catch #?(:cljs :default :clj Exception) _ false)))
+
+(defn- valid-parents! [parents]
+  (when-not (and (vector? parents) (<= (count parents) 1)
+                 (every? valid-cid? parents))
+    (refuse! :invalid-parents)))
+
+(defn- replay! [profile-path profile-source observation model-result receipt]
+  (let [artifact (growth/compile-text profile-path profile-source)
+        expected (growth/admit-decision artifact observation model-result)]
+    (when-not (and (map? receipt)
+                   (= expected (dissoc receipt :decision-ms :audit))
+                   (integer? (:decision-ms receipt))
+                   (<= 0 (:decision-ms receipt))
+                   (map? (:audit receipt))
+                   (string? (get-in receipt [:audit :request-id]))
+                   (= (:model model-result) (get-in receipt [:audit :model])))
+      (refuse! :receipt-replay-mismatch))
+    artifact))
+
+(defn- node [profile-path profile-source observation model-result receipt parents]
+  (valid-parents! parents)
+  (let [artifact (replay! profile-path profile-source observation model-result receipt)]
+    {"format" format-id
+     "profilePath" profile-path
+     "profileSource" profile-source
+     "profileDigest" (:graph-digest artifact)
+     "definitionDigest" (:definition-digest artifact)
+     "observationEdn" (execution/canonical-edn-text observation)
+     "modelResultEdn" (execution/canonical-edn-text model-result)
+     "receiptEdn" (execution/canonical-edn-text receipt)
+     "parents" (mapv ipld/link parents)}))
+
+(defn block [profile-path profile-source observation model-result receipt parents]
+  (ipld/node->block
+   (node profile-path profile-source observation model-result receipt parents)))
+
+(defn- read-edn! [text]
+  (try (reader/read-string text)
+       (catch #?(:cljs :default :clj Exception) _ (refuse! :invalid-edn))))
+
+(defn read! [get-fn id]
+  (when-not (valid-cid? id) (refuse! :invalid-cid))
+  (let [value (ipld/get-node get-fn id)]
+    (when-not value (refuse! :missing-block))
+    (when-not (and (map? value)
+                   (= node-keys (set (keys value)))
+                   (= format-id (get value "format"))
+                   (every? string? (map #(get value %) ["profilePath" "profileSource"
+                                                       "profileDigest" "definitionDigest" "observationEdn"
+                                                       "modelResultEdn" "receiptEdn"]))
+                   (vector? (get value "parents"))
+                   (every? ipld/link? (get value "parents")))
+      (refuse! :invalid-node))
+    (let [parents (mapv ipld/link-cid (get value "parents"))
+          observation (read-edn! (get value "observationEdn"))
+          model-result (read-edn! (get value "modelResultEdn"))
+          receipt (read-edn! (get value "receiptEdn"))
+          expected (node (get value "profilePath") (get value "profileSource")
+                         observation model-result receipt parents)]
+      (when-not (= expected value) (refuse! :noncanonical-trace))
+      {:cid id :parents parents :profile-path (get value "profilePath")
+       :profile-source (get value "profileSource")
+       :profile-digest (get value "profileDigest")
+       :definition-digest (get value "definitionDigest")
+       :observation observation :model-result model-result :receipt receipt})))
+
+(defn put! [put-fn get-fn profile-path profile-source observation model-result receipt parents]
+  (valid-parents! parents)
+  (let [{:keys [definition-digest]} (when-let [parent (first parents)]
+                                   (read! get-fn parent))
+        artifact (growth/compile-text profile-path profile-source)]
+    (when (and definition-digest (not= definition-digest (:definition-digest artifact)))
+      (refuse! :parent-profile-mismatch))
+    (let [{:keys [cid bytes]} (block profile-path profile-source observation
+                                    model-result receipt parents)]
+      (put-fn cid bytes)
+      cid)))
+
+(defn verify-history! [get-fn head]
+  (loop [id head seen #{} observation-ids #{}]
+    (if-not id
+      {:head head :blocks (count seen) :observation-ids observation-ids}
+      (do
+        (when (or (contains? seen id) (>= (count seen) 256))
+          (refuse! :invalid-history))
+        (let [saved (read! get-fn id)
+              obs-id (get-in saved [:observation :id])
+              parent (first (:parents saved))]
+          (when (contains? observation-ids obs-id)
+            (refuse! :duplicate-observation))
+          (when parent
+            (let [prior (read! get-fn parent)]
+              (when-not (= (:definition-digest saved) (:definition-digest prior))
+                (refuse! :parent-profile-mismatch))))
+          (recur parent (conj seen id) (conj observation-ids obs-id)))))))
+
+(defn json-value [value]
+  (cond
+    (keyword? value) (if-let [ns (namespace value)]
+                       (str ns "/" (name value)) (name value))
+    (map? value) (into {}
+                       (map (fn [[k v]] [(json-value k) (json-value v)])) value)
+    (set? value) (mapv json-value (sort-by pr-str value))
+    (sequential? value) (mapv json-value value)
+    :else value))

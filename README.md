@@ -266,6 +266,42 @@ general Unison merge or a distributed store. It does not yet make the RDF
 graph the execution state of record, sync refs between machines, provide
 crash-durable fsync, or establish fleet-wide Hermes profile equivalence.
 
+### Replayable Jev decision evidence (experimental)
+
+The legacy growth proposal receipt contains an RDF projection digest but not
+the observation that Jev saw. The pinned v1 JSON-LD context also omits some
+`GrowthProfile` policy terms: changing `metric` leaves its RDF graph digest
+unchanged. The new `definition-digest` binds the complete checked profile;
+existing v1 receipts retain their legacy digest and must not be read as proof
+that every policy field was fixed.
+
+For new isolated propose-only decisions, `decide-traced` records the complete
+`.mith` profile, bounded observation, normalized Jev result, and typed receipt
+in a private DAG-CBOR block. Its CID appears in the JSONL receipt. Later
+decisions link to the preceding CID; duplicate observation IDs, untraced
+legacy tails, receipt mutation, policy drift, and broken ancestry are refused.
+The traced receipt also exposes `definitionDigest` for the complete checked
+profile; its older `profile-digest` remains only the v1 RDF projection.
+The verifier replays Mithril's decision admission from the saved inputs:
+
+```sh
+kbb --backend sci bin/mithril-growth.cljk decide-traced \
+  examples/itonami-labor-liberation.mith observation.json \
+  /absolute/private/receipts.jsonl /absolute/private/blocks
+kbb --backend sci bin/mithril-growth.cljk verify-trace \
+  examples/itonami-labor-liberation.mith \
+  /absolute/private/receipts.jsonl /absolute/private/blocks
+```
+
+A real OpenRouter Jev 1.13 call with `test/fixtures/growth-trace-smoke.json` on
+2026-09-23 selected `hold-for-evidence` at 9,600 basis points, wrote one CID
+block, and passed a fresh-process `verify-trace` (1 receipt/1 block). This
+proves deterministic replay of the recorded result; it does not prove that
+the observation was true, that the provider signed its response, that an
+external proposal effect occurred, or that the entire Hermes job is equivalent.
+The local JSONL/block append is serialized among cooperating writers but has
+no distributed CAS or crash-durable fsync guarantee.
+
 ## Published Mithril code and libraries
 
 The repository now contains source authored in Mithril itself:

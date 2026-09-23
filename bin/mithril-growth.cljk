@@ -1,7 +1,9 @@
 #!/usr/bin/env kbb
 (ns mithril.growth-cli
   (:require [clojure.string :as str]
+            [mithril.checkpoint-ipld-fs :as blocks]
             [mithril.growth :as growth]
+            [mithril.growth-trace-fs :as traced]
             [mithril.openrouter-jev :as jev]))
 
 (def fs (js/require "node:fs"))
@@ -10,6 +12,8 @@
 
 (defn- usage! []
   (println "usage: mithril-growth decide <profile.mith> <observation.json> <receipt.jsonl>")
+  (println "       mithril-growth decide-traced <profile.mith> <observation.json> <receipt.jsonl> <absolute-private-block-dir>")
+  (println "       mithril-growth verify-trace <profile.mith> <receipt.jsonl> <absolute-private-block-dir>")
   (js/process.exit 2))
 
 (defn- read-text [p] (.readFileSync fs p "utf8"))
@@ -45,21 +49,35 @@
   (js/process.exit 1))
 
 (let [[command profile-path observation-path receipt-path & extra] *command-line-args*]
-  (if-not (and (= "decide" command) profile-path observation-path receipt-path (empty? extra))
+  (if-not (and (contains? #{"decide" "decide-traced" "verify-trace"} command)
+               profile-path observation-path receipt-path
+               (if (= "decide-traced" command)
+                 (and (= 1 (count extra)) (.isAbsolute path (first extra)))
+                 (empty? extra))
+               (if (= "verify-trace" command) (.isAbsolute path receipt-path) true))
     (usage!)
     (try
-      (let [artifact (growth/compile-text profile-path (read-text profile-path))
-            observation (js->clj (js/JSON.parse (read-text observation-path)) :keywordize-keys true)
-            plan (growth/prepare-request artifact observation)
-            started (.now js/Date)]
-        (-> (jev/decide! plan (read-key))
-            (.then (fn [{:keys [model-result audit]}]
-                     (let [receipt (assoc (growth/admit-decision artifact observation model-result)
-                                          :decision-ms (- (.now js/Date) started)
-                                          :audit audit)
-                           line (encode receipt)]
-                       (.mkdirSync fs (.dirname path receipt-path) #js {:recursive true})
-                       (.appendFileSync fs receipt-path (str line "\n") "utf8")
-                       (println line))))
-            (.catch refuse!)))
+      (let [source (read-text profile-path)]
+        (if (= "verify-trace" command)
+          (println (encode (traced/verify-ledger!
+                            (blocks/open! receipt-path) observation-path source)))
+          (let [artifact (growth/compile-text profile-path source)
+                observation (js->clj (js/JSON.parse (read-text observation-path)) :keywordize-keys true)
+                plan (growth/prepare-request artifact observation)
+                started (.now js/Date)]
+            (-> (jev/decide! plan (read-key))
+                (.then (fn [{:keys [model-result audit]}]
+                         (let [receipt (assoc (growth/admit-decision artifact observation model-result)
+                                              :decision-ms (- (.now js/Date) started)
+                                              :audit audit)]
+                           (if (= "decide-traced" command)
+                             (println (encode
+                                       (traced/append!
+                                        (blocks/open! (first extra)) receipt-path
+                                        profile-path source observation model-result receipt)))
+                             (let [line (encode receipt)]
+                               (.mkdirSync fs (.dirname path receipt-path) #js {:recursive true})
+                               (.appendFileSync fs receipt-path (str line "\n") "utf8")
+                               (println line))))))
+                (.catch refuse!)))))
       (catch :default error (refuse! error)))))
