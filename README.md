@@ -232,6 +232,17 @@ distributed consensus or crash-durable commit. Existing `legacy` and
 execution path and verifies its CID witness before the next occurrence; the
 RDF graph is not yet the runtime's sole state of record.
 
+The read-only scheduler verifier reconstructs the final state from the CID
+named by completed builtin receipts, even if the EDN projection is missing;
+an existing projection must match exactly. If the projection is missing at a
+later coding cron occurrence, the scheduler checks the complete prior Hermes
+execution/receipt series, the CID ancestry, exact task/profile binding, and
+the independently verified semantic head before recreating the EDN projection.
+It then treats a completed run as a no-effect terminal delivery. A missing or
+divergent semantic head, unreceipted effect, or ambiguous execution history is
+not auto-repaired. This is recovery of a derived projection, not a claim that
+all execution state now lives solely in RDF/IPLD.
+
 For a fresh coding run, the read-only reconciliation command compares every
 Hermes `source=builtin` execution with its scheduler receipt, the exact BPMN
 action, effect ID and output digest, semantic graph digest, and parent-linked
@@ -251,6 +262,13 @@ linked semantic blocks, 1 terminal delivery, and 1 deliberately rejected
 `source=direct` call. `GET /hello` returned the modified `.mith` body. This
 does not prove Jev-authored code, Amu compilation, distributed refs, crash
 durability, or parity across the wider Hermes fleet.
+
+A copied isolated profile was also exercised after its EDN projection was
+withheld. CID-only verification still matched all seven effects. One new
+`source=builtin` cron occurrence restored the projection from the checked CID
+state and returned `terminal` with the same final CID and no effect ID; the
+complete copied series then verified with seven effects and two terminal
+deliveries. The original canary evidence was left untouched.
 
 An isolated Hermes `source=builtin` canary on 2026-09-23 exercised a real
 Mithril web-app edit over separate cron occurrences: `workspace/read`,

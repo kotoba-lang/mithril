@@ -29,9 +29,8 @@
       (refuse! :invalid-arguments))
     (let [state-path (.join path state-dir
                             (str profile "-" job-id ".session.edn"))
-          _ (when-not (and (.existsSync fs state-path) (.existsSync fs db))
+          _ (when-not (.existsSync fs db)
               (refuse! :missing-input))
-          state (reader/read-string (text state-path))
           schema (checkpoint/schema (text checkpoint/ontology-path))
           store (local/open! (.join path state-dir "ipld-checkpoints"))
           sql (str "SELECT id,source,status,scheduled_instant,claimed_at "
@@ -51,8 +50,14 @@
                                      (parse-json (text file))))})
                      executions)]
       (when-not (seq executions) (refuse! :no-executions))
-      (println (json (scheduler-ipld/verify-occurrences!
-                      store schema state rows))))
+      (let [{:keys [state verification]}
+            (scheduler-ipld/verify-from-receipts! store schema rows)
+            projection? (.existsSync fs state-path)]
+        (when (and projection?
+                   (not= state (reader/read-string (text state-path))))
+          (refuse! :projection-diverged))
+        (println (json (assoc verification :projection
+                              (if projection? "matched" "missing"))))))
     (catch :default error
       (println (str "REFUSE\t" (or (some-> error ex-data :reason name)
                                     (some-> error ex-data :mithril/error name)

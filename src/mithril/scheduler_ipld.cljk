@@ -3,7 +3,8 @@
   The scheduler still owns its attempt/receipt protocol; this adapter refuses
   EDN projection drift and links every accepted post-tick state to its parent."
   (:require [mithril.checkpoint-ipld :as ipld]
-            [mithril.checkpoint-ipld-fs :as local]))
+            [mithril.checkpoint-ipld-fs :as local]
+            [mithril.execution :as execution]))
 
 (defn- refuse! [reason]
   (throw (ex-info "Mithril scheduler IPLD witness refused"
@@ -110,3 +111,30 @@
        :stateCid last-cid
        :semanticGraphDigest (:semantic-graph-digest final-saved)
        :runStatus (name (:status final-state))})))
+
+(defn verify-from-receipts!
+  "Reconstruct the final state from the immutable CID head named in scheduler
+  receipts, then verify the entire occurrence/effect history. An EDN projection
+  is not needed to answer whether the durable semantic state is consistent."
+  [store schema rows]
+  (let [completed (filterv #(and (= "builtin" (get-in % [:execution :source]))
+                                 (= "completed" (get-in % [:receipt :status]))) rows)
+        cid (get-in (last completed) [:receipt :stateCid])]
+    (when-not (seq completed) (refuse! :missing-completed-effect))
+    (let [saved (ipld/read! #(local/get-block store %) schema cid)
+          state (:state saved)
+          verified (verify-occurrences! store schema state rows)]
+      {:state state :verification verified})))
+
+(defn recovery-state!
+  "Admit a missing EDN projection only when the complete Hermes receipt series,
+  the CID head, the exact task/profile, and the independently checked semantic
+  head all name the same state. This function performs no host effect."
+  [store schema rows profile-digest task-digest semantic-run-id semantic-state-digest]
+  (let [{:keys [state verification]} (verify-from-receipts! store schema rows)]
+    (when-not (and (= profile-digest (:profile-digest state))
+                   (= task-digest (:task-digest state))
+                   (= semantic-run-id (:run-id state))
+                   (= semantic-state-digest (execution/digest state)))
+      (refuse! :recovery-binding-mismatch))
+    {:state state :verification verification}))

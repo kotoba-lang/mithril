@@ -100,6 +100,22 @@
             verify #(scheduler-ipld/verify-occurrences! store schema finished %)]
         (is (= "verified" (:status (verify rows))))
         (is (= 1 (:completedEffects (verify rows))))
+        (is (= finished (:state (scheduler-ipld/verify-from-receipts!
+                                 store schema rows))))
+        (is (= finished
+               (:state (scheduler-ipld/recovery-state!
+                        store schema rows (:profile-digest finished)
+                        (:task-digest finished) (:run-id finished)
+                        (execution/digest finished)))))
+        (is (= :recovery-binding-mismatch
+               (reason #(scheduler-ipld/recovery-state!
+                         store schema rows (:profile-digest finished)
+                         (:task-digest finished) (:run-id finished)
+                         (execution/digest :different)))))
+        (is (= :effect-or-cid-mismatch
+               (reason #(scheduler-ipld/verify-from-receipts!
+                         store schema
+                         (assoc-in rows [0 :receipt :outputDigest] "sha256:wrong")))))
         (is (= :effect-or-cid-mismatch
                (reason #(verify (assoc-in rows [0 :receipt :effectId]
                                           "sha256:wrong")))))

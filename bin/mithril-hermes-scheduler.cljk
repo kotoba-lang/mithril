@@ -79,6 +79,57 @@
            (catch :default _ (fail! :owner-pid-not-alive)))
       claim)))
 
+(defn- prior-executions [profile-root contract state-dir execution-id]
+  (let [db (.join path profile-root "cron" "executions.db")
+        sql (str "SELECT id,source,status,scheduled_instant,claimed_at "
+                 "FROM executions WHERE job_id='" (:job-id contract)
+                 "' AND id<>'" execution-id
+                 "' AND status NOT IN ('claimed','running') "
+                 "ORDER BY claimed_at ASC,id ASC")
+        raw (run! "/usr/bin/sqlite3" ["-json" db sql])
+        executions (if (str/blank? raw) [] (parse-json raw))]
+    (mapv (fn [execution]
+            {:execution execution
+             :receipt (when (= "builtin" (:source execution))
+                        (let [file (.join path state-dir
+                                          (str (:id execution) ".receipt.json"))]
+                          (when-not (.existsSync fs file)
+                            (fail! :missing-prior-receipt))
+                          (parse-json (text file))))})
+          executions)))
+
+(defn- restore-ipld-projection! [store schema state-path profile-root contract
+                                 state-dir execution-id task]
+  (let [rows (prior-executions profile-root contract state-dir execution-id)
+        completed? (some #(and (= "builtin" (get-in % [:execution :source]))
+                              (= "completed" (get-in % [:receipt :status]))) rows)]
+    (when (and (not completed?)
+               (or (.existsSync fs (str state-path ".semantic-head"))
+                   (some #(= "builtin" (get-in % [:execution :source])) rows)))
+      (fail! :unreconciled-ipld-history))
+    (when completed?
+      (when-not (.existsSync fs (str state-path ".semantic-head"))
+        (fail! :missing-semantic-head))
+      (let [semantic (parse-json
+                      (run! "kbb" ["--backend" "sci" "bin/mithril-hermes.cljk"
+                                   "semantic-verify" state-path]))
+            _ (when-not (= "verified" (:status semantic))
+                (fail! :semantic-head-mismatch))
+            {:keys [state verification]}
+            (scheduler-ipld/recovery-state!
+             store schema rows (:bot-profile-digest contract) (task-digest task)
+             (:run-id semantic) (:state-digest semantic))
+            temporary (str state-path ".recover-" (.-pid js/process))]
+        (.writeFileSync fs temporary (pr-str state)
+                        #js {:encoding "utf8" :flag "wx" :mode 384})
+        (when (.existsSync fs state-path) (fail! :projection-raced))
+        (.renameSync fs temporary state-path)
+        (.appendFileSync fs (str state-path ".recovery.jsonl")
+                         (str (json {:status "ipld-projection-restored"
+                                     :executionId execution-id
+                                     :stateCid (:stateCid verification)}) "\n") "utf8")
+        state))))
+
 (defn- one-tick! [contract-path bot-path profiles-root manifest-dir state-dir tool-profile-path]
   (when-not (every? #(.isAbsolute path %)
                     (cond-> [contract-path bot-path profiles-root manifest-dir state-dir]
@@ -140,7 +191,12 @@
     (let [task (if (:coding? contract) (:task contract)
                    (assoc (:task contract) "id"
                           (str (get-in contract [:task "id"]) "/" execution-id)))
-          prior (when (.existsSync fs state-path) (reader/read-string (text state-path)))
+          prior (if (.existsSync fs state-path)
+                  (reader/read-string (text state-path))
+                  (when ipld?
+                    (restore-ipld-projection! ipld-local ipld-schema state-path
+                                              profile-root contract state-dir
+                                              execution-id task)))
           before-step (or (:step prior) 0)
           before-receipts (count (:receipts prior))]
       (when (:awaiting prior) (fail! :effect-in-flight))
