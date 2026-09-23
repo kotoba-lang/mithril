@@ -1,0 +1,148 @@
+(ns mithril.checkpoint
+  "Content-addressed, ontology-validated projection of a bot run. A block
+  binds the full runtime state to its RDF graph and causal predecessor."
+  (:require [clojure.string :as str]
+            [mithril.compiler :as compiler]
+            [mithril.execution :as execution]
+            [mithril.form :as form]
+            [oak.semantic :as oak]))
+
+(def ontology-path "ontology/bot-checkpoint-v1.mith")
+(def checkpoint-class "https://mithril.fund/ns/v1#BotCheckpoint")
+(def state-class "https://mithril.fund/ns/v1#AgentState")
+(def shape-id "https://mithril.fund/ns/v1#BotCheckpointShape")
+(def base "https://mithril.fund/ns/v1#")
+
+(defn- refuse! [code message]
+  (throw (ex-info message {:mithril/error code})))
+
+(defn schema [source]
+  (let [artifact (compiler/compile-ontology-text ontology-path source)
+        graph (get-in artifact [:rdf-dataset "@graph"])
+        class-node (first (filter #(= checkpoint-class (get % "@id")) graph))
+        shape-node (first (filter #(= shape-id (get % "@id")) graph))
+        fields {"runId" :run-id "runStatus" :run-status
+                "stateDigest" :state-digest "parentDigest" :parent-digest
+                "profileDigest" :profile-digest "taskDigest" :task-digest
+                "processDigest" :process-digest "lastEffectDigest" :last-effect-digest
+                "step" :step "receiptCount" :receipt-count
+                "bpmnTokenAt" :bpmn-token-at
+                "awaitingEffect" :awaiting-effect}
+        properties (mapv (fn [p]
+                           (let [name (some-> (get p "propertyPath") (str/replace base ""))
+                                 dtype (get p "datatype")]
+                             (when-not (and (contains? fields name)
+                                            (contains? #{"http://www.w3.org/2001/XMLSchema#string"
+                                                         "http://www.w3.org/2001/XMLSchema#integer"} dtype)
+                                            (integer? (get p "minCount"))
+                                            (integer? (get p "maxCount")))
+                               (refuse! :mithril.checkpoint/unsupported-shape
+                                        "checkpoint ontology has an unsupported SHACL property"))
+                             {:path (get fields name)
+                              :datatype (if (str/ends-with? dtype "#integer") :integer :string)
+                              :min-count (get p "minCount")
+                              :max-count (get p "maxCount")}))
+                         (get shape-node "property"))]
+    (when-not (and (= state-class (get class-node "subClassOf"))
+                   (= checkpoint-class (get shape-node "targetClass"))
+                   (= (set (vals fields)) (set (map :path properties)))
+                   (= (count fields) (count properties)))
+      (refuse! :mithril.checkpoint/invalid-ontology
+               "checkpoint OWL class or SHACL target/fields do not match the contract"))
+    {:ontology-digest (:graph-digest artifact)
+     :shape {:shacl/type :node-shape :property properties}}))
+
+(defn projection [state parent-digest]
+  (let [fact-iri (fn [fact]
+                   (when-not (keyword? fact)
+                     (refuse! :mithril.checkpoint/invalid-fact
+                              "checkpoint facts must be typed keywords"))
+                   (str "https://mithril.fund/fact/"
+                        (when-let [ns (namespace fact)] (str ns "/"))
+                        (name fact)))
+        data (cond-> {:id (str "https://mithril.fund/run/" (:run-id state))
+                      :run-id (:run-id state)
+                      :run-status (name (:status state))
+                      :state-digest (execution/digest state)
+                      :profile-digest (:profile-digest state)
+                      :task-digest (:task-digest state)
+                      :step (:step state)
+                      :receipt-count (count (:receipts state))
+                      :facts (mapv fact-iri (sort-by str (:facts state)))}
+               parent-digest (assoc :parent-digest parent-digest)
+               (get-in state [:bpmn :definition])
+               (assoc :process-digest (get-in state [:bpmn :definition]))
+               (get-in state [:bpmn :token-state :bpmn/tokens 0 :bpmn/at])
+               (assoc :bpmn-token-at
+                      (str (get-in state [:bpmn :token-state :bpmn/tokens 0 :bpmn/at])))
+               (get-in state [:awaiting :id])
+               (assoc :awaiting-effect (get-in state [:awaiting :id]))
+               (or (get-in state [:awaiting :id])
+                   (get-in state [:receipts (dec (count (:receipts state))) :effect-id]))
+               (assoc :last-effect-digest
+                      (or (get-in state [:awaiting :id])
+                          (get-in state [:receipts (dec (count (:receipts state))) :effect-id]))))]
+    (when-not (and (string? (:run-id data)) (keyword? (:status state)))
+      (refuse! :mithril.checkpoint/invalid-state "bot state lacks a typed run identity/status"))
+    data))
+
+(defn form-text [data]
+  (str "(mithril/bot-checkpoint "
+       (str/join " " (mapcat (fn [[k v]] [(str k) (pr-str v)])
+                            (sort-by (comp str key) data)))
+       ")"))
+
+(defn build [schema state parent-digest]
+  (let [data (projection state parent-digest)
+        shape-report (execution/validate-shape (:shape schema) data)
+        triples (into #{(oak/triple :mithril/BotCheckpoint :rdfs/subClassOf :mithril/AgentState)
+                        (oak/triple :mithril/checkpoint :rdf/type :mithril/BotCheckpoint)}
+                      (map (fn [fact]
+                             (oak/triple :mithril/checkpoint :mithril/fact fact))
+                           (:facts data)))
+        inferred (oak/materialize :owl2-rl triples)
+        rows (oak/execute :owl2-rl
+                          [:sparql/project [:?node]
+                           [:sparql/bgp [:?node :rdf/type :mithril/AgentState]]]
+                          triples)
+        fact-rows (oak/execute :owl2-rl
+                               [:sparql/project [:?fact]
+                                [:sparql/bgp [:mithril/checkpoint :mithril/fact :?fact]]]
+                               triples)]
+    (when-not (:valid? shape-report)
+      (throw (ex-info "checkpoint violates declared SHACL shape"
+                      {:mithril/error :mithril.checkpoint/shacl-violation
+                       :report shape-report})))
+    (when-not (and (contains? inferred
+                             (oak/triple :mithril/checkpoint :rdf/type :mithril/AgentState))
+                   (seq rows)
+                   (= (count (:facts data)) (count fact-rows)))
+      (refuse! :mithril.checkpoint/owl-entailment-failed
+               "checkpoint OWL/SPARQL projection does not match state facts"))
+    (let [source (form-text data)
+          document (form/parse source)
+          block {:format :mithril/bot-checkpoint-v1
+                 :ontology-digest (:ontology-digest schema)
+                 :graph-digest (compiler/graph-digest document)
+                 :parent-digest parent-digest
+                 :state-digest (:state-digest data)
+                 :source source
+                 :state state}]
+      {:digest (execution/digest block) :block block})))
+
+(defn verify [schema {:keys [digest block]}]
+  (when-not (and (= :mithril/bot-checkpoint-v1 (:format block))
+                 (= (:ontology-digest schema) (:ontology-digest block))
+                 (= (:state-digest block) (execution/digest (:state block)))
+                 (= (:graph-digest block)
+                    (compiler/graph-digest (form/parse (:source block))))
+                 (= (:source block)
+                    (form-text (projection (:state block) (:parent-digest block))))
+                 (= digest (execution/digest block)))
+    (refuse! :mithril.checkpoint/invalid-block
+             "checkpoint block, source, ontology or state digest does not verify"))
+  (let [rebuilt (build schema (:state block) (:parent-digest block))]
+    (when-not (= {:digest digest :block block} rebuilt)
+      (refuse! :mithril.checkpoint/noncanonical-block
+               "checkpoint does not equal the canonical ontology projection"))
+    rebuilt))

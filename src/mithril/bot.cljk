@@ -454,6 +454,47 @@
          :probabilities (into (sorted-map) probabilities)
          :model (select-keys model-result [:model :artifact])}))))
 
+(defn hold-decision
+  "A model admission refusal is a terminal, effect-free state transition.
+  Re-delivery cannot turn an uncertain model choice into an unbounded cron storm."
+  [state reason owner now-ms]
+  (lease-valid! state owner now-ms)
+  (when-not (and (= :running (:status state)) (nil? (:awaiting state))
+                 (contains? #{:model-confidence-below-floor
+                              :invalid-model-result :invalid-model-distribution
+                              :invalid-model-confidence :invalid-model-decision
+                              :outside-candidate-set :unpinned-model
+                              :generated-text-forbidden :model-cardinality} reason))
+    (fail! :mithril.bot/invalid-decision-hold
+           "decision hold requires a running effect-free state and typed refusal" {}))
+  (-> state
+      (assoc :status :held :hold-reason reason)
+      (update :semantic-receipts conj
+              {:operation :decide/jev :status :refused
+               :output-digest (execution/digest [(:run-id state) (:step state) reason])
+               :metrics {:step (:step state)}})))
+
+(def model-admission-refusals
+  #{:mithril.bot/model-confidence-below-floor
+    :mithril.bot/invalid-model-result
+    :mithril.bot/invalid-model-distribution
+    :mithril.bot/invalid-model-confidence
+    :mithril.bot/invalid-model-decision
+    :mithril.bot/outside-candidate-set
+    :mithril.bot/unpinned-model
+    :mithril.bot/generated-text-forbidden
+    :mithril.bot/model-cardinality})
+
+(defn resolve-decision [state model-result owner now-ms]
+  (try
+    {:admitted (admit-decision state model-result owner now-ms)}
+    (catch :default error
+      (let [code (:mithril/error (ex-data error))]
+        (if (contains? model-admission-refusals code)
+          {:held (hold-decision state (keyword (name code)) owner now-ms)
+           :reason code}
+          (throw error))))))
+
 (defn request-effect [state admitted grants owner now-ms]
   (lease-valid! state owner now-ms)
   (when (:awaiting state)

@@ -30,11 +30,14 @@
 
 (defn compile-document [path doc bot-artifact]
   (when-not (compiler/source-path? path) (fail! :invalid-extension))
-  (let [coding? (= "HermesBpmnCodingSchedulerContract" (get doc "@type"))]
+  (let [coding? (= "HermesBpmnCodingSchedulerContract" (get doc "@type"))
+        keys* (cond-> source-keys coding? (conj "toolProfileDigest"))]
   (when-not (and (map? doc)
-                 (= (cond-> source-keys coding? (conj "toolProfileDigest"))
-                    (set (keys doc))))
+                 (contains? #{keys* (conj keys* "checkpointMode")}
+                            (set (keys doc))))
     (fail! :invalid-fields))
+  (when-not (contains? #{nil "legacy" "semantic"} (get doc "checkpointMode"))
+    (fail! :invalid-checkpoint-mode))
   (when-not (= compiler/context-uri (get doc "@context"))
     (fail! :unpinned-context))
   (when-not (contains? #{"HermesBpmnSchedulerContract"
@@ -84,6 +87,7 @@
      :profile-digest (get doc "profileDigest")
      :bot-profile-digest (:graph-digest bot-artifact)
      :tool-profile-digest (when coding? (get doc "toolProfileDigest"))
+     :checkpoint-mode (or (get doc "checkpointMode") "legacy")
      :task task :owner (get doc "owner")
      :effects effects
      :grants (set (map keyword grants))})))
@@ -105,3 +109,30 @@
       (or (not (number? claimed)) (js/isNaN claimed)
           (< claimed (- now-ms 600000)) (> claimed (+ now-ms 30000))) :stale-claim
       :else :admitted)))
+
+(defn verify-tick-outcome
+  "A held Jev decision is terminal but not a completed host effect. Keep the
+  scheduler receipt truthful while preventing the next cron occurrence from
+  repeating an uncertain decision."
+  [contract result state before-step before-receipts effect-name]
+  (let [receipt (last (:receipts state))]
+    (cond
+      (= "held" (:status result))
+      (if (and (= :held (:status state))
+               (= before-step (:step state))
+               (= before-receipts (count (:receipts state)))
+               (nil? (:awaiting state))
+               (= (:bot-profile-digest contract) (:profile-digest state)))
+        :held
+        (fail! :held-state-mismatch))
+
+      (and (= "completed" (:status result))
+           (= (inc before-step) (:step state))
+           (= (inc before-receipts) (count (:receipts state)))
+           (nil? (:awaiting state)) (:bpmn state)
+           (= (:bot-profile-digest contract) (:profile-digest state))
+           (= :completed (:status receipt))
+           (contains? (:effects contract) effect-name))
+      :completed
+
+      :else (fail! :tick-or-receipt-mismatch))))

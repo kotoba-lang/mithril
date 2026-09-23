@@ -18,8 +18,11 @@
    'mithril/graph-agent "GraphAgentApplication"
    'mithril/app-agent "AppAgentApplication"
    'mithril/bot-profile "BotProfile"
+   'mithril/bot-checkpoint "BotCheckpoint"
    'mithril/growth-profile "GrowthProfile"
    'mithril/hermes-profile "HermesProfile"
+   'mithril/hermes-bpmn-scheduler-contract "HermesBpmnSchedulerContract"
+   'mithril/hermes-bpmn-coding-scheduler-contract "HermesBpmnCodingSchedulerContract"
    'mithril/desktop-application "DesktopApplication"
    'mithril/ontology "Ontology"})
 
@@ -81,6 +84,22 @@
    :lease-seconds "leaseSeconds"
    :effects "effects"
    :legacy-profiles "legacyProfiles"
+   :run-id "runId"
+   :run-status "runStatus"
+   :state-digest "stateDigest"
+   :parent-digest "parentDigest"
+   :profile-digest "profileDigest"
+   :bot-profile-digest "botProfileDigest"
+   :tool-profile-digest "toolProfileDigest"
+   :checkpoint-mode "checkpointMode"
+   :task-digest "taskDigest"
+   :process-digest "processDigest"
+   :last-effect-digest "lastEffectDigest"
+   :step "step"
+   :facts "facts"
+   :bpmn-token-at "bpmnTokenAt"
+   :awaiting-effect "awaitingEffect"
+   :receipt-count "receiptCount"
    :process "process"
    :nodes "nodes"
    :flows "flows"
@@ -145,6 +164,9 @@
       (contains? top-level-tags tag)
       (assoc body "@context" "https://mithril.fund/context/v1"
                   "@type" (get top-level-tags tag))
+
+      (= 'mithril/task tag)
+      (-> body (dissoc "@id") (assoc "id" (get body "@id")))
 
       (contains? nested-tags tag) body
 

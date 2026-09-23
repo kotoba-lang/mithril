@@ -1,0 +1,64 @@
+(mithril/ontology
+  :id "https://mithril.fund/ontology/bot-checkpoint-v1"
+  :profile
+  ["https://www.w3.org/TR/rdf11-concepts/"
+   "https://www.w3.org/TR/owl2-profiles/#OWL_2_RL"
+   "https://www.w3.org/TR/shacl/"]
+  :graph
+  [(owl/class
+     :id "https://mithril.fund/ns/v1#AgentState")
+   (owl/class
+     :id "https://mithril.fund/ns/v1#BotCheckpoint"
+     :rdfs/sub-class-of "https://mithril.fund/ns/v1#AgentState")
+   (shacl/node-shape
+     :id "https://mithril.fund/ns/v1#BotCheckpointShape"
+     :sh/target-class "https://mithril.fund/ns/v1#BotCheckpoint"
+     :sh/property
+     [(shacl/property-shape
+        :sh/path "https://mithril.fund/ns/v1#runId"
+        :sh/datatype "http://www.w3.org/2001/XMLSchema#string"
+        :sh/min-count 1 :sh/max-count 1)
+      (shacl/property-shape
+        :sh/path "https://mithril.fund/ns/v1#runStatus"
+        :sh/datatype "http://www.w3.org/2001/XMLSchema#string"
+        :sh/min-count 1 :sh/max-count 1)
+      (shacl/property-shape
+        :sh/path "https://mithril.fund/ns/v1#stateDigest"
+        :sh/datatype "http://www.w3.org/2001/XMLSchema#string"
+        :sh/min-count 1 :sh/max-count 1)
+      (shacl/property-shape
+        :sh/path "https://mithril.fund/ns/v1#parentDigest"
+        :sh/datatype "http://www.w3.org/2001/XMLSchema#string"
+        :sh/min-count 0 :sh/max-count 1)
+      (shacl/property-shape
+        :sh/path "https://mithril.fund/ns/v1#profileDigest"
+        :sh/datatype "http://www.w3.org/2001/XMLSchema#string"
+        :sh/min-count 1 :sh/max-count 1)
+      (shacl/property-shape
+        :sh/path "https://mithril.fund/ns/v1#taskDigest"
+        :sh/datatype "http://www.w3.org/2001/XMLSchema#string"
+        :sh/min-count 1 :sh/max-count 1)
+      (shacl/property-shape
+        :sh/path "https://mithril.fund/ns/v1#processDigest"
+        :sh/datatype "http://www.w3.org/2001/XMLSchema#string"
+        :sh/min-count 0 :sh/max-count 1)
+      (shacl/property-shape
+        :sh/path "https://mithril.fund/ns/v1#lastEffectDigest"
+        :sh/datatype "http://www.w3.org/2001/XMLSchema#string"
+        :sh/min-count 0 :sh/max-count 1)
+      (shacl/property-shape
+        :sh/path "https://mithril.fund/ns/v1#step"
+        :sh/datatype "http://www.w3.org/2001/XMLSchema#integer"
+        :sh/min-count 1 :sh/max-count 1)
+      (shacl/property-shape
+        :sh/path "https://mithril.fund/ns/v1#receiptCount"
+        :sh/datatype "http://www.w3.org/2001/XMLSchema#integer"
+        :sh/min-count 1 :sh/max-count 1)
+      (shacl/property-shape
+        :sh/path "https://mithril.fund/ns/v1#bpmnTokenAt"
+        :sh/datatype "http://www.w3.org/2001/XMLSchema#string"
+        :sh/min-count 0 :sh/max-count 1)
+      (shacl/property-shape
+        :sh/path "https://mithril.fund/ns/v1#awaitingEffect"
+        :sh/datatype "http://www.w3.org/2001/XMLSchema#string"
+        :sh/min-count 0 :sh/max-count 1)])])

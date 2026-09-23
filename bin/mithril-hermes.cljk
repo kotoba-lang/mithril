@@ -3,6 +3,8 @@
   (:require [cljs.reader :as reader]
             [clojure.string :as str]
             [mithril.bot :as bot]
+            [mithril.checkpoint :as checkpoint]
+            [mithril.execution :as execution]
             [mithril.hermes :as hermes]
             [mithril.openrouter-jev :as jev]))
 
@@ -11,8 +13,11 @@
 (def cp (js/require "node:child_process"))
 
 (defn- usage! []
-  (println "usage: mithril-hermes tick <profile.mith> <task.json> <state.edn> <owner> <grants.csv> <shadow|execute> [coding-tools.json]")
+  (println "usage: mithril-hermes tick <profile.mith> <task.json> <state.edn> <owner> <grants.csv> <shadow|execute|semantic-execute> [coding-tools.json]")
   (println "       mithril-hermes migrate <profile.mith> <task.json> <state.edn> <owner>")
+  (println "       mithril-hermes semantic-import <profile.mith> <task.json> <state.edn> <owner>")
+  (println "       mithril-hermes semantic-restore <state.edn>")
+  (println "       mithril-hermes semantic-verify <state.edn>")
   (println "       mithril-hermes reconcile <profile.mith> <task.json> <state.edn> <owner> <coding-tools.json>")
   (println "       mithril-hermes profile-digest <coding-tools.json>")
   (js/process.exit 2))
@@ -49,8 +54,88 @@
   (let [parent (.dirname path file)
         temporary (str file ".tmp-" (.-pid js/process))]
     (.mkdirSync fs parent #js {:recursive true})
-    (.writeFileSync fs temporary (pr-str state) "utf8")
+    (.writeFileSync fs temporary (pr-str state)
+                    #js {:encoding "utf8" :mode 384})
     (.renameSync fs temporary file)))
+
+(defn- semantic-head-path [state-path] (str state-path ".semantic-head"))
+(defn- semantic-block-dir [state-path] (str state-path ".semantic-blocks"))
+
+(defn- semantic-load
+  ([state-path schema] (semantic-load state-path schema true))
+  ([state-path schema require-projection?]
+  (let [head-path (semantic-head-path state-path)]
+    (cond
+      (.existsSync fs head-path)
+      (let [digest (str/trim (read-text head-path))
+            load-block (fn [id]
+                         (when-not (re-matches #"sha256:[0-9a-f]{64}" (str id))
+                           (throw (ex-info "invalid semantic block identity"
+                                           {:mithril/error :mithril.checkpoint/invalid-head})))
+                         (let [file (.join path (semantic-block-dir state-path) (subs id 7))]
+                           (when-not (.existsSync fs file)
+                             (throw (ex-info "semantic block does not resolve"
+                                             {:mithril/error :mithril.checkpoint/missing-block})))
+                           (let [block (reader/read-string (read-text file))]
+                             (checkpoint/verify schema {:digest id :block block})
+                             block)))
+            block (load-block digest)]
+        (loop [current block depth 0]
+          (when (> depth 256)
+            (throw (ex-info "semantic ancestry exceeds bounded bot history"
+                            {:mithril/error :mithril.checkpoint/ancestry-limit})))
+          (when-let [parent-id (:parent-digest current)]
+            (let [parent (load-block parent-id)]
+              (when-not (or (and (= (get-in parent [:state :run-id])
+                                     (get-in current [:state :run-id]))
+                                 (= (get-in parent [:state :profile-digest])
+                                    (get-in current [:state :profile-digest]))
+                                 (= (get-in parent [:state :task-digest])
+                                    (get-in current [:state :task-digest]))
+                                 (<= (get-in parent [:state :step])
+                                     (get-in current [:state :step])))
+                            (and (contains? #{:completed :held}
+                                            (get-in parent [:state :status]))
+                                 (not= (get-in parent [:state :run-id])
+                                       (get-in current [:state :run-id]))
+                                 (= 0 (get-in current [:state :step]))))
+                (throw (ex-info "semantic ancestry changed run binding or step"
+                                {:mithril/error :mithril.checkpoint/invalid-ancestry})))
+              (recur parent (inc depth)))))
+        (let [verified (checkpoint/verify schema {:digest digest :block block})]
+          (when (and require-projection?
+                     (.existsSync fs state-path)
+                     (not= (:state block) (reader/read-string (read-text state-path))))
+            (throw (ex-info "legacy state projection differs from semantic head"
+                            {:mithril/error :mithril.checkpoint/state-diverged})))
+          {:digest digest :state (:state (:block verified))}))
+
+      (.existsSync fs state-path)
+      (throw (ex-info "legacy checkpoint requires explicit migration before semantic execution"
+                      {:mithril/error :mithril.checkpoint/legacy-state}))
+
+      :else nil))))
+
+(defn- semantic-save! [state-path schema previous state]
+  (let [{:keys [digest block]} (checkpoint/build schema state (:digest previous))
+        head-path (semantic-head-path state-path)
+        observed (when (.existsSync fs head-path) (str/trim (read-text head-path)))
+        dir (semantic-block-dir state-path)
+        file (.join path dir (subs digest 7))
+        temp-head (str head-path ".tmp-" (.-pid js/process))]
+    (when-not (= observed (:digest previous))
+      (throw (ex-info "semantic head changed before checkpoint commit"
+                      {:mithril/error :mithril.checkpoint/head-conflict})))
+    (.mkdirSync fs dir #js {:recursive true :mode 448})
+    (if (.existsSync fs file)
+      (when-not (= block (reader/read-string (read-text file)))
+        (throw (ex-info "existing checkpoint block differs"
+                        {:mithril/error :mithril.checkpoint/block-conflict})))
+      (.writeFileSync fs file (pr-str block) #js {:encoding "utf8" :flag "wx" :mode 384}))
+    (.writeFileSync fs temp-head digest #js {:encoding "utf8" :mode 384})
+    (.renameSync fs temp-head head-path)
+    (write-state! state-path state)
+    {:digest digest :state state}))
 
 (defn- append-audit! [state-path audit]
   (let [file (str state-path ".audit.jsonl")]
@@ -156,8 +241,8 @@
       (let [plan (bot/prepare-request state owner (inc now))]
         (-> (jev/decide! plan (read-key))
             (.then (fn [{:keys [model-result audit]}]
-                     {:admitted (bot/admit-decision state model-result owner (+ now 2))
-                      :audit audit})))))))
+                     (assoc (bot/resolve-decision state model-result owner (+ now 2))
+                            :audit audit))))))))
 
 (defn- refuse! [error]
   (println (str "REFUSE\t" (or (some-> error ex-data :mithril/error name) "hermes-error")
@@ -205,6 +290,76 @@
         (catch :default error (refuse! error))
         (finally (release-lock! lock))))))
 
+(defn- semantic-import! [profile-path task-path state-path owner]
+  (let [lock (try (acquire-lock! state-path) (catch :default error (refuse! error) nil))]
+    (when lock
+      (try
+        (when-not (.existsSync fs state-path)
+          (throw (ex-info "semantic import requires an existing checkpoint"
+                          {:mithril/error :mithril.checkpoint/missing-state})))
+        (when (.existsSync fs (semantic-head-path state-path))
+          (throw (ex-info "semantic import refuses an existing semantic head"
+                          {:mithril/error :mithril.checkpoint/already-imported})))
+        (let [schema (checkpoint/schema (read-text checkpoint/ontology-path))
+              artifact (bot/compile-text profile-path (read-text profile-path))
+              task (js->clj (js/JSON.parse (read-text task-path)) :keywordize-keys true)
+              saved (reader/read-string (read-text state-path))
+              run (bot/resume-or-start artifact task saved owner (.now js/Date))]
+          (when-not (contains? #{:resumed :terminal} (:disposition run))
+            (throw (ex-info "legacy state must be migrated before semantic import"
+                            {:mithril/error :mithril.checkpoint/not-current
+                             :disposition (:disposition run)})))
+          (when-not (= (dissoc saved :lease) (dissoc (:state run) :lease))
+            (throw (ex-info "import cannot change legacy checkpoint semantics"
+                            {:mithril/error :mithril.checkpoint/state-changed})))
+          (let [committed (semantic-save! state-path schema nil saved)]
+            (append-audit! state-path
+                           {:at (.toISOString (js/Date.)) :status :semantic-imported
+                            :run-id (:run-id saved) :step (:step saved)
+                            :checkpoint-digest (:digest committed)})
+            (println (json-line {:status :semantic-imported
+                                 :run-id (:run-id saved)
+                                 :step (:step saved)
+                                 :checkpoint-digest (:digest committed)}))))
+        (catch :default error (refuse! error))
+        (finally (release-lock! lock))))))
+
+(defn- semantic-restore! [state-path]
+  (let [lock (try (acquire-lock! state-path) (catch :default error (refuse! error) nil))]
+    (when lock
+      (try
+        (when-not (.existsSync fs (semantic-head-path state-path))
+          (throw (ex-info "semantic restore requires an existing head"
+                          {:mithril/error :mithril.checkpoint/missing-head})))
+        (let [schema (checkpoint/schema (read-text checkpoint/ontology-path))
+              previous (semantic-load state-path schema false)]
+          (write-state! state-path (:state previous))
+          (append-audit! state-path
+                         {:at (.toISOString (js/Date.)) :status :semantic-projection-restored
+                          :checkpoint-digest (:digest previous)
+                          :run-id (get-in previous [:state :run-id])})
+          (println (json-line {:status :semantic-projection-restored
+                               :checkpoint-digest (:digest previous)})))
+        (catch :default error (refuse! error))
+        (finally (release-lock! lock))))))
+
+(defn- semantic-verify! [state-path]
+  (let [lock (try (acquire-lock! state-path) (catch :default error (refuse! error) nil))]
+    (when lock
+      (try
+        (when-not (.existsSync fs (semantic-head-path state-path))
+          (throw (ex-info "semantic verification requires an existing head"
+                          {:mithril/error :mithril.checkpoint/missing-head})))
+        (let [schema (checkpoint/schema (read-text checkpoint/ontology-path))
+              previous (semantic-load state-path schema)]
+          (println (json-line {:status :verified
+                               :checkpoint-digest (:digest previous)
+                               :state-digest (execution/digest (:state previous))
+                               :run-id (get-in previous [:state :run-id])
+                               :run-status (get-in previous [:state :status])})))
+        (catch :default error (refuse! error))
+        (finally (release-lock! lock))))))
+
 (defn- reconcile-checkpoint! [profile-path task-path state-path owner tool-profile-path]
   (let [lock (try (acquire-lock! state-path) (catch :default error (refuse! error) nil))]
     (when lock
@@ -217,7 +372,11 @@
                              (hermes/tool-profile-digest profile))
                   (throw (ex-info "task does not bind coding tools"
                                   {:mithril/error :mithril.hermes/tool-profile-mismatch})))
-              saved (reader/read-string (read-text state-path))
+              semantic? (.existsSync fs (semantic-head-path state-path))
+              schema (when semantic? (checkpoint/schema (read-text checkpoint/ontology-path)))
+              previous (when semantic? (semantic-load state-path schema))
+              saved (if semantic? (:state previous)
+                        (reader/read-string (read-text state-path)))
               _ (when-not (and (= :running (:status saved))
                                (= owner (get-in saved [:lease :owner]))
                                (:awaiting saved))
@@ -227,7 +386,9 @@
               effect (:awaiting state)
               {:keys [receipt audit]} (hermes/reconcile-effect effect {:profile profile})
               next-state (bot/apply-receipt state receipt owner (.now js/Date))]
-          (write-state! state-path next-state)
+          (if semantic?
+            (semantic-save! state-path schema previous next-state)
+            (write-state! state-path next-state))
           (append-audit! state-path {:at (.toISOString (js/Date.))
                                      :status :reconciled :effect-id (:id effect)
                                      :action (:action effect) :host audit
@@ -249,9 +410,24 @@
         (catch :default error (refuse! error)))
       (usage!))
 
+    (= "semantic-restore" command)
+    (if (and profile-path (nil? task-path))
+      (semantic-restore! profile-path)
+      (usage!))
+
+    (= "semantic-verify" command)
+    (if (and profile-path (nil? task-path))
+      (semantic-verify! profile-path)
+      (usage!))
+
     (= "migrate" command)
     (if (and profile-path task-path state-path owner (nil? grants-csv))
       (migrate-checkpoint! profile-path task-path state-path owner)
+      (usage!))
+
+    (= "semantic-import" command)
+    (if (and profile-path task-path state-path owner (nil? grants-csv))
+      (semantic-import! profile-path task-path state-path owner)
       (usage!))
 
     (= "reconcile" command)
@@ -262,7 +438,7 @@
 
     :else
     (if-not (and (= "tick" command) profile-path task-path state-path owner grants-csv
-                 (contains? #{"shadow" "execute"} mode) (empty? extra))
+                 (contains? #{"shadow" "execute" "semantic-execute"} mode) (empty? extra))
     (usage!)
     (let [lock (try (acquire-lock! state-path) (catch :default error (refuse! error) nil))]
       (when lock
@@ -271,7 +447,10 @@
                                      :status :stale-lock-recovered
                                      :owner-pid recovered-pid}))
         (try
-          (let [artifact (bot/compile-text profile-path (read-text profile-path))
+          (let [semantic? (= "semantic-execute" mode)
+                schema (when semantic? (checkpoint/schema (read-text checkpoint/ontology-path)))
+                previous (when semantic? (semantic-load state-path schema))
+                artifact (bot/compile-text profile-path (read-text profile-path))
                 task (js->clj (js/JSON.parse (read-text task-path)) :keywordize-keys true)
                 tool-profile (when tool-profile-path
                                (js->clj (js/JSON.parse (read-text tool-profile-path))
@@ -282,7 +461,9 @@
                     (throw (ex-info "task does not bind the supplied coding tool profile"
                                     {:mithril/error :mithril.hermes/tool-profile-mismatch})))
                 now (.now js/Date)
-                run (load-or-start artifact task state-path owner now)
+                run (if semantic?
+                      (bot/resume-or-start artifact task (:state previous) owner now)
+                      (load-or-start artifact task state-path owner now))
                 state (:state run)
                 grants (set (map keyword (remove str/blank? (str/split grants-csv #","))))]
             (when (and (not= :terminal (:disposition run)) (:awaiting state))
@@ -303,7 +484,22 @@
                 (release-lock! lock))
               (-> (decide! state owner now (boolean tool-profile))
                 (.then
-                 (fn [{:keys [admitted audit]}]
+                 (fn [{:keys [admitted held reason audit]}]
+                   (if held
+                     (let [shadow? (= "shadow" mode)]
+                       (when-not shadow?
+                         (if semantic?
+                           (semantic-save! state-path schema previous held)
+                           (write-state! state-path held)))
+                       (append-audit! state-path
+                                      {:at (.toISOString (js/Date.))
+                                       :mode mode :status (if shadow? :shadow-refused :held)
+                                       :run-id (:run-id held) :step (:step held)
+                                       :reason reason :model audit})
+                       (println (json-line {:status (if shadow? :shadow-refused :held)
+                                            :reason reason
+                                            :run-id (:run-id held)
+                                            :step (:step held)})))
                    (let [action (:action admitted)
                          base-audit {:at (.toISOString (js/Date.))
                                      :mode mode :run-id (:run-id state) :step (:step state)
@@ -319,7 +515,9 @@
                                              :step (:step state) :run-status (:status state)})))
                        (let [{requested-state :state effect :effect}
                              (bot/request-effect state admitted grants owner (+ now 3))
-                             _ (write-state! state-path requested-state)
+                             requested-checkpoint (if semantic?
+                                                    (semantic-save! state-path schema previous requested-state)
+                                                    (do (write-state! state-path requested-state) nil))
                              _ (append-audit! state-path
                                               (assoc base-audit :status :effect-requested
                                                      :effect-id (:id effect)))
@@ -327,14 +525,16 @@
                              (hermes/execute-effect effect (cond-> {}
                                                             tool-profile (assoc :profile tool-profile)))
                              next-state (bot/apply-receipt requested-state receipt owner (+ now 4))]
-                         (write-state! state-path next-state)
+                         (if semantic?
+                           (semantic-save! state-path schema requested-checkpoint next-state)
+                           (write-state! state-path next-state))
                          (append-audit! state-path
                                         (assoc base-audit :status (:status receipt)
                                                :effect-id (:id effect) :host audit
                                                :output-digest (:output-digest receipt)))
                          (println (json-line {:status (:status receipt) :action (:label action)
                                              :step (:step next-state)
-                                             :run-status (:status next-state)})))))))
+                                             :run-status (:status next-state)}))))))))
                 (.catch refuse!)
                 (.finally #(release-lock! lock)))))
           (catch :default error

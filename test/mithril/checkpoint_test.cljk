@@ -1,0 +1,57 @@
+(ns mithril.checkpoint-test
+  (:require [cljs.test :refer [deftest is]]
+            [mithril.bot :as bot]
+            [mithril.checkpoint :as checkpoint]
+            [mithril.compiler :as compiler]
+            [mithril.execution :as execution]
+            [mithril.form :as form]))
+
+(def fs (js/require "node:fs"))
+(defn text [path] (.readFileSync fs path "utf8"))
+(defn fixture []
+  (let [artifact (bot/compile-text "examples/governed-coding-bot.mith"
+                                   (text "examples/governed-coding-bot.mith"))]
+    (bot/start-run artifact {:id "checkpoint-test" :workspace "/tmp"
+                             :goal "Inspect the workspace"} "test" 1000)))
+(defn schema [] (checkpoint/schema (text checkpoint/ontology-path)))
+(defn error-code [f]
+  (try (f) nil (catch :default e (:mithril/error (ex-data e)))))
+
+(deftest checkpoint-graph-and-causal-block
+  (let [s (schema)
+        initial (checkpoint/build s (fixture) nil)
+        resumed (checkpoint/build s (assoc (fixture) :step 1) (:digest initial))
+        doc (form/parse (get-in resumed [:block :source]))]
+    (is (= initial (checkpoint/verify s initial)))
+    (is (= (:digest initial) (get-in resumed [:block :parent-digest])))
+    (is (= (get-in resumed [:block :graph-digest]) (compiler/graph-digest doc)))
+    (is (= "BotCheckpoint" (get doc "@type")))
+    (is (= 1 (get doc "step")))
+    (is (= ["https://mithril.fund/fact/semantic/prefix-valid"] (get doc "facts")))
+    (is (= 0 (get doc "receiptCount")))
+    (is (string? (get doc "bpmnTokenAt")))
+    (is (not= (:graph-digest (:block initial))
+              (:graph-digest (:block
+                              (checkpoint/build s
+                                                (update (fixture) :facts conj :workspace/inspected)
+                                                nil)))))
+    (is (= :mithril.checkpoint/invalid-block
+           (error-code #(checkpoint/verify s (assoc-in initial [:block :state :step] 99)))))
+    (let [changed (checkpoint/form-text
+                   (assoc (checkpoint/projection (fixture) nil)
+                          :run-status "completed"))]
+      (is (= :mithril.checkpoint/invalid-block
+             (error-code #(checkpoint/verify s
+                                             (assoc-in initial [:block :source] changed))))))))
+
+(deftest declared-shape-is-enforced
+  (let [s (schema)
+        invalid (assoc (fixture) :step "one")]
+    (is (= :mithril.checkpoint/shacl-violation
+           (error-code #(checkpoint/build s invalid nil))))
+    (let [changed (clojure.string/replace
+                   (text checkpoint/ontology-path)
+                   "https://mithril.fund/ns/v1#AgentState"
+                   "https://mithril.fund/ns/v1#OtherState")]
+      (is (= :mithril.checkpoint/invalid-ontology
+             (error-code #(checkpoint/schema changed)))))))
