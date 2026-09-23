@@ -5,7 +5,8 @@
             [mithril.checkpoint :as checkpoint]
             [mithril.checkpoint-ipld :as ipld-checkpoint]
             [mithril.checkpoint-ipld-fs :as local]
-            [mithril.compiler :as compiler]))
+            [mithril.compiler :as compiler]
+            [mithril.domain-rdf :as domain-rdf]))
 
 (def fs (js/require "node:fs"))
 (defn- text [file] (.readFileSync fs file "utf8"))
@@ -17,6 +18,7 @@
   (println "       mithril-checkpoint-ipld merge <store-dir> <base-ref> <left-ref> <right-ref> <output-ref>")
   (println "       mithril-checkpoint-ipld verify <store-dir> <ref>")
   (println "       mithril-checkpoint-ipld show <store-dir> <ref>")
+  (println "       mithril-checkpoint-ipld domain <store-dir> <ref>")
   (js/process.exit 2))
 
 (defn- fact [value]
@@ -82,6 +84,7 @@
                             :blocks (:blocks history)
                             :graphDigest (:graph-digest saved)
                             :semanticGraphDigest (:semantic-graph-digest saved)
+                            :domainGraphDigest (:domain-graph-digest saved)
                             :runStatus (clojure.core/name (get-in saved [:state :status]))}))))
 
         "show"
@@ -91,6 +94,25 @@
                 saved (ipld-checkpoint/read!
                        #(local/get-block store %) schema (local/read-ref store name))]
             (println (or (:semantic-source saved) (:source saved)))))
+
+        "domain"
+        (let [[directory name & extra] args]
+          (when-not (and directory name (empty? extra)) (usage!))
+          (let [store (local/open! directory)
+                saved (ipld-checkpoint/read!
+                       #(local/get-block store %) schema (local/read-ref store name))]
+            (when-not (= ipld-checkpoint/format-id (:format saved))
+              (throw (ex-info "domain RDF requires a v6 checkpoint"
+                              {:reason :domain-format-required})))
+            (let [state (assoc (:state saved) :task-digest
+                               (checkpoint/task-identity (:state saved)))
+                  document (domain-rdf/document state)
+                  dataset (domain-rdf/quads document)]
+              (when-not (= (:domain-graph-digest saved)
+                           (domain-rdf/graph-digest dataset))
+                (throw (ex-info "domain RDF digest differs from the CID block"
+                                {:reason :domain-graph-digest-mismatch})))
+              (println (json document)))))
 
         (usage!)))
     (catch :default error

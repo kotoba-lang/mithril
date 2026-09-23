@@ -1,0 +1,110 @@
+(mithril/ontology
+  :id "https://mithril.fund/ontology/bot-domain-v1"
+  :profile
+  ["https://www.w3.org/TR/rdf11-concepts/"
+   "https://www.w3.org/TR/owl2-profiles/#OWL_2_RL"
+   "https://www.w3.org/TR/shacl/"]
+  :graph
+  [(owl/class :id "https://mithril.fund/ns/bot-domain/v1#Activity")
+   (owl/class :id "https://mithril.fund/ns/bot-domain/v1#Run"
+              :rdfs/sub-class-of "https://mithril.fund/ns/bot-domain/v1#Activity")
+   (owl/class :id "https://mithril.fund/ns/bot-domain/v1#EffectEvent"
+              :rdfs/sub-class-of "https://mithril.fund/ns/bot-domain/v1#Activity")
+   (owl/class :id "https://mithril.fund/ns/bot-domain/v1#Receipt"
+              :rdfs/sub-class-of "https://mithril.fund/ns/bot-domain/v1#EffectEvent")
+   (owl/class :id "https://mithril.fund/ns/bot-domain/v1#AwaitingEffect"
+              :rdfs/sub-class-of "https://mithril.fund/ns/bot-domain/v1#EffectEvent")
+   (owl/class :id "https://mithril.fund/ns/bot-domain/v1#Action")
+   (owl/class :id "https://mithril.fund/ns/bot-domain/v1#Fact")
+   (shacl/node-shape
+     :id "https://mithril.fund/ns/bot-domain/v1#RunShape"
+     :sh/target-class "https://mithril.fund/ns/bot-domain/v1#Run"
+     :sh/property
+     [(shacl/property-shape
+        :sh/path "https://mithril.fund/ns/bot-domain/v1#runId"
+        :sh/datatype "http://www.w3.org/2001/XMLSchema#string"
+        :sh/min-count 1 :sh/max-count 1)
+      (shacl/property-shape
+        :sh/path "https://mithril.fund/ns/bot-domain/v1#status"
+        :sh/datatype "http://www.w3.org/2001/XMLSchema#string"
+        :sh/min-count 1 :sh/max-count 1)
+      (shacl/property-shape
+        :sh/path "https://mithril.fund/ns/bot-domain/v1#step"
+        :sh/datatype "http://www.w3.org/2001/XMLSchema#integer"
+        :sh/min-count 1 :sh/max-count 1)
+      (shacl/property-shape
+        :sh/path "https://mithril.fund/ns/bot-domain/v1#profileDigest"
+        :sh/datatype "http://www.w3.org/2001/XMLSchema#string"
+        :sh/min-count 1 :sh/max-count 1)
+      (shacl/property-shape
+        :sh/path "https://mithril.fund/ns/bot-domain/v1#taskDigest"
+        :sh/datatype "http://www.w3.org/2001/XMLSchema#string"
+        :sh/min-count 1 :sh/max-count 1)
+      (shacl/property-shape
+        :sh/path "https://mithril.fund/ns/bot-domain/v1#receipt"
+        :sh/class "https://mithril.fund/ns/bot-domain/v1#Receipt"
+        :sh/min-count 0 :sh/max-count 64)
+      (shacl/property-shape
+        :sh/path "https://mithril.fund/ns/bot-domain/v1#fact"
+        :sh/class "https://mithril.fund/ns/bot-domain/v1#Fact"
+        :sh/min-count 0 :sh/max-count 64)
+      (shacl/property-shape
+        :sh/path "https://mithril.fund/ns/bot-domain/v1#awaiting"
+        :sh/class "https://mithril.fund/ns/bot-domain/v1#AwaitingEffect"
+        :sh/min-count 0 :sh/max-count 1)])
+   (shacl/node-shape
+     :id "https://mithril.fund/ns/bot-domain/v1#ReceiptShape"
+     :sh/target-class "https://mithril.fund/ns/bot-domain/v1#Receipt"
+     :sh/property
+     [(shacl/property-shape
+        :sh/path "https://mithril.fund/ns/bot-domain/v1#effectId"
+        :sh/datatype "http://www.w3.org/2001/XMLSchema#string"
+        :sh/min-count 1 :sh/max-count 1)
+      (shacl/property-shape
+        :sh/path "https://mithril.fund/ns/bot-domain/v1#action"
+        :sh/class "https://mithril.fund/ns/bot-domain/v1#Action"
+        :sh/min-count 1 :sh/max-count 1)
+      (shacl/property-shape
+        :sh/path "https://mithril.fund/ns/bot-domain/v1#status"
+        :sh/datatype "http://www.w3.org/2001/XMLSchema#string"
+        :sh/min-count 1 :sh/max-count 1)
+      (shacl/property-shape
+        :sh/path "https://mithril.fund/ns/bot-domain/v1#outputDigest"
+        :sh/datatype "http://www.w3.org/2001/XMLSchema#string"
+        :sh/min-count 1 :sh/max-count 1)
+      (shacl/property-shape
+        :sh/path "https://mithril.fund/ns/bot-domain/v1#index"
+        :sh/datatype "http://www.w3.org/2001/XMLSchema#integer"
+        :sh/min-count 1 :sh/max-count 1)])
+   (shacl/node-shape
+     :id "https://mithril.fund/ns/bot-domain/v1#AwaitingShape"
+     :sh/target-class "https://mithril.fund/ns/bot-domain/v1#AwaitingEffect"
+     :sh/property
+     [(shacl/property-shape
+        :sh/path "https://mithril.fund/ns/bot-domain/v1#effectId"
+        :sh/datatype "http://www.w3.org/2001/XMLSchema#string"
+        :sh/min-count 1 :sh/max-count 1)
+      (shacl/property-shape
+        :sh/path "https://mithril.fund/ns/bot-domain/v1#action"
+        :sh/class "https://mithril.fund/ns/bot-domain/v1#Action"
+        :sh/min-count 1 :sh/max-count 1)
+      (shacl/property-shape
+        :sh/path "https://mithril.fund/ns/bot-domain/v1#index"
+        :sh/datatype "http://www.w3.org/2001/XMLSchema#integer"
+        :sh/min-count 1 :sh/max-count 1)])
+   (shacl/node-shape
+     :id "https://mithril.fund/ns/bot-domain/v1#ActionShape"
+     :sh/target-class "https://mithril.fund/ns/bot-domain/v1#Action"
+     :sh/property
+     [(shacl/property-shape
+        :sh/path "https://mithril.fund/ns/bot-domain/v1#operation"
+        :sh/datatype "http://www.w3.org/2001/XMLSchema#string"
+        :sh/min-count 1 :sh/max-count 1)])
+   (shacl/node-shape
+     :id "https://mithril.fund/ns/bot-domain/v1#FactShape"
+     :sh/target-class "https://mithril.fund/ns/bot-domain/v1#Fact"
+     :sh/property
+     [(shacl/property-shape
+        :sh/path "https://mithril.fund/ns/bot-domain/v1#name"
+        :sh/datatype "http://www.w3.org/2001/XMLSchema#string"
+        :sh/min-count 1 :sh/max-count 1)])])

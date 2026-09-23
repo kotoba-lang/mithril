@@ -1,0 +1,88 @@
+(ns mithril.domain-rdf-test
+  (:require [cljs.test :refer [deftest is]]
+            [mithril.bot :as bot]
+            [mithril.domain-rdf :as domain]
+            [mithril.execution :as execution]))
+
+(def fs (js/require "node:fs"))
+(def ontology-source (.readFileSync fs domain/ontology-path "utf8"))
+(def schema (domain/schema ontology-source))
+(def artifact (bot/compile-text "examples/governed-coding-bot.mith"
+                                (.readFileSync fs "examples/governed-coding-bot.mith" "utf8")))
+(defn fail-reason [f]
+  (try (f) nil (catch :default e (:reason (ex-data e)))))
+(defn receipt-state []
+  (let [base (bot/start-run artifact
+                            {:id "domain-rdf-test" :workspace "/tmp" :goal "query receipts"}
+                            "domain-test" 1000)
+        requested (bot/request-effect
+                   base {:action (get bot/action-by-label "workspace-inspect")
+                         :confidence 10000}
+                   #{:workspace/read} "domain-test" 1001)]
+    (bot/apply-receipt (:state requested)
+                       {:format bot/receipt-format
+                        :effect-id (get-in requested [:effect :id])
+                        :status :completed
+                        :output-digest (execution/digest :inspected)}
+                       "domain-test" 1002)))
+
+(deftest receipts-and-facts-are-domain-rdf-with-owl-and-sparql
+  (let [state (receipt-state)
+        dataset (domain/quads (domain/document state))
+        report (domain/validate! schema dataset)
+        packed (domain/pack-quads dataset)]
+    (is (:valid? report))
+    (is (= 1 (:receipt-rows report)))
+    (is (= (count (:facts state)) (:fact-rows report)))
+    (is (> (:entailed-types report) (:checked-nodes report)))
+    (is (= (set dataset) (set (domain/unpack-quads! packed))))
+    (is (re-matches #"sha256:[0-9a-f]{64}" (domain/graph-digest dataset)))
+    (is (= :noncanonical-packed-dataset
+           (fail-reason #(domain/unpack-quads!
+                          (update packed "triples" (comp vec reverse))))))
+    (is (= :unmapped-receipt-action
+           (fail-reason #(domain/document
+                          (assoc-in state [:receipts 0 :effect-id]
+                                    (execution/digest :unrelated))))))))
+
+(deftest ontology-shapes-reject-class-count-and-datatype-violations
+  (let [dataset (domain/quads (domain/document (receipt-state)))
+        receipt-id (some (fn [{:keys [subject predicate object]}]
+                           (when (and (= domain/rdf-type (:value predicate))
+                                      (= (str domain/base "Receipt") (:value object)))
+                             (:value subject))) dataset)
+        fact-id (some (fn [{:keys [subject predicate object]}]
+                        (when (and (= domain/rdf-type (:value predicate))
+                                   (= (str domain/base "Fact") (:value object)))
+                          (:value subject))) dataset)
+        bad-class (mapv (fn [quad]
+                          (if (and (= receipt-id (get-in quad [:subject :value]))
+                                   (= (str domain/base "action")
+                                      (get-in quad [:predicate :value])))
+                            (assoc-in quad [:object :value] fact-id)
+                            quad)) dataset)
+        bad-count (filterv (fn [quad]
+                             (not (and (= receipt-id (get-in quad [:subject :value]))
+                                       (= (str domain/base "outputDigest")
+                                          (get-in quad [:predicate :value]))))) dataset)
+        bad-datatype (mapv (fn [quad]
+                             (if (and (= receipt-id (get-in quad [:subject :value]))
+                                      (= (str domain/base "index")
+                                         (get-in quad [:predicate :value])))
+                               (assoc-in quad [:object :datatype] (str domain/xsd "string"))
+                               quad)) dataset)]
+    (is (string? receipt-id))
+    (is (string? fact-id))
+    (is (some #(and (= (str domain/base "action") (:path %)) (:class? %))
+              (:violations (domain/validate! schema bad-class))))
+    (is (some #(and (= (str domain/base "outputDigest") (:path %))
+                    (= 0 (:count %)))
+              (:violations (domain/validate! schema bad-count))))
+    (is (some #(and (= (str domain/base "index") (:path %)) (:datatype? %))
+              (:violations (domain/validate! schema bad-datatype))))))
+
+(deftest unsupported-domain-shacl-is-refused
+  (is (= :unsupported-shacl-property
+         (fail-reason #(domain/schema
+                       (.replace ontology-source ":sh/max-count 64"
+                                 ":sh/max-count 65"))))))

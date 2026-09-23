@@ -37,13 +37,20 @@
         (is (= 0 (.-status (invoke "assert" directory "right" "source/verified"))))
         (is (= 0 (.-status (invoke "merge" directory "base" "left" "right" "merged"))))
         (let [verified (invoke "verify" directory "merged")
-              shown (invoke "show" directory "merged")]
+              shown (invoke "show" directory "merged")
+              domain (invoke "domain" directory "merged")]
           (is (= 0 (.-status verified)) (output verified))
           (is (re-find #"\"blocks\":4" (output verified)))
+          (is (re-find #"\"domainGraphDigest\":\"sha256:" (output verified)))
           (is (= 0 (.-status shown)) (output shown))
           (is (re-find #"mithril/bot-checkpoint-semantic" (output shown)))
           (is (re-find #"review/approved" (output shown)))
-          (is (re-find #"source/verified" (output shown))))
+          (is (re-find #"source/verified" (output shown)))
+          (is (= 0 (.-status domain)) (output domain))
+          (let [document (js->clj (js/JSON.parse (.-stdout domain)))
+                graph (get document "@graph")]
+            (is (some #(= "Run" (get % "@type")) graph))
+            (is (= 3 (count (filter #(= "Fact" (get % "@type")) graph))))))
         (.writeFileSync fs source-file
                         (str (checkpoint/form-text (checkpoint/projection state nil)) "\n"))
         (is (= 0 (.-status (invoke "import" source-file state-file

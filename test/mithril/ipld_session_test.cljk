@@ -74,7 +74,9 @@
             base (session/save! store schema state-path nil s0)
             base-id (:stateCid base)
             v2-node (-> (ipld-core/get-node #(local/get-block store %) base-id)
-                        (dissoc "stateDataset" "stateOntologySource" "stateOntologyDigest")
+                        (dissoc "stateDataset" "stateOntologySource" "stateOntologyDigest"
+                                "domainOntologySource" "domainOntologyDigest"
+                                "domainDataset" "domainGraphDigest")
                         (assoc "format" ipld/format-v2
                                "stateEdn" (execution/canonical-edn-text s0)
                                "parents" [(ipld-core/link base-id)]))

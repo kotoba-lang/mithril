@@ -363,6 +363,7 @@ kbb --backend sci bin/mithril-checkpoint-ipld.cljk fork /absolute/private/store 
 kbb --backend sci bin/mithril-checkpoint-ipld.cljk assert /absolute/private/store left review/approved
 kbb --backend sci bin/mithril-checkpoint-ipld.cljk verify /absolute/private/store left
 kbb --backend sci bin/mithril-checkpoint-ipld.cljk show /absolute/private/store left
+kbb --backend sci bin/mithril-checkpoint-ipld.cljk domain /absolute/private/store left
 ```
 
 `import` requires the `.mith` file to be the exact projection of the paired
@@ -371,33 +372,51 @@ the same run; divergent effects, receipts, workflow tokens, or deletions are
 rejected. This is an immutable, content-addressed branch experiment, not a
 general Unison merge or a distributed store. It does not sync refs between
 machines, provide crash-durable fsync, or establish fleet-wide Hermes profile
-equivalence.
+equivalence. `domain` emits the verified v6 domain RDF view as JSON-LD and
+refuses older block formats; `verify` reports its separate `domainGraphDigest`.
 
-New checkpoint blocks use v5. Their complete executable state is a canonical
+New checkpoint blocks use v6. Their complete executable state is a canonical
 RDF Dataset stored as a compact IPLD `stateDataset` (term dictionary plus
 indexed triples). The reader expands its quads, reconstructs the state from
 them, and rejects noncanonical or orphaned graph nodes; it does not read an
-EDN string or v3 typed tree to recover v5. The same graph can be projected as
-JSON-LD. The reader continues to verify v1/v2/v3/v4 blocks under their original
+EDN string or v3 typed tree to recover v6. The same graph can be projected as
+JSON-LD. The reader continues to verify v1 through v5 blocks under their original
 identities rather than rewriting history. Alongside the legacy `graphDigest`,
-v2 through v5 store a separate
+v2 through v6 store a separate
 `semanticGraphDigest` computed from the
 [`bot-checkpoint` context](resources/context-bot-checkpoint-v1.jsonld) with
 absolute predicate IRIs and an explicit RDF field-loss check. The CID binds
 the ontology source and `.mith` semantic projection. Existing v1 blocks remain
 readable but do not acquire the stronger semantic digest retroactively.
-The domain-level OWL/SHACL graph remains a checked, lossy summary; v5's
-separate structural RDF Dataset carries the complete runtime state, and a
+The original domain-level OWL/SHACL graph remains a checked, lossy summary;
+v5 and v6's structural RDF Dataset carries the complete runtime state, and a
 CID-bound [`state-graph-v1.mith`](ontology/state-graph-v1.mith) ontology now
 checks its node types by OWL 2 RL subclass entailment and its entry, item,
 value and scalar fields by a bounded SHACL Core subset (count, datatype,
-class). Unknown shapes and constraints are refused. This is not full OWL 2 or
-full SHACL Core, and it does
-not make every nested field independently queryable as a domain predicate or
-SHACL-validated property. A legacy `bot-run-v1`
+class). V6 also stores a separate, compact `domainDataset` projected
+deterministically from that executable state. The CID binds both datasets,
+the versioned [`bot-domain-v1.mith`](ontology/bot-domain-v1.mith) OWL/SHACL
+ontology, and `domainGraphDigest`, which hashes the canonical RDF Dataset
+independently of the block CID. `Run`, `Receipt`, `AwaitingEffect`, `Action`,
+and `Fact` become queryable nodes. Receipt action identity is reconstructed
+from the run ID, step index, and closed action catalog; ambiguity is refused.
+OWL 2 RL derives `Run` and effect-event superclasses; the declared SHACL
+shapes check count, datatype and class; a real SPARQL query checks receipt and
+fact links. Incoming v6 blocks are rederived from the full state rather than
+trusting a supplied projection. Unknown shapes and constraints are refused.
+This is not full OWL 2 or full SHACL Core, and it does not make every nested
+field independently queryable as a domain predicate. A legacy `bot-run-v1`
 state may omit `task-digest`; the checkpoint derives it
 from the preserved task value, while a mismatching declared digest or a
 non-legacy omission is rejected.
+
+The verified seven-effect v5 Hermes final state was read under its historical
+CID and emitted as an in-memory v6 block: exact state equality, 93 domain
+quads, seven SPARQL receipt rows, eight fact rows, and a 109,082-byte block
+(one local measurement). This is a v6 value-layer test, not yet a v6 builtin
+scheduler run. `domainGraphDigest` is semantic RDF identity; the block's CID
+is causal storage identity. Neither by itself supplies distributed mutable
+refs, general branch merge, or crash-durable persistence.
 
 The final state from the isolated seven-effect Hermes builtin run was also
 read from its historical v4 CID, emitted as an in-memory v5 block, and read
