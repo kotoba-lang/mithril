@@ -34,6 +34,26 @@
 (defn- reason [f]
   (try (f) nil (catch :default error (:reason (ex-data error)))))
 
+(deftest primary-state-path-is-bound-to-one-readonly-occurrence
+  (let [row {:execution {:id "0123456789abcdef0123456789abcdef"
+                         :source "builtin"}
+             :receipt {:format "https://mithril.fund/receipt/hermes-bpmn-scheduler-v1"
+                       :status "completed"}}]
+    (is (= "0123456789abcdef0123456789abcdef.edn"
+           (scheduler-ipld/primary-state-basename "mithril" "abcdef123456" [row])))
+    (is (= :invalid-readonly-primary-series
+           (reason #(scheduler-ipld/primary-state-basename
+                     "mithril" "abcdef123456" [row row]))))
+    (is (= :invalid-readonly-primary-series
+           (reason #(scheduler-ipld/primary-state-basename
+                     "mithril" "abcdef123456"
+                     [(assoc-in row [:execution :source] "direct")]))))
+    (is (= "mithril-abcdef123456.session.edn"
+           (scheduler-ipld/primary-state-basename
+            "mithril" "abcdef123456"
+            [(assoc-in row [:receipt :format]
+                       "https://mithril.fund/receipt/hermes-bpmn-scheduler-v2")])))))
+
 (deftest scheduler-states-form-a-verified-cid-chain-and-refuse-drift
   (let [directory (.mkdtempSync fs (.join path (.tmpdir os) "mithril-scheduler-ipld-"))]
     (try

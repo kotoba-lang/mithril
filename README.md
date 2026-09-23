@@ -177,6 +177,24 @@ automatic replay. Direct CLI calls with no scheduler claim are refused.
 profiles may change independently). V1 admits only `workspace/read`,
 `git/status`, and `agent/stop`; write, compile, test, and other coding effects
 need separate idempotency or reconciliation contracts before migration.
+The read-only contract may opt into `checkpointMode=ipld-primary` only when
+the Hermes job has `repeat.times=1`. Its single builtin occurrence can take
+a Jev decision, commit the v2 ontology-validated decision output before the
+host read, and link the host receipt to the CID head. A second occurrence is
+refused rather than silently reusing a per-execution state path.
+
+An isolated one-occurrence Hermes job on 2026-09-24 exercised this path with
+`source=builtin`, `status=completed`. OpenRouter Jev selected
+`workspace-inspect`; the host completed one `workspace/read`. The primary
+verifier reconciled the Hermes execution and receipt with three causal CID
+blocks (baseline, Jev v2 decision/effect request, host result), zero direct
+executions, and a matched EDN projection. Its final state CID was
+`bafyreif4pr2ny3zfdlyel7flmdimuhthaa74zaxdklig4farvxaawvvmqa`.
+The single Jev request reported 781 input and 36 output tokens, cost
+$0.000032802; the two audit rows share the same request ID. The repeat-limited
+job disabled itself after completion. This proves one scheduler-originated
+read-only loop, not Jev-authored coding, fleet parity, token-free inference,
+or distributed mutable refs.
 
 The coding executor now persists the `:awaiting` BPMN checkpoint and an
 `effect-requested` audit record **before** calling the host. A restarted tick

@@ -29,6 +29,15 @@
 (defn- digest? [value]
   (and (string? value) (boolean (re-matches #"sha256:[0-9a-f]{64}" value))))
 
+(defn admit-job-repeat!
+  "A read-only CID-primary contract is scoped to one Hermes occurrence."
+  [contract job]
+  (when (and (not (:coding? contract))
+             (= "ipld-primary" (:checkpoint-mode contract))
+             (not= 1 (get-in job [:repeat :times])))
+    (fail! :readonly-primary-must-be-one-shot))
+  true)
+
 (defn compile-document [path doc bot-artifact]
   (when-not (compiler/source-path? path) (fail! :invalid-extension))
   (let [coding? (= "HermesBpmnCodingSchedulerContract" (get doc "@type"))
@@ -39,8 +48,7 @@
     (fail! :invalid-fields))
   (when-not (and (contains? #{nil "legacy" "semantic" "ipld" "ipld-primary"}
                              (get doc "checkpointMode"))
-                 (or coding? (not (contains? #{"ipld" "ipld-primary"}
-                                        (get doc "checkpointMode")))))
+                 (or coding? (not= "ipld" (get doc "checkpointMode"))))
     (fail! :invalid-checkpoint-mode))
   (when-not (= compiler/context-uri (get doc "@context"))
     (fail! :unpinned-context))

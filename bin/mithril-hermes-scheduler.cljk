@@ -64,6 +64,7 @@
                           "mithril-bpmn-adapter.sh") (:script job))
                    (= (js/process.cwd) (:workdir job)))
       (fail! :job-not-bound-to-adapter))
+    (scheduler/admit-job-repeat! contract job)
     profile-root))
 
 (defn- running-claim! [profile-root contract]

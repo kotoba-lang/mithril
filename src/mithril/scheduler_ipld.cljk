@@ -12,6 +12,23 @@
                   {:mithril/error :mithril.scheduler-ipld/refused
                    :reason reason})))
 
+(defn primary-state-basename
+  "Choose the scheduler's causal state path from its receipt series. Read-only
+  primary runs are one-shot and execution-scoped; coding runs use a job session."
+  [profile job-id rows]
+  (let [readonly (filterv #(= "https://mithril.fund/receipt/hermes-bpmn-scheduler-v1"
+                               (get-in % [:receipt :format])) rows)]
+    (if (seq readonly)
+      (let [execution-id (get-in (first readonly) [:execution :id])]
+        (when-not (and (= 1 (count rows)) (= 1 (count readonly))
+                       (= "builtin" (get-in (first rows) [:execution :source]))
+                       (= "completed" (get-in (first rows) [:receipt :status]))
+                       (string? execution-id)
+                       (re-matches #"[0-9a-f]{32}" execution-id))
+          (refuse! :invalid-readonly-primary-series))
+        (str execution-id ".edn"))
+      (str profile "-" job-id ".session.edn"))))
+
 (defn ref-name [state]
   (let [id (:run-id state)]
     (when-not (and (string? id)
