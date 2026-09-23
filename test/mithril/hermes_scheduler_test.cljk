@@ -186,6 +186,35 @@
     (is (= :tick-or-receipt-mismatch
            (classify {:status "completed"} held)))))
 
+(deftest failed-primary-effect-is-a-receipted-retry-not-a-completed-effect
+  (let [compiled (scheduler/compile-document
+                  "coding.mith" (assoc coding-contract "checkpointMode" "ipld-primary")
+                  coding-artifact)
+        task {:id "retry-test" :workspace "/tmp" :goal "inspect workspace"
+              :tool-profile-digest (get coding-contract "toolProfileDigest")}
+        initial (bot/start-run coding-artifact task "mithril-scheduler" 1000)
+        requested (bot/request-effect
+                   initial {:action (get bot/action-by-label "workspace-inspect")
+                            :confidence 10000}
+                   #{:workspace/read} "mithril-scheduler" 1001)
+        failed (bot/apply-receipt
+                (:state requested)
+                {:format bot/receipt-format :effect-id (get-in requested [:effect :id])
+                 :status :failed :output-digest (execution/digest :proposer-failed)}
+                "mithril-scheduler" 1002)
+        classify (fn [result state effect]
+                   (try (scheduler/verify-tick-outcome compiled result state 0 0 effect)
+                        (catch :default error (:reason (ex-data error)))))]
+    (is (= :running (:status failed)))
+    (is (= :failed-effect (classify {:status "failed"} failed "workspace/read")))
+    (is (= :tick-or-receipt-mismatch
+           (classify {:status "completed"} failed "workspace/read")))
+    (is (= :tick-or-receipt-mismatch
+           (classify {:status "failed"} failed "other/effect")))
+    (is (= :tick-or-receipt-mismatch
+           (classify {:status "failed"} (assoc failed :awaiting {:id "open"})
+                     "workspace/read")))))
+
 (deftest completed-coding-session-is-acknowledged-without-another-effect
   (let [compiled (scheduler/compile-document "coding.mith" coding-contract coding-artifact)
         task {:id "read-only-test" :workspace "/tmp" :goal "inspect workspace"

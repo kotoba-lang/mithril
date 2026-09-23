@@ -192,6 +192,120 @@
                                           "direct"))))))
       (finally (.rmSync fs directory #js {:recursive true :force true})))))
 
+(deftest primary-scheduler-verifies-failed-effect-and-causal-retry
+  (let [directory (.mkdtempSync fs (.join path (.tmpdir os) "mithril-primary-retry-"))]
+    (try
+      (let [store (local/open! (.join path directory "blocks"))
+            state-path (.join path directory "run.edn")
+            initial (state)
+            choose {:action (get bot/action-by-label "workspace-inspect")
+                    :confidence 10000}
+            first-request (bot/request-effect initial choose #{:workspace/read}
+                                              "scheduler-ipld-test" 1001)
+            pending-1 (:state first-request)
+            c1 (primary/save! store schema state-path nil pending-1)
+            failed (bot/apply-receipt
+                    pending-1 {:format bot/receipt-format
+                               :effect-id (get-in first-request [:effect :id])
+                               :status :failed :output-digest (execution/digest :unavailable)}
+                    "scheduler-ipld-test" 1002)
+            c2 (primary/save! store schema state-path c1 failed)
+            retry-request (bot/request-effect failed choose #{:workspace/read}
+                                              "scheduler-ipld-test" 1003)
+            pending-2 (:state retry-request)
+            c3 (primary/save! store schema state-path c2 pending-2)
+            finished (bot/apply-receipt
+                      pending-2 {:format bot/receipt-format
+                                 :effect-id (get-in retry-request [:effect :id])
+                                 :status :completed
+                                 :output-digest (execution/digest :inspected)}
+                      "scheduler-ipld-test" 1004)
+            c4 (primary/save! store schema state-path c3 finished)
+            row (fn [id instant status state saved]
+                  {:execution {:id id :source "builtin"
+                               :status (if (= status "effect-failed")
+                                         "failed" "completed")
+                               :scheduled_instant instant}
+                   :receipt {:status status :source "builtin"
+                             :effectStatus (if (= status "effect-failed")
+                                             "failed" "completed")
+                             :executionId id :scheduledInstant instant
+                             :runStatus (name (:status state)) :step (:step state)
+                             :action "https://mithril.fund/id/action/workspace-inspect"
+                             :stateCid (:stateCid saved)
+                             :semanticGraphDigest (:semanticGraphDigest saved)
+                             :effectId (:effect-id (last (:receipts state)))
+                             :outputDigest (:output-digest (last (:receipts state)))}})
+            rows [(row "failed-1" "2026-09-23T00:00:00Z" "effect-failed" failed c2)
+                  (row "completed-2" "2026-09-23T00:01:00Z" "completed" finished c4)]
+            verify #(scheduler-ipld/verify-primary-occurrences!
+                     store schema state-path %)
+            result (verify rows)]
+        (is (= 1 (:failedEffects result)))
+        (is (= 1 (:completedEffects result)))
+        (is (= 4 (:semanticBlocks result)))
+        (is (= finished (:state result)))
+        (is (= :primary-scheduler-series-mismatch
+               (reason #(verify (assoc-in rows [0 :execution :status]
+                                          "completed")))))
+        (is (= :primary-scheduler-series-mismatch
+               (reason #(verify (assoc-in rows [0 :receipt :effectStatus]
+                                          "completed")))))
+        (is (= :primary-effect-or-cid-mismatch
+               (reason #(verify (assoc-in rows [0 :receipt :action]
+                                          "https://mithril.fund/id/action/stop"))))))
+      (finally (.rmSync fs directory #js {:recursive true :force true})))))
+
+(deftest primary-scheduler-failed-effect-can-exhaust-retry-budget
+  (let [directory (.mkdtempSync fs (.join path (.tmpdir os) "mithril-primary-fail-held-"))]
+    (try
+      (let [store (local/open! (.join path directory "blocks"))
+            state-path (.join path directory "run.edn")
+            initial (assoc-in (state) [:policy :max-retries] 0)
+            requested (bot/request-effect
+                       initial {:action (get bot/action-by-label "workspace-inspect")
+                                :confidence 10000}
+                       #{:workspace/read} "scheduler-ipld-test" 1001)
+            c1 (primary/save! store schema state-path nil (:state requested))
+            failed (bot/apply-receipt
+                    (:state requested)
+                    {:format bot/receipt-format
+                     :effect-id (get-in requested [:effect :id])
+                     :status :failed :output-digest (execution/digest :unavailable)}
+                    "scheduler-ipld-test" 1002)
+            c2 (primary/save! store schema state-path c1 failed)
+            instant-1 "2026-09-23T00:00:00Z"
+            instant-2 "2026-09-23T00:01:00Z"
+            rows [{:execution {:id "failed-1" :source "builtin" :status "failed"
+                               :scheduled_instant instant-1}
+                   :receipt {:status "effect-failed" :effectStatus "failed"
+                             :source "builtin" :executionId "failed-1"
+                             :scheduledInstant instant-1 :runStatus "held" :step 1
+                             :action "https://mithril.fund/id/action/workspace-inspect"
+                             :stateCid (:stateCid c2)
+                             :semanticGraphDigest (:semanticGraphDigest c2)
+                             :effectId (:effect-id (last (:receipts failed)))
+                             :outputDigest (:output-digest (last (:receipts failed)))}}
+                  {:execution {:id "held-2" :source "builtin" :status "completed"
+                               :scheduled_instant instant-2}
+                   :receipt {:status "held" :source "builtin" :executionId "held-2"
+                             :scheduledInstant instant-2 :runStatus "held" :step 1
+                             :reason ":retry-budget-exhausted"
+                             :stateCid (:stateCid c2)
+                             :semanticGraphDigest (:semanticGraphDigest c2)}}]
+            verify #(scheduler-ipld/verify-primary-occurrences!
+                     store schema state-path %)
+            result (verify rows)]
+        (is (= :held (:status failed)))
+        (is (= 1 (:failedEffects result)))
+        (is (= 1 (:heldDeliveries result)))
+        (is (= 2 (:semanticBlocks result)))
+        (is (= failed (:state result)))
+        (is (= :primary-held-or-cid-mismatch
+               (reason #(verify (assoc-in rows [1 :receipt :reason]
+                                          ":different"))))))
+      (finally (.rmSync fs directory #js {:recursive true :force true})))))
+
 (deftest primary-scheduler-verifies-an-effect-free-jev-hold
   (let [directory (.mkdtempSync fs (.join path (.tmpdir os) "mithril-primary-held-"))]
     (try

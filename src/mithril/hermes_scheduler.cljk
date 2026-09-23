@@ -179,4 +179,14 @@
            (contains? (:effects contract) effect-name))
       :completed
 
+      (and (= "ipld-primary" (:checkpoint-mode contract))
+           (= "failed" (:status result))
+           (= (inc before-step) (:step state))
+           (= (inc before-receipts) (count (:receipts state)))
+           (nil? (:awaiting state)) (:bpmn state)
+           (= (:bot-profile-digest contract) (:profile-digest state))
+           (= :failed (:status receipt))
+           (contains? (:effects contract) effect-name))
+      :failed-effect
+
       :else (fail! :tick-or-receipt-mismatch))))
