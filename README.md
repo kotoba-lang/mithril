@@ -222,6 +222,36 @@ or a terminal state. A lost host receipt is held for explicit reconciliation,
 not retried by a later cron tick. This is a bounded scheduler execution
 contract, not a claim that arbitrary coding jobs are now reliable.
 
+An opt-in `"checkpointMode":"ipld"` coding contract additionally records
+each post-tick state as a v2 ontology-validated DAG-CBOR block. The previous
+state must equal the verified CID head before the next effect; each successful
+scheduler receipt includes `stateCid` and `semanticGraphDigest`. The local ref
+update is serialized and compare-and-swap checked on one filesystem, not a
+distributed consensus or crash-durable commit. Existing `legacy` and
+`semantic` contracts do not change. `ipld` still uses the semantic EDN
+execution path and verifies its CID witness before the next occurrence; the
+RDF graph is not yet the runtime's sole state of record.
+
+For a fresh coding run, the read-only reconciliation command compares every
+Hermes `source=builtin` execution with its scheduler receipt, the exact BPMN
+action, effect ID and output digest, semantic graph digest, and parent-linked
+IPLD state:
+
+```sh
+kbb --backend sci bin/mithril-scheduler-ipld-verify.cljk \
+  /absolute/state-dir <profile> <job-id> /absolute/profile/cron/executions.db
+```
+
+On 2026-09-23, an isolated real Hermes builtin profile exercised seven
+occurrences: `workspace/read`, a fixed allowlisted proposer,
+`workspace/apply-patch`, Mithril `compile-web`, `test/run`, `git/status`, and
+`agent/stop`. An eighth builtin occurrence returned `terminal` with no
+effect and the same final CID. The verifier found 7 completed effects, 7
+linked semantic blocks, 1 terminal delivery, and 1 deliberately rejected
+`source=direct` call. `GET /hello` returned the modified `.mith` body. This
+does not prove Jev-authored code, Amu compilation, distributed refs, crash
+durability, or parity across the wider Hermes fleet.
+
 An isolated Hermes `source=builtin` canary on 2026-09-23 exercised a real
 Mithril web-app edit over separate cron occurrences: `workspace/read`,
 `llm/propose-patch`, `workspace/apply-patch`, `amu/compile`, `test/run`, and

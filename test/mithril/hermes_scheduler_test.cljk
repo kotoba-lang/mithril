@@ -51,9 +51,15 @@
     (is (= "semantic"
            (:checkpoint-mode (scheduler/compile-document
                               "semantic.mith" (assoc coding-contract "checkpointMode" "semantic")
+                              coding-artifact))))
+    (is (= "ipld"
+           (:checkpoint-mode (scheduler/compile-document
+                              "ipld.mith" (assoc coding-contract "checkpointMode" "ipld")
                               coding-artifact)))))
   (is (= :invalid-checkpoint-mode
          (coding-reason (assoc coding-contract "checkpointMode" "unsafe"))))
+  (is (= :invalid-checkpoint-mode
+         (reason (assoc contract "checkpointMode" "ipld"))))
   (is (= :invalid-fields (coding-reason (dissoc coding-contract "toolProfileDigest"))))
   (is (= :invalid-tool-profile-digest
          (coding-reason (assoc coding-contract "toolProfileDigest" "bad"))))

@@ -1,0 +1,60 @@
+#!/usr/bin/env kbb
+(ns mithril.scheduler-ipld-verify-cli
+  "Read-only reconciliation of Hermes builtin executions and Mithril CID state."
+  (:require [cljs.reader :as reader]
+            [clojure.string :as str]
+            [mithril.checkpoint :as checkpoint]
+            [mithril.checkpoint-ipld-fs :as local]
+            [mithril.scheduler-ipld :as scheduler-ipld]))
+
+(def fs (js/require "node:fs"))
+(def path (js/require "node:path"))
+(def cp (js/require "node:child_process"))
+
+(defn- refuse! [reason]
+  (throw (ex-info "Hermes/Mithril IPLD parity verification refused"
+                  {:reason reason})))
+(defn- text [file] (.readFileSync fs file "utf8"))
+(defn- parse-json [value]
+  (js->clj (js/JSON.parse value) :keywordize-keys true))
+(defn- json [value]
+  (.stringify js/JSON (clj->js value)))
+
+(let [[state-dir profile job-id db & extra] *command-line-args*]
+  (try
+    (when-not (and state-dir profile job-id db (empty? extra)
+                   (.isAbsolute path state-dir) (.isAbsolute path db)
+                   (re-matches #"[A-Za-z0-9_-]+" profile)
+                   (re-matches #"[0-9a-f]{12}" job-id))
+      (refuse! :invalid-arguments))
+    (let [state-path (.join path state-dir
+                            (str profile "-" job-id ".session.edn"))
+          _ (when-not (and (.existsSync fs state-path) (.existsSync fs db))
+              (refuse! :missing-input))
+          state (reader/read-string (text state-path))
+          schema (checkpoint/schema (text checkpoint/ontology-path))
+          store (local/open! (.join path state-dir "ipld-checkpoints"))
+          sql (str "SELECT id,source,status,scheduled_instant,claimed_at "
+                   "FROM executions WHERE job_id='" job-id
+                   "' ORDER BY claimed_at ASC,id ASC")
+          raw (.execFileSync cp "/usr/bin/sqlite3" #js ["-json" db sql]
+                               #js {:encoding "utf8" :timeout 30000})
+          executions (if (str/blank? raw) [] (parse-json raw))
+          rows (mapv (fn [execution]
+                       {:execution execution
+                        :receipt (when (= "builtin" (:source execution))
+                                   (let [file (.join path state-dir
+                                                     (str (:id execution)
+                                                          ".receipt.json"))]
+                                     (when-not (.existsSync fs file)
+                                       (refuse! :missing-receipt))
+                                     (parse-json (text file))))})
+                     executions)]
+      (when-not (seq executions) (refuse! :no-executions))
+      (println (json (scheduler-ipld/verify-occurrences!
+                      store schema state rows))))
+    (catch :default error
+      (println (str "REFUSE\t" (or (some-> error ex-data :reason name)
+                                    (some-> error ex-data :mithril/error name)
+                                    "scheduler-ipld-verification-error")))
+      (set! (.-exitCode js/process) 1))))
