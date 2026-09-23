@@ -1,6 +1,8 @@
 (ns mithril.hermes-cli-integration-test
   (:require [cljs.test :refer [deftest is]]
-            [mithril.bot :as bot]))
+            [cljs.reader :as reader]
+            [mithril.bot :as bot]
+            [mithril.compiler :as compiler]))
 
 (def fs (js/require "node:fs"))
 (def cp (js/require "node:child_process"))
@@ -20,6 +22,31 @@
         "cli-test" "workspace/read,git/status,agent/stop" "execute"]
    #js {:cwd (.cwd js/process) :encoding "utf8"
         :stdio #js ["ignore" "pipe" "pipe"]}))
+
+(defn- invoke-migrate! [task-path state-path]
+  (.execFileSync
+   cp "kbb"
+   #js ["--backend" "sci" "bin/mithril-hermes.cljk" "migrate"
+        "examples/governed-coding-bot.mith" task-path state-path "cli-test"]
+   #js {:cwd (.cwd js/process) :encoding "utf8"
+        :stdio #js ["ignore" "pipe" "pipe"]}))
+
+(defn- legacy-running-fixture [dir]
+  (let [current-doc (compiler/parse-source
+                     (.readFileSync fs "examples/governed-coding-bot.mith" "utf8"))
+        old-artifact (bot/compile-document
+                      "legacy.mith" (dissoc current-doc "process" "legacyProfiles"))
+        task {:id "legacy-cli-task" :workspace dir :goal "Resume one legacy checkpoint"}]
+    {:task task
+     :state (-> (bot/start-run old-artifact task "cli-test" 1000)
+                (assoc :profile-digest
+                       "sha256:c53e7a4cddfee776084a68bd926924f1554d60cb0888f2000a5672ba2de5136d"
+                       :facts #{:semantic/prefix-valid :workspace/inspected}
+                       :step 1)
+                (update-in [:policy :actions]
+                           #(vec (remove #{"https://mithril.fund/id/action/patch-reset"} %)))
+                (update-in [:policy :effects]
+                           #(vec (remove #{:workspace/revert-patch} %))))}))
 
 (deftest terminal-redelivery-crosses-the-real-cli-boundary
   (let [dir (.mkdtempSync fs "/tmp/mithril-cli-test-")
@@ -65,5 +92,34 @@
                (mapv :status audits)))
         (is (false? (.existsSync fs lock-path))
             "the recovered tick must release its replacement lock"))
+      (finally
+        (.rmSync fs dir #js {:recursive true :force true})))))
+
+(deftest legacy-migration-crosses-the-real-cli-boundary-and-is-idempotent
+  (let [dir (.mkdtempSync fs "/tmp/mithril-cli-migrate-test-")
+        {:keys [task state]} (legacy-running-fixture dir)
+        task-path (str dir "/task.json")
+        state-path (str dir "/state.edn")]
+    (try
+      (.writeFileSync fs task-path (.stringify js/JSON (clj->js task)) "utf8")
+      (.writeFileSync fs state-path (pr-str state) "utf8")
+      (let [first-result (js->clj (js/JSON.parse (invoke-migrate! task-path state-path))
+                                  :keywordize-keys true)
+            migrated (reader/read-string (.readFileSync fs state-path "utf8"))
+            persisted (.readFileSync fs state-path "utf8")
+            second-result (js->clj (js/JSON.parse (invoke-migrate! task-path state-path))
+                                   :keywordize-keys true)
+            audits (->> (-> (.readFileSync fs (str state-path ".audit.jsonl") "utf8")
+                            (.trim)
+                            (.split "\n"))
+                        (map #(js->clj (js/JSON.parse %) :keywordize-keys true)))]
+        (is (= "checkpoint-migrated" (:status first-result)))
+        (is (= "already-current" (:status second-result)))
+        (is (= "https://mithril.fund/state/bot-run-v2" (:format migrated)))
+        (is (= ["code-propose" "git-status" "stop"]
+               (mapv :label (bot/available-actions migrated))))
+        (is (= persisted (.readFileSync fs state-path "utf8"))
+            "an already-current checkpoint is not rewritten")
+        (is (= ["checkpoint-migrated"] (mapv :status audits))))
       (finally
         (.rmSync fs dir #js {:recursive true :force true})))))

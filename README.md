@@ -341,6 +341,15 @@ its completed semantic actions through the BPMN interpreter. The migration
 preserves step, retry, and effect receipts and appends a content-digested
 semantic migration receipt. Unknown profiles, facts, inconsistent fact chains,
 or in-flight effects fail closed instead of guessing a token position.
+Migration is an explicit, effect-free operation and is idempotent:
+
+```sh
+kbb --backend sci bin/mithril-hermes.cljk migrate \
+  examples/governed-coding-bot.mith task.json state.edn worker-1
+```
+
+It atomically replaces only the checkpoint and appends a
+`checkpoint-migrated` audit event; it does not call Jev or a host tool.
 
 For a coding run, the optional final argument is a JSON tool profile. The task
 must contain the digest printed by `profile-digest`:
