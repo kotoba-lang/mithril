@@ -405,6 +405,30 @@ back with exact state equality. That v5 block was 97,941 bytes (one local
 measurement); no scheduler occurrence was switched to the v5 writer for this
 check, so it does not establish live v5 scheduling or fleet parity.
 
+On 2026-09-24, a separate repeat-limited isolated Hermes builtin job
+`c3b941b4fec6` exercised the v5 writer in the actual scheduler path. Seven
+occurrences completed the governed read, fixed-proposer patch, apply, Mithril
+`compile-web`, HTTP-response test, Git status, and stop effects; two later
+occurrences delivered the same terminal state without another effect. The
+primary verifier reconciled all nine `source=builtin` executions with their
+receipts and 14 linked CID blocks (`status=verified`, `runStatus=completed`,
+`projection=matched`). All 14 blocks are v5 RDF datasets with the same
+CID-bound `.mith` state-ontology digest. Before the second terminal delivery,
+the EDN projection was withheld; the reader rebuilt it from the CID head.
+`GET /hello` returned HTTP 200 and the edited `.mith` response body. The job
+ended disabled after its ninth repeat. This proves one scheduler-driven v5
+closed loop, not fleet-wide behavioral parity or Jev-authored coding; the
+proposer was fixed and `amu/compile` still invoked Mithril `compile-web`.
+
+The setup also exposed a recovery boundary: `hermes cron run` created a
+`source=direct` execution and was correctly refused. A separate initial
+builtin job with a missing artifact directory failed before writing a receipt;
+the next occurrence refused `missing-prior-receipt` rather than silently
+repeating an uncertain action. That job was paused and a fresh, prepared
+isolated job was used for the completed run. Preflight admission and explicit
+reconciliation of pre-effect failures remain needed before unattended fleet
+migration.
+
 On 2026-09-23, the actual `mithril-jev-readonly-canary` Hermes state was
 imported unchanged into a private v2 store and independently verified as one
 CID block with `runStatus=completed` and three effect receipts. Its latest
