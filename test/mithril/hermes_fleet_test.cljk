@@ -73,3 +73,20 @@
            (fleet/bpmn-job-readiness (assoc base-job :failure-streak 1) ready-facts)))
     (is (= :bpmn-contract-required
            (fleet/bpmn-job-readiness (assoc base-job :no-agent false) ready-facts)))))
+
+(deftest shadow-replay-needs-a-complete-builtin-terminal-receipt
+  (let [receipt {:id "execution-1" :job_id "job-1" :source "builtin"
+                 :status "completed" :claimed_at "2026-09-23T00:00:00Z"
+                 :finished_at "2026-09-23T00:00:01Z"
+                 :scheduled_instant "2026-09-23T00:00:00Z" :error nil}
+        admit #(fleet/shadow-receipt-admission %1 "job-1" %2)]
+    (is (= :admitted (admit :shadow-ready receipt)))
+    (is (= :job-not-ready (admit :unhealthy receipt)))
+    (is (= :missing-receipt (admit :shadow-ready nil)))
+    (is (= :job-mismatch (admit :shadow-ready (assoc receipt :job_id "job-2"))))
+    (is (= :not-scheduler-originated (admit :shadow-ready (assoc receipt :source "direct"))))
+    (is (= :not-completed (admit :shadow-ready (assoc receipt :status "unknown"))))
+    (is (= :not-completed (admit :shadow-ready (assoc receipt :status "running"))))
+    (is (= :incomplete-receipt (admit :shadow-ready (assoc receipt :finished_at nil))))
+    (is (= :incomplete-receipt (admit :shadow-ready (assoc receipt :id "../escape"))))
+    (is (= :incomplete-receipt (admit :shadow-ready (assoc receipt :error "failure"))))))

@@ -1,6 +1,7 @@
 #!/usr/bin/env kbb
 (ns mithril.hermes-fleet-cli
   (:require [clojure.string :as str]
+            [mithril.bpmn :as bpmn]
             [mithril.execution :as execution]
             [mithril.hermes :as hermes]
             [mithril.hermes-fleet :as fleet]
@@ -14,6 +15,7 @@
 (defn- usage! []
   (println "usage: mithril-hermes-fleet <sync|verify|plan-bpmn> <Hermes profiles root> <output directory>")
   (println "       mithril-hermes-fleet admit-coding <Hermes profiles root> <output directory> <coding registry>")
+  (println "       mithril-hermes-fleet shadow-bpmn <Hermes profiles root> <output directory> <process.mith> <receipt directory> <profile> <job-id>")
   (js/process.exit 2))
 
 (defn- read-text [file] (.readFileSync fs file "utf8"))
@@ -273,14 +275,92 @@
      :jobs (count rows) :enabledJobs (count enabled)
      :counts counts :jobsDetail rows}))
 
+(defn- latest-execution [profile-root job-id]
+  (when-not (re-matches #"[A-Za-z0-9_-]+" job-id)
+    (throw (ex-info "invalid job ID" {:mithril/error :mithril.fleet/invalid-job-id})))
+  (let [db (.join path profile-root "cron" "executions.db")]
+    (when-not (exists? db)
+      (throw (ex-info "execution database missing" {:mithril/error :mithril.fleet/missing-execution-db})))
+    (let [sql (str "SELECT id,job_id,source,status,claimed_at,finished_at,error,scheduled_instant "
+                   "FROM executions WHERE job_id='" job-id "' ORDER BY claimed_at DESC,id DESC LIMIT 1")
+          output (.execFileSync cp "/usr/bin/sqlite3" #js ["-json" db sql]
+                                #js {:encoding "utf8" :stdio #js ["ignore" "pipe" "ignore"] :timeout 30000})]
+      (first (parse-json output)))))
+
+(defn- shadow-bpmn! [fleet output process-file receipt-dir profile job-id]
+  (verify-fleet! output fleet)
+  (when-not (str/ends-with? process-file ".mith")
+    (throw (ex-info "shadow BPMN source must be .mith"
+                    {:mithril/error :mithril.fleet/invalid-process-source})))
+  (when-not (and (re-matches #"[A-Za-z0-9_-]+" profile)
+                 (re-matches #"[A-Za-z0-9_-]+" job-id))
+    (throw (ex-info "invalid profile or job ID" {:mithril/error :mithril.fleet/invalid-target})))
+  (let [entry (first (filter #(= profile (:profile %)) (:entries fleet)))
+        job (first (filter #(= job-id (:id %)) (get-in entry [:artifact :profile-ir :jobs])))]
+    (when-not job
+      (throw (ex-info "job is not in compiled profile" {:mithril/error :mithril.fleet/unknown-job})))
+    (let [profile-root (get-in entry [:artifact :profile-ir :root])
+          live (first (filter #(= job-id (str (:id %))) (operational-jobs profile-root)))
+          facts {:script-present? (:script-present job)
+                 :workdir-present? (or (nil? (:workdir job)) (exists? (:workdir job)))
+                 :active-execution? (contains? (active-job-ids profile-root) job-id)}
+          readiness (fleet/bpmn-job-readiness
+                     (assoc job :last-status (:last_status live)
+                                :failure-streak (:failure_streak live)) facts)
+          receipt (latest-execution profile-root job-id)
+          admission (fleet/shadow-receipt-admission readiness job-id receipt)]
+      (when-not (= :admitted admission)
+        (throw (ex-info "shadow receipt not admitted"
+                        {:mithril/error :mithril.fleet/shadow-not-admitted
+                         :reason admission :profile profile :job-id job-id})))
+      (let [source-doc (js->clj (js/JSON.parse (read-text process-file)))
+            _ (when-not (= "https://mithril.fund/context/v1" (get source-doc "@context"))
+                (throw (ex-info "shadow process context is not pinned"
+                                {:mithril/error :mithril.fleet/unpinned-context})))
+            doc (dissoc source-doc "@context")
+            ;; BPMN source is a .mith JSON-LD-compatible graph; only the
+            ;; governed, ontology-bound action catalog is executable here.
+            compiled (bpmn/compile-process doc {"shadow/accept" {} "shadow/hold" {}}
+                                           #{"shadow/accept" "shadow/hold"})
+            _ (when-not (= fleet/ontology-digest (:ontology compiled))
+                (throw (ex-info "shadow process ontology mismatch"
+                                {:mithril/error :mithril.fleet/ontology-mismatch})))
+            runtime (-> (bpmn/start-state compiled)
+                        (bpmn/select-action "shadow/accept")
+                        (bpmn/apply-outcome "shadow/accept" true))
+            _ (when-not (bpmn/completed? runtime)
+                (throw (ex-info "BPMN shadow token did not terminate"
+                                {:mithril/error :mithril.fleet/nonterminal-shadow})))
+            record {:format "https://mithril.fund/receipt/hermes-bpmn-shadow-v1"
+                    :mode "observation-only" :profile profile :profileDigest (:graph-digest entry)
+                    :jobId job-id :executionId (:id receipt)
+                    :source (:source receipt) :scheduledInstant (:scheduled_instant receipt)
+                    :claimedAt (:claimed_at receipt) :finishedAt (:finished_at receipt)
+                    :processDigest (:digest compiled) :action "shadow/accept"
+                    :terminal true :hostEffects []}
+            bytes (str (json record) "\n")
+            target (.join path receipt-dir (str profile "-" job-id "-" (:id receipt) ".json"))]
+        (.mkdirSync fs receipt-dir #js {:recursive true})
+        (let [duplicate? (exists? target)]
+          (if duplicate?
+          (when-not (= bytes (read-text target))
+            (throw (ex-info "immutable shadow receipt conflicts"
+                            {:mithril/error :mithril.fleet/receipt-conflict})))
+            (.writeFileSync fs target bytes #js {:encoding "utf8" :flag "wx"}))
+          {:status (if duplicate? "duplicate" "shadow-recorded")
+           :receipt target :executionId (:id receipt) :processDigest (:digest compiled)})))))
+
 (let [[command profiles-root output registry-path & extra] *command-line-args*]
-  (if-not (and (contains? #{"sync" "verify" "admit-coding" "plan-bpmn"} command)
+  (if-not (and (contains? #{"sync" "verify" "admit-coding" "plan-bpmn" "shadow-bpmn"} command)
                profiles-root output
-               (if (= "admit-coding" command)
-                 (and registry-path (empty? extra))
+               (case command
+                 "admit-coding" (and registry-path (empty? extra))
+                 "shadow-bpmn" (and registry-path (= 3 (count extra)))
                  (and (nil? registry-path) (empty? extra)))
                (.isAbsolute path profiles-root)
-               (.isAbsolute path output))
+               (.isAbsolute path output)
+               (if (= "shadow-bpmn" command)
+                 (and (.isAbsolute path registry-path) (.isAbsolute path (first extra))) true))
     (usage!)
     (try
       (let [fleet (build-fleet profiles-root)]
@@ -295,7 +375,9 @@
                 report (coding-admission fleet registry-path)]
             (println (json report))
             (when-not (= (get-in report [:counts "ready"] 0) (:codingJobs report))
-              (js/process.exit 1))))
+              (js/process.exit 1)))
+          "shadow-bpmn"
+          (println (json (apply shadow-bpmn! fleet output registry-path extra))))
         (when (contains? #{"sync" "verify"} command)
           (println (json (summary fleet)))))
       (catch :default error

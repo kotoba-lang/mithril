@@ -45,6 +45,23 @@
     (:no-agent job) :shadow-ready
     :else :bpmn-contract-required))
 
+(defn shadow-receipt-admission
+  "Admit only a terminal, scheduler-originated receipt for a shadow-ready job."
+  [readiness job-id receipt]
+  (cond
+    (not= :shadow-ready readiness) :job-not-ready
+    (nil? receipt) :missing-receipt
+    (not= job-id (:job_id receipt)) :job-mismatch
+    (not= "builtin" (:source receipt)) :not-scheduler-originated
+    (not= "completed" (:status receipt)) :not-completed
+    (or (not (and (string? (:id receipt))
+                  (re-matches #"[A-Za-z0-9_-]+" (:id receipt))))
+        (str/blank? (:claimed_at receipt))
+        (str/blank? (:finished_at receipt))
+        (str/blank? (:scheduled_instant receipt))
+        (not (str/blank? (:error receipt)))) :incomplete-receipt
+    :else :admitted))
+
 (defn coding-readiness
   "Classify one coding job using observed workspace facts and the governed
   workspace registry. A clean checkout is still refused until its exact tool
