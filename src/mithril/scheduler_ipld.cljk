@@ -1,0 +1,112 @@
+(ns mithril.scheduler-ipld
+  "Opt-in, local CID witness for one Hermes BPMN run across cron occurrences.
+  The scheduler still owns its attempt/receipt protocol; this adapter refuses
+  EDN projection drift and links every accepted post-tick state to its parent."
+  (:require [mithril.checkpoint-ipld :as ipld]
+            [mithril.checkpoint-ipld-fs :as local]))
+
+(defn- refuse! [reason]
+  (throw (ex-info "Mithril scheduler IPLD witness refused"
+                  {:mithril/error :mithril.scheduler-ipld/refused
+                   :reason reason})))
+
+(defn ref-name [state]
+  (let [id (:run-id state)]
+    (when-not (and (string? id)
+                   (re-matches #"sha256:[0-9a-f]{64}" id))
+      (refuse! :invalid-run-id))
+    (str "run-" (subs id 7))))
+
+(defn witness [store schema state]
+  (let [name (ref-name state)
+        history (local/verify-ref! store schema name)
+        saved (ipld/read! #(local/get-block store %) schema (:head history))]
+    (when-not (= state (:state saved))
+      (refuse! :state-diverged))
+    (when-not (= ipld/format-id (:format saved))
+      (refuse! :legacy-block))
+    {:stateCid (:cid saved)
+     :semanticGraphDigest (:semantic-graph-digest saved)
+     :blocks (:blocks history)}))
+
+(defn record! [store schema prior state]
+  (when (and prior (not= (:run-id prior) (:run-id state)))
+    (refuse! :run-changed))
+  (let [expected (when prior (:stateCid (witness store schema prior)))
+        id (local/record-state! store schema (ref-name state) expected state)
+        result (witness store schema state)]
+    (when-not (= id (:stateCid result))
+      (refuse! :head-mismatch))
+    result))
+
+(defn verify-occurrences!
+  "Verify one fresh single-run scheduler series. Each completed builtin
+  occurrence must correspond to exactly one new effect and one causal CID;
+  terminal redeliveries must reuse the final CID without an effect."
+  [store schema final-state rows]
+  (let [history (local/verify-ref! store schema (ref-name final-state))
+        builtin (filterv #(= "builtin" (get-in % [:execution :source])) rows)
+        direct (count (remove #(= "builtin" (get-in % [:execution :source])) rows))
+        completed (filterv #(= "completed" (get-in % [:receipt :status])) builtin)
+        terminal (filterv #(= "terminal" (get-in % [:receipt :status])) builtin)]
+    (when-not (and (seq completed)
+                   (= (count builtin) (+ (count completed) (count terminal)))
+                   (= (mapv #(get-in % [:receipt :status]) builtin)
+                      (vec (concat (repeat (count completed) "completed")
+                                   (repeat (count terminal) "terminal"))))
+                   (= (count completed) (:blocks history))
+                   (every? #(= "completed" (get-in % [:execution :status])) builtin)
+                   (every? #(= "failed" (get-in % [:execution :status]))
+                           (remove #(= "builtin" (get-in % [:execution :source])) rows))
+                   (every? (fn [{:keys [execution receipt]}]
+                             (and (= (:id execution) (:executionId receipt))
+                                  (= "builtin" (:source receipt))
+                                  (= (:scheduled_instant execution)
+                                     (:scheduledInstant receipt))))
+                           builtin))
+      (refuse! :scheduler-series-mismatch))
+    (let [last-cid
+          (loop [remaining completed previous nil index 1]
+            (if-let [{:keys [receipt]} (first remaining)]
+              (let [cid (:stateCid receipt)
+                    saved (ipld/read! #(local/get-block store %) schema cid)
+                    state (:state saved)
+                    effect (last (:receipts state))
+                    passed (last (filter #(= :pass (:bpmn/event %))
+                                         (get-in state [:bpmn :token-state :bpmn/trace])))
+                    action (get-in state [:bpmn :model :bpmn/nodes
+                                          (:bpmn/at passed) :mithril/action])]
+                (when-not (and (= ipld/format-id (:format saved))
+                               (= (if previous [previous] []) (:parents saved))
+                               (= (ref-name final-state) (ref-name state))
+                               (= index (:step state) (count (:receipts state)))
+                               (= index (:step receipt))
+                               (= (name (:status state)) (:runStatus receipt))
+                               (= (:semantic-graph-digest saved)
+                                  (:semanticGraphDigest receipt))
+                               (= action (:action receipt))
+                               (= (:effect-id effect) (:effectId receipt))
+                               (= (:output-digest effect) (:outputDigest receipt)))
+                  (refuse! :effect-or-cid-mismatch))
+                (recur (next remaining) cid (inc index)))
+              previous))
+          final-saved (ipld/read! #(local/get-block store %) schema last-cid)]
+      (when-not (and (= last-cid (:head history))
+                     (= final-state (:state final-saved))
+                     (every? (fn [{:keys [receipt]}]
+                               (and (= last-cid (:stateCid receipt))
+                                    (= (:semantic-graph-digest final-saved)
+                                       (:semanticGraphDigest receipt))
+                                    (= "completed" (:runStatus receipt))
+                                    (nil? (:effectId receipt))
+                                    (= (count completed) (:step receipt))))
+                             terminal))
+        (refuse! :terminal-or-head-mismatch))
+      {:status "verified"
+       :completedEffects (count completed)
+       :terminalDeliveries (count terminal)
+       :directExecutions direct
+       :semanticBlocks (:blocks history)
+       :stateCid last-cid
+       :semanticGraphDigest (:semantic-graph-digest final-saved)
+       :runStatus (name (:status final-state))})))

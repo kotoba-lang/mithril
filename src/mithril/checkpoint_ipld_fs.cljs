@@ -100,6 +100,23 @@
                 #(put-block! store %1 %2) #(get-block store %) schema state [])]
         (create-ref-under-lock! store name id)))))
 
+(defn record-state!
+  "Append one checked state to an exact local ref head. The expected head is
+  supplied by the caller's prior-state verification; no missing ref is silently
+  created for an already-running session."
+  [store schema name expected state]
+  (with-write-lock store
+    (fn []
+      (let [exists? (.existsSync fs (ref-path store name))
+            observed (when exists? (read-ref store name))]
+        (when-not (= expected observed) (refuse! :ref-conflict))
+        (let [id (checkpoint-ipld/put!
+                  #(put-block! store %1 %2) #(get-block store %) schema
+                  state (if observed [observed] []))]
+          (if observed
+            (advance-ref-under-lock! store name observed id)
+            (create-ref-under-lock! store name id)))))))
+
 (defn fork-ref! [store source name]
   (with-write-lock store
     (fn [] (create-ref-under-lock! store name (read-ref store source)))))

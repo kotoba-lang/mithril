@@ -4,10 +4,13 @@
   (:require [cljs.reader :as reader]
             [clojure.string :as str]
             [mithril.bot :as bot]
+            [mithril.checkpoint :as checkpoint]
+            [mithril.checkpoint-ipld-fs :as ipld-store]
             [mithril.compiler :as compiler]
             [mithril.execution :as execution]
             [mithril.hermes :as hermes]
-            [mithril.hermes-scheduler :as scheduler]))
+            [mithril.hermes-scheduler :as scheduler]
+            [mithril.scheduler-ipld :as scheduler-ipld]))
 
 (def fs (js/require "node:fs"))
 (def path (js/require "node:path"))
@@ -33,6 +36,11 @@
    :contractDigest (:digest contract)
    :botProfileDigest (:bot-profile-digest contract)
    :reason (str (:hold-reason state)) :step (:step state)})
+
+(defn- with-ipld-witness [record witness]
+  (if witness
+    (merge record (select-keys witness [:stateCid :semanticGraphDigest]))
+    record))
 
 (defn- task-digest [task]
   (bot/task-digest (into {} (map (fn [[k v]] [(keyword k) v]) task))))
@@ -99,7 +107,12 @@
                      (.join path state-dir (str (:profile-name contract) "-"
                                                 (:job-id contract) ".session.edn"))
                      (str prefix ".edn"))
-        receipt-path (str prefix ".receipt.json")]
+        receipt-path (str prefix ".receipt.json")
+        ipld? (= "ipld" (:checkpoint-mode contract))
+        ipld-schema (when ipld?
+                      (checkpoint/schema (text checkpoint/ontology-path)))
+        ipld-local (when ipld?
+                     (ipld-store/open! (.join path state-dir "ipld-checkpoints")))]
     (.mkdirSync fs state-dir #js {:recursive true})
     (when (.existsSync fs receipt-path)
       (let [prior (parse-json (text receipt-path))]
@@ -131,29 +144,38 @@
           before-step (or (:step prior) 0)
           before-receipts (count (:receipts prior))]
       (when (:awaiting prior) (fail! :effect-in-flight))
-      (when (and (= "semantic" (:checkpoint-mode contract))
+      (when (and (contains? #{"semantic" "ipld"} (:checkpoint-mode contract))
                  prior (not (.existsSync fs (str state-path ".semantic-head"))))
         (fail! :semantic-import-required))
-      (when (and (= "semantic" (:checkpoint-mode contract)) prior)
+      (when (and (contains? #{"semantic" "ipld"} (:checkpoint-mode contract)) prior)
         (let [verified (parse-json
                         (run! "kbb" ["--backend" "sci" "bin/mithril-hermes.cljk"
                                      "semantic-verify" state-path]))]
           (when-not (and (= "verified" (:status verified))
                          (= (execution/digest prior) (:state-digest verified)))
             (fail! :semantic-head-mismatch))))
+      (when (and ipld? prior)
+        (scheduler-ipld/witness ipld-local ipld-schema prior))
       (when (= :held (:status prior))
         (when-not (and (= (:bot-profile-digest contract) (:profile-digest prior))
                        (= (task-digest task) (:task-digest prior)))
           (fail! :held-profile-mismatch))
         (.writeFileSync fs receipt-path
-                        (str (json (held-record contract claim execution-id prior)) "\n")
+                        (str (json (with-ipld-witness
+                                     (held-record contract claim execution-id prior)
+                                     (when ipld?
+                                       (scheduler-ipld/witness ipld-local ipld-schema prior))))
+                             "\n")
                         #js {:encoding "utf8" :flag "wx"})
         (println (json {:status "held" :executionId execution-id
                         :reason (str (:hold-reason prior))}))
         (js/process.exit 0))
       (when (= :completed (:status prior))
-        (let [record (scheduler/terminal-record
-                      contract claim execution-id prior (task-digest task))]
+        (let [record (with-ipld-witness
+                       (scheduler/terminal-record
+                        contract claim execution-id prior (task-digest task))
+                       (when ipld?
+                         (scheduler-ipld/witness ipld-local ipld-schema prior)))]
           (.writeFileSync fs receipt-path (str (json record) "\n")
                             #js {:encoding "utf8" :flag "wx"})
           (println (json {:status "terminal" :executionId execution-id
@@ -175,7 +197,8 @@
       (let [stdout (run! "kbb" (cond-> ["--backend" "sci" "bin/mithril-hermes.cljk" "tick"
                                          bot-path task-path state-path (:owner contract)
                                          (str/join "," (sort (:effects contract)))
-                                         (if (= "semantic" (:checkpoint-mode contract))
+                                         (if (contains? #{"semantic" "ipld"}
+                                                        (:checkpoint-mode contract))
                                            "semantic-execute" "execute")]
                                   tool-profile-path (conj tool-profile-path)))
             result (parse-json (last (remove str/blank? (str/split-lines stdout))))
@@ -185,28 +208,33 @@
             effect (some-> action :effect)
             effect-name (when effect (str (namespace effect) "/" (name effect)))
             outcome (scheduler/verify-tick-outcome
-                     contract result state before-step before-receipts effect-name)]
+                     contract result state before-step before-receipts effect-name)
+            witness (when ipld?
+                      (scheduler-ipld/record! ipld-local ipld-schema prior state))]
         (when (= :held outcome)
           (.writeFileSync fs receipt-path
-                          (str (json (held-record contract claim execution-id state)) "\n")
+                          (str (json (with-ipld-witness
+                                       (held-record contract claim execution-id state)
+                                       witness)) "\n")
                           #js {:encoding "utf8" :flag "wx"})
           (println (json {:status "held" :executionId execution-id
                           :reason (str (:hold-reason state))}))
           (js/process.exit 0))
-        (let [record {:format (if (:coding? contract)
-                                scheduler/coding-receipt-format scheduler/receipt-format)
-                      :status "completed" :runStatus (name (:status state))
-                      :executionId execution-id
-                      :source "builtin" :jobId (:job-id contract)
-                      :scheduledInstant (:scheduled_instant claim)
-                      :contractDigest (:digest contract)
-                      :profileDigest (:profile-digest contract)
-                      :botProfileDigest (:bot-profile-digest contract)
-                      :processDigest (get-in state [:bpmn :definition])
-                      :action (:id action) :effect effect-name
-                      :effectId (:effect-id receipt)
-                      :outputDigest (:output-digest receipt)
-                      :step (:step state)}]
+        (let [record (with-ipld-witness
+                       {:format (if (:coding? contract)
+                                  scheduler/coding-receipt-format scheduler/receipt-format)
+                        :status "completed" :runStatus (name (:status state))
+                        :executionId execution-id
+                        :source "builtin" :jobId (:job-id contract)
+                        :scheduledInstant (:scheduled_instant claim)
+                        :contractDigest (:digest contract)
+                        :profileDigest (:profile-digest contract)
+                        :botProfileDigest (:bot-profile-digest contract)
+                        :processDigest (get-in state [:bpmn :definition])
+                        :action (:id action) :effect effect-name
+                        :effectId (:effect-id receipt)
+                        :outputDigest (:output-digest receipt)
+                        :step (:step state)} witness)]
           (.writeFileSync fs receipt-path (str (json record) "\n")
                           #js {:encoding "utf8" :flag "wx"})
           (println (json {:status "completed" :executionId execution-id
