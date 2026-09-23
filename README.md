@@ -704,6 +704,8 @@ different ontology-authored floors.
   -> bounded SPARQL candidate query
   -> SHACL task validation
   -> BPMN token enables reachable service tasks
+  -> domain RDF materialization + OWL/SHACL validation
+  -> compact Mithril decision-state S-expression
   -> OpenRouter TypeSafe Jev typed action choice
   -> Governor capability intersection
   -> one deterministic host effect
@@ -733,6 +735,20 @@ item `service=gftd.openrouter account=OPENROUTER_API_KEY`; it is never written
 to the artifact or receipt. The adapter pins the request to
 `typesafe/jev-1.13`, records OpenRouter's resolved model identity, request id,
 usage and cost, and refuses malformed responses before the Governor runs.
+The Jev `state` field now carries a compact `(mithril/decision-state ...)`
+form derived from the validated domain RDF graph: ontology and graph digests,
+task identity, current facts, causal receipt-action IDs, and the exact
+BPMN-admitted candidate action IDs. The workspace path is omitted. Candidate
+criteria are `(mithril/action ...)` forms; Jev's returned choice is still
+mapped to a catalog action and checked by the Governor. The audit records
+the decision-form, domain-graph, and ontology digests. A real read-only
+OpenRouter Jev call on 2026-09-24 accepted this form and selected
+`workspace-inspect` (confidence 0.64); it reported 847 input and 44 output
+tokens, cost $0.000035574. This command emitted an effect request but did not
+execute a host tool. The API still tokenizes the S-expression input and bills
+output tokens for its typed choice; this is not token-free inference. The
+decision-input digests are audit fields, not yet part of the CID-bound bot
+effect receipt.
 
 ### Hermes cron canary
 
