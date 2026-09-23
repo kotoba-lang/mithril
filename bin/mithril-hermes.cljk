@@ -14,6 +14,7 @@
 (defn- usage! []
   (println "usage: mithril-hermes tick <profile.mith> <task.json> <state.edn> <owner> <grants.csv> <shadow|execute|semantic-execute> [coding-tools.json]")
   (println "       mithril-hermes migrate <profile.mith> <task.json> <state.edn> <owner>")
+  (println "       mithril-hermes semantic-import <profile.mith> <task.json> <state.edn> <owner>")
   (println "       mithril-hermes reconcile <profile.mith> <task.json> <state.edn> <owner> <coding-tools.json>")
   (println "       mithril-hermes profile-digest <coding-tools.json>")
   (js/process.exit 2))
@@ -80,14 +81,19 @@
                             {:mithril/error :mithril.checkpoint/ancestry-limit})))
           (when-let [parent-id (:parent-digest current)]
             (let [parent (load-block parent-id)]
-              (when-not (and (= (get-in parent [:state :run-id])
-                                (get-in current [:state :run-id]))
-                             (= (get-in parent [:state :profile-digest])
-                                (get-in current [:state :profile-digest]))
-                             (= (get-in parent [:state :task-digest])
-                                (get-in current [:state :task-digest]))
-                             (<= (get-in parent [:state :step])
-                                 (get-in current [:state :step])))
+              (when-not (or (and (= (get-in parent [:state :run-id])
+                                     (get-in current [:state :run-id]))
+                                 (= (get-in parent [:state :profile-digest])
+                                    (get-in current [:state :profile-digest]))
+                                 (= (get-in parent [:state :task-digest])
+                                    (get-in current [:state :task-digest]))
+                                 (<= (get-in parent [:state :step])
+                                     (get-in current [:state :step])))
+                            (and (contains? #{:completed :held}
+                                            (get-in parent [:state :status]))
+                                 (not= (get-in parent [:state :run-id])
+                                       (get-in current [:state :run-id]))
+                                 (= 0 (get-in current [:state :step]))))
                 (throw (ex-info "semantic ancestry changed run binding or step"
                                 {:mithril/error :mithril.checkpoint/invalid-ancestry})))
               (recur parent (inc depth)))))
@@ -278,6 +284,40 @@
         (catch :default error (refuse! error))
         (finally (release-lock! lock))))))
 
+(defn- semantic-import! [profile-path task-path state-path owner]
+  (let [lock (try (acquire-lock! state-path) (catch :default error (refuse! error) nil))]
+    (when lock
+      (try
+        (when-not (.existsSync fs state-path)
+          (throw (ex-info "semantic import requires an existing checkpoint"
+                          {:mithril/error :mithril.checkpoint/missing-state})))
+        (when (.existsSync fs (semantic-head-path state-path))
+          (throw (ex-info "semantic import refuses an existing semantic head"
+                          {:mithril/error :mithril.checkpoint/already-imported})))
+        (let [schema (checkpoint/schema (read-text checkpoint/ontology-path))
+              artifact (bot/compile-text profile-path (read-text profile-path))
+              task (js->clj (js/JSON.parse (read-text task-path)) :keywordize-keys true)
+              saved (reader/read-string (read-text state-path))
+              run (bot/resume-or-start artifact task saved owner (.now js/Date))]
+          (when-not (contains? #{:resumed :terminal} (:disposition run))
+            (throw (ex-info "legacy state must be migrated before semantic import"
+                            {:mithril/error :mithril.checkpoint/not-current
+                             :disposition (:disposition run)})))
+          (when-not (= (dissoc saved :lease) (dissoc (:state run) :lease))
+            (throw (ex-info "import cannot change legacy checkpoint semantics"
+                            {:mithril/error :mithril.checkpoint/state-changed})))
+          (let [committed (semantic-save! state-path schema nil saved)]
+            (append-audit! state-path
+                           {:at (.toISOString (js/Date.)) :status :semantic-imported
+                            :run-id (:run-id saved) :step (:step saved)
+                            :checkpoint-digest (:digest committed)})
+            (println (json-line {:status :semantic-imported
+                                 :run-id (:run-id saved)
+                                 :step (:step saved)
+                                 :checkpoint-digest (:digest committed)}))))
+        (catch :default error (refuse! error))
+        (finally (release-lock! lock))))))
+
 (defn- reconcile-checkpoint! [profile-path task-path state-path owner tool-profile-path]
   (let [lock (try (acquire-lock! state-path) (catch :default error (refuse! error) nil))]
     (when lock
@@ -331,6 +371,11 @@
     (= "migrate" command)
     (if (and profile-path task-path state-path owner (nil? grants-csv))
       (migrate-checkpoint! profile-path task-path state-path owner)
+      (usage!))
+
+    (= "semantic-import" command)
+    (if (and profile-path task-path state-path owner (nil? grants-csv))
+      (semantic-import! profile-path task-path state-path owner)
       (usage!))
 
     (= "reconcile" command)

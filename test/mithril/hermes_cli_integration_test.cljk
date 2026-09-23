@@ -38,6 +38,12 @@
    #js {:cwd (.cwd js/process) :encoding "utf8"
         :stdio #js ["ignore" "pipe" "pipe"]}))
 
+(defn- invoke-semantic-import [task-path state-path]
+  (.spawnSync cp "kbb"
+              #js ["--backend" "sci" "bin/mithril-hermes.cljk" "semantic-import"
+                   "examples/governed-coding-bot.mith" task-path state-path "cli-test"]
+              #js {:cwd (.cwd js/process) :encoding "utf8"}))
+
 (defn- legacy-running-fixture [dir]
   (let [current-doc (compiler/parse-source
                      (.readFileSync fs "examples/governed-coding-bot.mith" "utf8"))
@@ -120,6 +126,110 @@
             (is (clojure.string/includes? (.-stdout rejected) "state-diverged")))))
       (finally (.rmSync fs dir #js {:recursive true :force true})))))
 
+(deftest explicit-semantic-import-preserves-terminal-and-inflight-semantics
+  (let [dir (.mkdtempSync fs "/tmp/mithril-semantic-import-")
+        {:keys [task state]} (terminal-fixture dir)
+        task-path (str dir "/task.json")
+        state-path (str dir "/state.edn")
+        tick (fn []
+               (.spawnSync cp "kbb"
+                           #js ["--backend" "sci" "bin/mithril-hermes.cljk" "tick"
+                                "examples/governed-coding-bot.mith" task-path state-path
+                                "cli-test" "workspace/read,git/status,agent/stop"
+                                "semantic-execute"]
+                           #js {:cwd (.cwd js/process) :encoding "utf8"}))]
+    (try
+      (.writeFileSync fs task-path (.stringify js/JSON (clj->js task)) "utf8")
+      (.writeFileSync fs state-path (pr-str state) "utf8")
+      (let [before (tick)]
+        (is (not= 0 (.-status before)))
+        (is (clojure.string/includes? (.-stdout before) "legacy-state")))
+      (let [imported (invoke-semantic-import task-path state-path)]
+        (is (= 0 (.-status imported)) (str (.-stdout imported) (.-stderr imported)))
+        (is (.existsSync fs (str state-path ".semantic-head"))))
+      (let [again (invoke-semantic-import task-path state-path)
+            terminal (tick)]
+        (is (not= 0 (.-status again)))
+        (is (clojure.string/includes? (.-stdout again) "already-imported"))
+        (is (= 0 (.-status terminal)) (str (.-stdout terminal) (.-stderr terminal)))
+        (is (clojure.string/includes? (.-stdout terminal) "idempotent-terminal")))
+      (let [workspace (str dir "/workspace")
+            artifacts (str dir "/artifacts")
+            tools-path (str dir "/tools.json")]
+        (.mkdirSync fs workspace)
+        (.mkdirSync fs artifacts)
+        (.writeFileSync fs (str workspace "/app.mith") "value 1\n" "utf8")
+        (exec! workspace "/usr/bin/git" "init" "-q")
+        (exec! workspace "/usr/bin/git" "add" "app.mith")
+        (exec! workspace "/usr/bin/git" "-c" "user.name=Mithril Test"
+               "-c" "user.email=mithril@example.invalid" "commit" "-qm" "base")
+        (let [profile {:format hermes/tool-profile-format :workspace workspace
+                       :artifact-dir artifacts :allowed-paths ["app.mith"]
+                       :max-patch-bytes 8192 :max-context-bytes 8192
+                       :proposer {:program "/bin/echo" :profile "fixture" :timeout-ms 5000}
+                       :tools {:amu/compile {:program "/usr/bin/git" :args ["diff" "--check"]
+                                              :timeout-ms 5000}
+                               :test/run {:program "/usr/bin/grep" :args ["-q" "value 1" "app.mith"]
+                                          :timeout-ms 5000}}}
+              next-task {:id "next-task" :workspace workspace :goal "Inspect next task"
+                         :tool-profile-digest (hermes/tool-profile-digest profile)}
+              old-head (.trim (.readFileSync fs (str state-path ".semantic-head") "utf8"))]
+          (.writeFileSync fs task-path (.stringify js/JSON (clj->js next-task)) "utf8")
+          (.writeFileSync fs tools-path
+                          (.stringify js/JSON
+                                      (clj->js (assoc profile :tools
+                                                      {"amu/compile" (get-in profile [:tools :amu/compile])
+                                                       "test/run" (get-in profile [:tools :test/run])})))
+                          "utf8")
+          (let [next-run (.spawnSync cp "kbb"
+                                     #js ["--backend" "sci" "bin/mithril-hermes.cljk" "tick"
+                                          "examples/governed-coding-bot.mith" task-path state-path
+                                          "cli-test" "workspace/read" "semantic-execute" tools-path]
+                                     #js {:cwd (.cwd js/process) :encoding "utf8"})
+                new-head (.trim (.readFileSync fs (str state-path ".semantic-head") "utf8"))
+                block (reader/read-string
+                       (.readFileSync fs (str state-path ".semantic-blocks/" (subs new-head 7))
+                                        "utf8"))]
+            (is (= 0 (.-status next-run)) (str (.-stdout next-run) (.-stderr next-run)))
+            (is (not= old-head new-head))
+            (let [parent-id (:parent-digest block)
+                  parent (reader/read-string
+                          (.readFileSync fs
+                                         (str state-path ".semantic-blocks/" (subs parent-id 7))
+                                         "utf8"))]
+              (is (= old-head (:parent-digest parent))))
+            (is (= 1 (get-in block [:state :step]))))))
+      (finally (.rmSync fs dir #js {:recursive true :force true})))))
+
+(deftest imported-inflight-effect-cannot-be-reexecuted
+  (let [dir (.mkdtempSync fs "/tmp/mithril-semantic-inflight-")
+        task {:id "inflight" :workspace dir :goal "Inspect one workspace"}
+        task-path (str dir "/task.json")
+        state-path (str dir "/state.edn")
+        artifact (bot/compile-text "examples/governed-coding-bot.mith"
+                                   (.readFileSync fs "examples/governed-coding-bot.mith" "utf8"))
+        initial (bot/start-run artifact task "cli-test" 1000)
+        pending (:state (bot/request-effect
+                         initial {:action (get bot/action-by-label "workspace-inspect")
+                                  :confidence 10000}
+                         #{:workspace/read} "cli-test" 1001))]
+    (try
+      (.writeFileSync fs task-path (.stringify js/JSON (clj->js task)) "utf8")
+      (.writeFileSync fs state-path (pr-str pending) "utf8")
+      (let [imported (invoke-semantic-import task-path state-path)]
+        (is (= 0 (.-status imported)) (str (.-stdout imported) (.-stderr imported))))
+      (let [head (.readFileSync fs (str state-path ".semantic-head") "utf8")
+            tick (.spawnSync cp "kbb"
+                             #js ["--backend" "sci" "bin/mithril-hermes.cljk" "tick"
+                                  "examples/governed-coding-bot.mith" task-path state-path
+                                  "cli-test" "workspace/read" "semantic-execute"]
+                             #js {:cwd (.cwd js/process) :encoding "utf8"})]
+        (is (not= 0 (.-status tick)))
+        (is (clojure.string/includes? (.-stdout tick) "effect-in-flight"))
+        (is (= head (.readFileSync fs (str state-path ".semantic-head") "utf8")))
+        (is (= pending (reader/read-string (.readFileSync fs state-path "utf8")))))
+      (finally (.rmSync fs dir #js {:recursive true :force true})))))
+
 (deftest terminal-redelivery-crosses-the-real-cli-boundary
   (let [dir (.mkdtempSync fs "/tmp/mithril-cli-test-")
         {:keys [task state]} (terminal-fixture dir)
@@ -197,6 +307,7 @@
         (.rmSync fs dir #js {:recursive true :force true})))))
 
 (deftest applied-write-is-reconciled-from-an-inflight-checkpoint-without-reexecution
+  (doseq [semantic? [false true]]
   (let [dir (.mkdtempSync fs "/tmp/mithril-cli-reconcile-")
         workspace (str dir "/workspace")
         artifacts (str dir "/artifacts")
@@ -263,12 +374,21 @@
                                                      "test/run" (get-in profile [:tools :test/run])})))
                         "utf8")
         (.writeFileSync fs state-path (pr-str state) "utf8")
+        (when semantic?
+          (let [imported (.spawnSync cp "kbb"
+                                      #js ["--backend" "sci" "bin/mithril-hermes.cljk"
+                                           "semantic-import" profile-path task-path state-path owner]
+                                      #js {:cwd (.cwd js/process) :encoding "utf8"})]
+            (is (= 0 (.-status imported)) (str (.-stdout imported) (.-stderr imported)))))
         (let [before (.readFileSync fs (str workspace "/app.mith") "utf8")
               pending (.readFileSync fs state-path "utf8")
+              head-before (when semantic?
+                            (.trim (.readFileSync fs (str state-path ".semantic-head") "utf8")))
               blocked (.spawnSync cp "kbb"
                                      #js ["--backend" "sci" "bin/mithril-hermes.cljk" "tick"
                                           profile-path task-path state-path owner
-                                          "workspace/apply-patch" "execute" tools-path]
+                                          "workspace/apply-patch"
+                                          (if semantic? "semantic-execute" "execute") tools-path]
                                      #js {:cwd (.cwd js/process) :encoding "utf8"})
               _ (is (not= 0 (.-status blocked)))
               _ (is (clojure.string/includes? (.-stdout blocked) "effect-in-flight"))
@@ -289,6 +409,15 @@
           (is (nil? (:awaiting saved)))
           (is (= :completed (get-in saved [:receipts 2 :status])))
           (is (= before (.readFileSync fs (str workspace "/app.mith") "utf8")))
+          (when semantic?
+            (let [head-after (.trim (.readFileSync fs (str state-path ".semantic-head") "utf8"))
+                  block (reader/read-string
+                         (.readFileSync fs
+                                        (str state-path ".semantic-blocks/" (subs head-after 7))
+                                        "utf8"))]
+              (is (not= head-before head-after))
+              (is (= head-before (:parent-digest block)))
+              (is (= 3 (get-in block [:state :step])))))
           (let [persisted (.readFileSync fs state-path "utf8")
                 duplicate (.spawnSync cp "kbb"
                                       #js ["--backend" "sci" "bin/mithril-hermes.cljk" "reconcile"
@@ -298,4 +427,4 @@
             (is (clojure.string/includes? (.-stdout duplicate) "no-inflight-effect"))
             (is (= persisted (.readFileSync fs state-path "utf8"))))))
       (finally
-        (.rmSync fs dir #js {:recursive true :force true})))))
+        (.rmSync fs dir #js {:recursive true :force true}))))))

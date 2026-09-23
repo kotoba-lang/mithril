@@ -105,6 +105,9 @@
     "lastEffectDigest" "mith:lastEffectDigest"
     "step" {"@id" "mith:step" "@type" "xsd:integer"}
     "facts" {"@id" "mith:fact" "@type" "@id" "@container" "@set"}
+    "bpmnTokenAt" "mith:bpmnTokenAt"
+    "awaitingEffect" "mith:awaitingEffect"
+    "receiptCount" {"@id" "mith:receiptCount" "@type" "xsd:integer"}
     "process" "mith:process"
     "nodes" {"@id" "mith:node" "@container" "@set"}
     "flows" {"@id" "mith:flow" "@container" "@set"}

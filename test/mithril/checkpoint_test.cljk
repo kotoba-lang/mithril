@@ -27,6 +27,14 @@
     (is (= (get-in resumed [:block :graph-digest]) (compiler/graph-digest doc)))
     (is (= "BotCheckpoint" (get doc "@type")))
     (is (= 1 (get doc "step")))
+    (is (= ["https://mithril.fund/fact/semantic/prefix-valid"] (get doc "facts")))
+    (is (= 0 (get doc "receiptCount")))
+    (is (string? (get doc "bpmnTokenAt")))
+    (is (not= (:graph-digest (:block initial))
+              (:graph-digest (:block
+                              (checkpoint/build s
+                                                (update (fixture) :facts conj :workspace/inspected)
+                                                nil)))))
     (is (= :mithril.checkpoint/invalid-block
            (error-code #(checkpoint/verify s (assoc-in initial [:block :state :step] 99)))))
     (let [changed (checkpoint/form-text

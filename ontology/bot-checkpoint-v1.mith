@@ -49,4 +49,16 @@
       (shacl/property-shape
         :sh/path "https://mithril.fund/ns/v1#step"
         :sh/datatype "http://www.w3.org/2001/XMLSchema#integer"
-        :sh/min-count 1 :sh/max-count 1)])])
+        :sh/min-count 1 :sh/max-count 1)
+      (shacl/property-shape
+        :sh/path "https://mithril.fund/ns/v1#receiptCount"
+        :sh/datatype "http://www.w3.org/2001/XMLSchema#integer"
+        :sh/min-count 1 :sh/max-count 1)
+      (shacl/property-shape
+        :sh/path "https://mithril.fund/ns/v1#bpmnTokenAt"
+        :sh/datatype "http://www.w3.org/2001/XMLSchema#string"
+        :sh/min-count 0 :sh/max-count 1)
+      (shacl/property-shape
+        :sh/path "https://mithril.fund/ns/v1#awaitingEffect"
+        :sh/datatype "http://www.w3.org/2001/XMLSchema#string"
+        :sh/min-count 0 :sh/max-count 1)])])

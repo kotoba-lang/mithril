@@ -420,12 +420,20 @@ An opt-in `semantic-execute` mode uses the same one-effect loop but commits
 each requested and completed state to an immutable, parent-linked block under
 `state.edn.semantic-blocks/`. The head is `state.edn.semantic-head`; the EDN
 file remains a local projection. The block contains a `.mith` BotCheckpoint
-form, RDF-canonical graph digest, full state digest and ontology digest.
+form, RDF-canonical graph digest, full state digest and ontology digest. Its
+RDF projection includes facts, BPMN token position, pending effect, and receipt
+count; OWL materialization, SPARQL fact query and the declared SHACL shape are
+executed before commit. The complete runtime state is still an EDN value
+inside the private block, so RDF is not yet the sole replay representation.
 [`bot-checkpoint-v1.mith`](ontology/bot-checkpoint-v1.mith) declares its OWL
 class and SHACL shape; the writer executes both checks, and the reader verifies
 the full ancestry before continuing. A legacy EDN-only state is refused by
-this mode rather than silently imported. `reconcile` recognizes a semantic
-head and advances that same chain after an in-flight effect. These private
+this mode rather than silently imported. Existing state can be imported
+explicitly with `mithril-hermes semantic-import <profile.mith> <task.json>
+<state.edn> <owner>` after profile/task binding verification. Terminal
+redelivery remains a no-op, in-flight effects still require reconciliation,
+and a new task can follow a terminal run in the same causal chain. `reconcile`
+recognizes a semantic head and advances that same chain after an in-flight effect. These private
 blocks are local, not published to a public IPLD store. This proves a bounded
 content-addressed checkpoint/lineage path, not distributed Unison branch/merge
 or parity with every Hermes profile and cron job.
