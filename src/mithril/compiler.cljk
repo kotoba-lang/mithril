@@ -93,6 +93,7 @@
     "maxRetries" {"@id" "mith:maxRetries" "@type" "http://www.w3.org/2001/XMLSchema#integer"}
     "leaseSeconds" {"@id" "mith:leaseSeconds" "@type" "http://www.w3.org/2001/XMLSchema#integer"}
     "effects" {"@id" "mith:effect" "@type" "@id" "@container" "@set"}
+    "legacyProfiles" {"@id" "mith:legacyProfileDigest" "@container" "@set"}
     "process" "mith:process"
     "nodes" {"@id" "mith:node" "@container" "@set"}
     "flows" {"@id" "mith:flow" "@container" "@set"}

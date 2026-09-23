@@ -80,6 +80,7 @@
    :max-retries "maxRetries"
    :lease-seconds "leaseSeconds"
    :effects "effects"
+   :legacy-profiles "legacyProfiles"
    :process "process"
    :nodes "nodes"
    :flows "flows"

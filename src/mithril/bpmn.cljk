@@ -204,6 +204,21 @@
          distinct
          vec)))
 
+(declare select-action apply-outcome)
+
+(defn replay-completed-actions
+  "Rebuild a durable token position by replaying an ordered sequence of
+  completed service-task actions.  This is used for explicit checkpoint
+  migration: the process interpreter, rather than gateway identifiers in host
+  code, remains the authority for every reconstructed transition."
+  [runtime action-ids]
+  (reduce (fn [state action-id]
+            (-> state
+                (select-action action-id)
+                (apply-outcome action-id true)))
+          runtime
+          action-ids))
+
 (defn select-action
   "Commit a gateway choice up to, but not across, its service task."
   [runtime action-id]
