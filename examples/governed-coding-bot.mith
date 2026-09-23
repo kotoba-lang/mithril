@@ -11,11 +11,12 @@
     :actions
     ["https://mithril.fund/id/action/workspace-inspect"
      "https://mithril.fund/id/action/code-propose"
+     "https://mithril.fund/id/action/patch-reset"
      "https://mithril.fund/id/action/patch-apply"
      "https://mithril.fund/id/action/amu-compile"
      "https://mithril.fund/id/action/test-run"
      "https://mithril.fund/id/action/git-status"
      "https://mithril.fund/id/action/stop"]
     :effects
-    ["workspace/read" "llm/propose-patch" "workspace/apply-patch"
+    ["workspace/read" "llm/propose-patch" "workspace/revert-patch" "workspace/apply-patch"
      "amu/compile" "test/run" "git/status" "agent/stop"]))

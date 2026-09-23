@@ -39,7 +39,7 @@
         state (bot/start-run artifact (task) "worker-1" 1000)
         ontology (compiler/parse-json (read-text "ontology/bot-agent-v1.mith"))]
     (is (= bot/artifact-format (:format artifact)))
-    (is (= 7 (count actions)))
+    (is (= 8 (count actions)))
     (is (= [:infer/owl2-rl :query/sparql :validate/shacl]
            (mapv :operation (:semantic-receipts state))))
     (is (= 0 (get-in state [:semantic-receipts 2 :metrics :violations])))
@@ -93,6 +93,36 @@
            (error-code #(bot/prepare-request s1 "other-worker" 1004))))
     (is (= :mithril.bot/duplicate-receipt
            (error-code #(bot/apply-receipt s1 failed "worker-1" 1004))))))
+
+(deftest failed-build-enters-a-bounded-governed-repair-edge
+  (let [base (-> (bot/start-run (profile) (task) "worker-1" 1000)
+                 (assoc :step 4
+                        :facts #{:semantic/prefix-valid :workspace/inspected
+                                 :proposal/ready :workspace/changed :artifact/compiled}))
+        test-action {:action (get bot/action-by-label "test-run")}
+        requested (bot/request-effect base test-action (get-in base [:policy :effects])
+                                      "worker-1" 2000)
+        failed {:format bot/receipt-format :effect-id (get-in requested [:effect :id])
+                :status :failed :output-digest (execution/digest :test-failed)}
+        repair-state (bot/apply-receipt (:state requested) failed "worker-1" 2001)
+        reset-action {:action (get bot/action-by-label "patch-reset")}
+        reset-request (bot/request-effect repair-state reset-action
+                                          (get-in repair-state [:policy :effects])
+                                          "worker-1" 2002)
+        reset-receipt {:format bot/receipt-format
+                       :effect-id (get-in reset-request [:effect :id])
+                       :status :completed :output-digest (execution/digest :reset)}
+        reset-state (bot/apply-receipt (:state reset-request) reset-receipt
+                                       "worker-1" 2003)]
+    (is (contains? (:facts repair-state) :repair/needed))
+    (is (= 1 (get-in repair-state [:retries "https://mithril.fund/id/action/test-run"])))
+    (is (some #(= "patch-reset" (:label %)) (bot/available-actions repair-state)))
+    (is (contains? (:facts reset-state) :workspace/reset))
+    (is (not-any? (:facts reset-state)
+                  [:proposal/ready :workspace/changed :artifact/compiled
+                   :tests/passed :repair/needed]))
+    (is (some #(= "code-propose" (:label %)) (bot/available-actions reset-state)))
+    (is (not-any? #(= "test-run" (:label %)) (bot/available-actions reset-state)))))
 
 (deftest durable-lease-can-be-renewed-but-not-stolen
   (let [state (bot/start-run (profile) (task) "worker-1" 1000)

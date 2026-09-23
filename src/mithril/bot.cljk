@@ -27,6 +27,10 @@
     :label "code-propose" :effect :llm/propose-patch
     :confidence-floor 6000
     :requires #{:workspace/inspected} :produces #{:proposal/ready}}
+   {:id "https://mithril.fund/id/action/patch-reset"
+    :label "patch-reset" :effect :workspace/revert-patch
+    :confidence-floor 9000
+    :requires #{:repair/needed} :produces #{:workspace/reset}}
    {:id "https://mithril.fund/id/action/patch-apply"
     :label "patch-apply" :effect :workspace/apply-patch
     :confidence-floor 8500
@@ -372,6 +376,8 @@
           completed? (= :completed (:status receipt))
           retries (get-in state [:retries (:id action)] 0)
           retry? (and (not completed?) (< retries (get-in state [:policy :max-retries])))
+          repairable? (contains? #{:amu/compile :test/run} (:effect action))
+          reset? (= :workspace/revert-patch (:effect action))
           stopped? (and completed? (= :agent/stop (:effect action)))
           next-state (-> state
                          (assoc :awaiting nil)
@@ -379,6 +385,13 @@
                          (update :seen-effects conj (:effect-id receipt))
                          (update :receipts conj receipt)
                          (cond-> completed? (update :facts into (:produces action)))
+                         (cond-> (and retry? repairable?)
+                           (update :facts conj :repair/needed))
+                         (cond-> (and completed? reset?)
+                           (update :facts #(-> %
+                                               (disj :proposal/ready :workspace/changed
+                                                     :artifact/compiled :tests/passed
+                                                     :repair/needed))))
                          (cond-> (not completed?) (assoc-in [:retries (:id action)] (inc retries))))]
       (cond
         stopped? (assoc next-state :status :completed)

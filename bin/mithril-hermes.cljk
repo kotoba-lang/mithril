@@ -123,7 +123,7 @@
      :audit {:source "deterministic-singleton"}}))
 
 (def coding-action-order
-  ["workspace-inspect" "code-propose" "patch-apply" "amu-compile"
+  ["workspace-inspect" "patch-reset" "code-propose" "patch-apply" "amu-compile"
    "test-run" "git-status" "stop"])
 
 (defn- deterministic-coding [state]
