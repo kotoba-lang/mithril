@@ -1,0 +1,331 @@
+(ns mithril.domain-rdf
+  "Ontology-typed RDF Dataset for a bot run's facts and causal effect receipts.
+  The complete executable state remains in state-rdf; this graph is a
+  deterministic, queryable projection bound to that state by its block CID."
+  (:require [clojure.string :as str]
+            [json-ld-api.core :as jsonld]
+            [json-ld-api.to-rdf :as to-rdf]
+            [mithril.bot :as bot]
+            [mithril.compiler :as compiler]
+            [mithril.execution :as execution]
+            [mithril.state-rdf :as state-rdf]
+            [oak.semantic :as oak]
+            [rdf-canon.core :as rdf-canon]))
+
+(def ontology-path "ontology/bot-domain-v1.mith")
+(def base "https://mithril.fund/ns/bot-domain/v1#")
+(def xsd state-rdf/xsd)
+(def rdf-type state-rdf/rdf-type)
+(def classes
+  (set (map #(str base %)
+            ["Activity" "Run" "EffectEvent" "Receipt" "AwaitingEffect"
+             "Action" "Fact"])))
+(def subclasses
+  #{[(str base "Run") (str base "Activity")]
+    [(str base "EffectEvent") (str base "Activity")]
+    [(str base "Receipt") (str base "EffectEvent")]
+    [(str base "AwaitingEffect") (str base "EffectEvent")]})
+(def expected-shapes
+  {(str base "Run") #{"runId" "status" "step" "profileDigest" "taskDigest"
+                       "receipt" "fact" "awaiting"}
+   (str base "Receipt") #{"effectId" "action" "status" "outputDigest" "index"}
+   (str base "AwaitingEffect") #{"effectId" "action" "index"}
+   (str base "Action") #{"operation"}
+   (str base "Fact") #{"name"}})
+(def context
+  {"@context"
+   (merge
+    (into {} (map (fn [name] [name (str base name)])
+                  ["Run" "Receipt" "AwaitingEffect" "Action" "Fact"]))
+    (into {}
+          (for [name ["receipt" "fact" "awaiting" "action"]]
+            [name {"@id" (str base name) "@type" "@id"}]))
+    (into {}
+          (for [name ["step" "index"]]
+            [name {"@id" (str base name) "@type" (str xsd "integer")}]))
+    (into {}
+          (for [name ["runId" "status" "profileDigest" "taskDigest"
+                      "effectId" "outputDigest" "operation" "name"]]
+            [name (str base name)])))} )
+
+(defn- refuse! [reason]
+  (throw (ex-info "Mithril domain RDF refused"
+                  {:mithril/error :mithril.domain-rdf/refused :reason reason})))
+
+(defn- digest? [value]
+  (and (string? value) (boolean (re-matches #"sha256:[0-9a-f]{64}" value))))
+
+(defn- link [id] {"@id" id})
+(defn- run-id [state] (str "https://mithril.fund/domain/run/" (subs (:run-id state) 7)))
+(defn- receipt-id [effect-id] (str "https://mithril.fund/domain/receipt/" (subs effect-id 7)))
+(defn- awaiting-id [effect-id] (str "https://mithril.fund/domain/awaiting/" (subs effect-id 7)))
+(defn- fact-id [fact] (str "https://mithril.fund/domain/fact/"
+                         (subs (execution/digest fact) 7)))
+
+(defn- receipt-action! [state index receipt]
+  (let [choices (filter #(contains? (set (get-in state [:policy :actions])) (:id %))
+                        bot/action-catalog)
+        matches (filter #(= (:effect-id receipt)
+                            (execution/digest [(:run-id state) index (:id %)]))
+                        choices)]
+    (when-not (= 1 (count matches)) (refuse! :unmapped-receipt-action))
+    (first matches)))
+
+(defn document [state]
+  (when-not (and (map? state) (digest? (:run-id state))
+                 (digest? (:profile-digest state))
+                 (digest? (:task-digest state))
+                 (keyword? (:status state))
+                 (integer? (:step state)) (<= 0 (:step state) 64)
+                 (set? (:facts state)) (every? keyword? (:facts state))
+                 (vector? (:receipts state)) (<= (count (:receipts state)) 64))
+    (refuse! :invalid-run-state))
+  (let [facts (vec (sort-by str (:facts state)))
+        receipts (mapv (fn [index receipt]
+                         (when-not (and (digest? (:effect-id receipt))
+                                        (digest? (:output-digest receipt))
+                                        (contains? #{:completed :failed} (:status receipt)))
+                           (refuse! :invalid-receipt))
+                         (let [action (receipt-action! state index receipt)]
+                           {:id (receipt-id (:effect-id receipt))
+                            :effect-id (:effect-id receipt)
+                            :action action :status (name (:status receipt))
+                            :output-digest (:output-digest receipt)
+                            :index index}))
+                       (range (count (:receipts state))) (:receipts state))
+        awaiting (:awaiting state)
+        pending (when awaiting
+                  (let [action (bot/action-by-id (:action awaiting))]
+                    (when-not (and action (digest? (:id awaiting))
+                                   (= (:id awaiting)
+                                      (execution/digest [(:run-id state) (:step state)
+                                                         (:id action)]))
+                                   (= (:operation awaiting) (:effect action)))
+                      (refuse! :invalid-awaiting-effect))
+                    {:id (awaiting-id (:id awaiting)) :effect-id (:id awaiting)
+                     :action action :index (:step state)}))
+        actions (->> (concat (map :action receipts) (when pending [(:action pending)]))
+                     (distinct) (sort-by :id) vec)
+        root (cond-> {"@id" (run-id state) "@type" "Run"
+                      "runId" (:run-id state) "status" (name (:status state))
+                      "step" (:step state)
+                      "profileDigest" (:profile-digest state)
+                      "taskDigest" (:task-digest state)
+                      "fact" (mapv (comp link fact-id) facts)
+                      "receipt" (mapv (comp link :id) receipts)}
+               pending (assoc "awaiting" (link (:id pending))))
+        receipt-nodes (mapv (fn [{:keys [id effect-id action status output-digest index]}]
+                              {"@id" id "@type" "Receipt" "effectId" effect-id
+                               "action" (link (:id action)) "status" status
+                               "outputDigest" output-digest "index" index}) receipts)
+        pending-node (when pending
+                       {"@id" (:id pending) "@type" "AwaitingEffect"
+                        "effectId" (:effect-id pending)
+                        "action" (link (get-in pending [:action :id]))
+                        "index" (:index pending)})
+        action-nodes (mapv (fn [action]
+                             {"@id" (:id action) "@type" "Action"
+                              "operation" (subs (str (:effect action)) 1)}) actions)
+        fact-nodes (mapv (fn [fact]
+                           {"@id" (fact-id fact) "@type" "Fact"
+                            "name" (str fact)}) facts)]
+    {"@context" (get context "@context")
+     "@graph" (vec (concat [root] receipt-nodes
+                           (when pending-node [pending-node]) action-nodes fact-nodes))}))
+
+(defn quads [document]
+  (to-rdf/to-rdf (jsonld/expand document)))
+
+(defn graph-digest [dataset]
+  (str "sha256:" (rdf-canon/canonical-hash dataset)))
+
+(defn- term->tuple [term]
+  (case (:type term)
+    :iri ["i" (:value term)]
+    :literal (if (:language term)
+               (refuse! :unsupported-language)
+               ["l" (:value term) (or (:datatype term) "")])
+    (refuse! :unsupported-rdf-term)))
+
+(defn pack-quads [dataset]
+  (let [tuples (mapv (fn [{:keys [subject predicate object graph]}]
+                       (when graph (refuse! :named-graph-not-supported))
+                       [(term->tuple subject) (term->tuple predicate)
+                        (term->tuple object)]) dataset)
+        terms (->> tuples (mapcat identity) distinct (sort-by pr-str) vec)
+        index (zipmap terms (range))]
+    {"terms" terms
+     "triples" (->> tuples (mapv #(mapv index %)) (sort-by pr-str) vec)}))
+
+(defn- tuple->term! [tuple]
+  (when-not (vector? tuple) (refuse! :invalid-packed-term))
+  (case (first tuple)
+    "i" (do (when-not (and (= 2 (count tuple)) (string? (second tuple)))
+              (refuse! :invalid-iri))
+            {:type :iri :value (second tuple)})
+    "l" (do (when-not (and (= 3 (count tuple)) (string? (second tuple))
+                            (string? (nth tuple 2)))
+              (refuse! :invalid-literal))
+            (cond-> {:type :literal :value (second tuple)}
+              (not= "" (nth tuple 2)) (assoc :datatype (nth tuple 2))))
+    (refuse! :invalid-packed-term)))
+
+(defn unpack-quads! [packed]
+  (when-not (and (map? packed) (= #{"terms" "triples"} (set (keys packed)))
+                 (vector? (get packed "terms"))
+                 (vector? (get packed "triples")))
+    (refuse! :invalid-packed-dataset))
+  (let [terms (mapv tuple->term! (get packed "terms"))
+        dataset (mapv (fn [triple]
+                        (when-not (and (vector? triple) (= 3 (count triple))
+                                       (every? #(and (integer? %) (<= 0 %)
+                                                      (< % (count terms))) triple))
+                          (refuse! :invalid-packed-triple))
+                        {:subject (nth terms (nth triple 0))
+                         :predicate (nth terms (nth triple 1))
+                         :object (nth terms (nth triple 2))})
+                      (get packed "triples"))]
+    (when-not (= packed (pack-quads dataset))
+      (refuse! :noncanonical-packed-dataset))
+    dataset))
+
+(defn- compile-property! [property]
+  (let [keys* (set (keys property))
+        path (get property "propertyPath")
+        datatype (get property "datatype")
+        value-class (get property "valueClass")
+        min-count (get property "minCount")
+        max-count (get property "maxCount")]
+    (when-not (and (= "sh:PropertyShape" (get property "@type"))
+                   (contains? #{#{"@type" "propertyPath" "datatype"
+                                  "minCount" "maxCount"}
+                                #{"@type" "propertyPath" "valueClass"
+                                  "minCount" "maxCount"}} keys*)
+                   (contains? (set (map #(str base %) (apply concat (vals expected-shapes))))
+                              path)
+                   (not= (boolean datatype) (boolean value-class))
+                   (or (nil? datatype)
+                       (contains? #{(str xsd "string") (str xsd "integer")}
+                                  datatype))
+                   (or (nil? value-class) (contains? classes value-class))
+                   (integer? min-count) (integer? max-count)
+                   (<= 0 min-count max-count 64))
+      (refuse! :unsupported-shacl-property))
+    {:path path :datatype datatype :value-class value-class
+     :min-count min-count :max-count max-count}))
+
+(defn schema [source]
+  (let [artifact (compiler/compile-ontology-text ontology-path source)
+        graph (get-in artifact [:rdf-dataset "@graph"])
+        class-nodes (filterv #(= "owl:Class" (get % "@type")) graph)
+        shape-nodes (filterv #(= "sh:NodeShape" (get % "@type")) graph)
+        types (set (map #(get % "@id") class-nodes))
+        subclass-pairs (set (keep (fn [node]
+                                    (when-let [parent (get node "subClassOf")]
+                                      [(get node "@id") parent])) class-nodes))
+        shapes (mapv (fn [shape]
+                       (let [target (get shape "targetClass")
+                             properties (get shape "property")
+                             paths (when (vector? properties)
+                                     (set (map #(when-let [path (get % "propertyPath")]
+                                                  (when (string? path)
+                                                    (str/replace path base "")))
+                                               properties)))]
+                         (when-not (and (string? (get shape "@id"))
+                                        (= #{"@id" "@type" "targetClass" "property"}
+                                           (set (keys shape)))
+                                        (contains? expected-shapes target)
+                                        (vector? properties)
+                                        (= (count properties) (count paths))
+                                        (= (get expected-shapes target) paths))
+                           (refuse! :invalid-domain-shape))
+                         {:id (get shape "@id") :target target
+                          :properties (mapv compile-property! properties)})) shape-nodes)]
+    (when-not (and (= (count graph) (+ (count class-nodes) (count shape-nodes)))
+                   (= classes types)
+                   (= (count classes) (count class-nodes))
+                   (= subclasses subclass-pairs)
+                   (= (set (keys expected-shapes)) (set (map :target shapes)))
+                   (= (count shapes) (count (set (map :id shapes)))))
+      (refuse! :invalid-domain-ontology))
+    {:ontology-digest (:graph-digest artifact)
+     :ontology-source source :subclasses subclass-pairs :shapes shapes}))
+
+(defn- literal-type [term]
+  (when (= :literal (:type term))
+    (or (:datatype term) (str xsd "string"))))
+
+(defn validate! [schema dataset]
+  (let [graph (reduce (fn [result {:keys [subject predicate object graph]}]
+                        (when-not (and (nil? graph) (= :iri (:type subject))
+                                       (= :iri (:type predicate)))
+                          (refuse! :unsupported-rdf-term))
+                        (update-in result [(:value subject) (:value predicate)]
+                                   (fnil conj []) object)) {} dataset)
+        _ (when-not (every? (fn [[_ properties]]
+                              (= 1 (count (get properties rdf-type [])))) graph)
+            (refuse! :untyped-or-multi-typed-node))
+        type-triples (mapcat (fn [[id properties]]
+                               (for [term (get properties rdf-type [])]
+                                 (do (when-not (and (= :iri (:type term))
+                                                    (contains? classes (:value term)))
+                                       (refuse! :unknown-data-type))
+                                     (oak/triple id :rdf/type (:value term))))) graph)
+        axioms (map (fn [[child parent]] (oak/triple child :rdfs/subClassOf parent))
+                    (:subclasses schema))
+        entailed (oak/materialize :owl2-rl (set (concat type-triples axioms)))
+        roots (filterv (fn [[id properties]]
+                         (some #(= (str base "Run") (:value %))
+                               (get properties rdf-type []))) graph)
+        root-id (ffirst roots)
+        violations (vec
+                    (take 33
+                          (for [[id _] graph
+                                {:keys [target] :as shape} (:shapes schema)
+                                :when (contains? entailed (oak/triple id :rdf/type target))
+                                property (:properties shape)
+                                :let [values (get-in graph [id (:path property)] [])
+                                      count* (count values)
+                                      bad-datatype (when (:datatype property)
+                                                     (some #(not= (:datatype property)
+                                                                  (literal-type %)) values))
+                                      bad-class (when (:value-class property)
+                                                  (some #(not (and (= :iri (:type %))
+                                                                    (contains? entailed
+                                                                               (oak/triple (:value %)
+                                                                                           :rdf/type
+                                                                                           (:value-class property)))))
+                                                        values))]
+                                :when (or (< count* (:min-count property))
+                                          (> count* (:max-count property))
+                                          bad-datatype bad-class)]
+                            {:node id :shape (:id shape) :path (:path property)
+                             :count count* :datatype? (boolean bad-datatype)
+                             :class? (boolean bad-class)})))]
+    (when-not (and (= 1 (count roots))
+                   (contains? entailed (oak/triple root-id :rdf/type
+                                                   (str base "Activity"))))
+      (refuse! :root-not-entailed))
+    (let [triples (set (concat (map (fn [{:keys [subject predicate object]}]
+                                     (oak/triple (:value subject) (:value predicate)
+                                                 (:value object))) dataset)
+                               axioms))
+          receipt-rows (oak/execute :owl2-rl
+                                    [:sparql/project [:?receipt]
+                                     [:sparql/bgp [root-id (str base "receipt") :?receipt]]]
+                                    triples)
+          fact-rows (oak/execute :owl2-rl
+                                 [:sparql/project [:?fact]
+                                  [:sparql/bgp [root-id (str base "fact") :?fact]]]
+                                 triples)]
+      (when-not (and (= (count receipt-rows)
+                        (count (get-in graph [root-id (str base "receipt")] [])))
+                     (= (count fact-rows)
+                        (count (get-in graph [root-id (str base "fact")] []))))
+        (refuse! :sparql-projection-mismatch))
+      {:valid? (empty? violations)
+       :checked-nodes (count graph)
+       :entailed-types (count (filter #(= :rdf/type (:p %)) entailed))
+       :receipt-rows (count receipt-rows)
+       :fact-rows (count fact-rows)
+       :violations violations})))
