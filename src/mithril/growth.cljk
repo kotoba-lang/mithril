@@ -66,6 +66,10 @@
     {:format artifact-format
      :media-type compiler/media-type
      :graph-digest (compiler/graph-digest doc)
+     ;; The pinned v1 JSON-LD context does not expand every GrowthProfile
+     ;; policy term. Keep the legacy RDF projection identity for old receipts,
+     ;; but bind the complete checked definition for trace ancestry.
+     :definition-digest (execution/digest doc)
      :growth-ir {:version :mithril.growth/v1
                  :goal (get doc "goal")
                  :ontology (get doc "ontology")

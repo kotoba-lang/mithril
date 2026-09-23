@@ -4,6 +4,7 @@
             [mithril.form-test]
             [mithril.graph-test]
             [mithril.growth-test]
+            [mithril.growth-trace-test]
             [mithril.app-test]
             [mithril.bot-test]
             [mithril.checkpoint-test]
@@ -18,7 +19,7 @@
             [mithril.openrouter-jev-test]
             [mithril.desktop-test]))
 
-(let [result (t/run-tests 'mithril.compiler-test 'mithril.form-test 'mithril.graph-test 'mithril.growth-test 'mithril.app-test 'mithril.bot-test 'mithril.checkpoint-test 'mithril.checkpoint-ipld-test 'mithril.checkpoint-ipld-fs-test 'mithril.checkpoint-ipld-cli-test 'mithril.hermes-test 'mithril.hermes-cli-integration-test 'mithril.hermes-fleet-test 'mithril.hermes-scheduler-test 'mithril.kanban-worker-test 'mithril.openrouter-jev-test)]
+(let [result (t/run-tests 'mithril.compiler-test 'mithril.form-test 'mithril.graph-test 'mithril.growth-test 'mithril.growth-trace-test 'mithril.app-test 'mithril.bot-test 'mithril.checkpoint-test 'mithril.checkpoint-ipld-test 'mithril.checkpoint-ipld-fs-test 'mithril.checkpoint-ipld-cli-test 'mithril.hermes-test 'mithril.hermes-cli-integration-test 'mithril.hermes-fleet-test 'mithril.hermes-scheduler-test 'mithril.kanban-worker-test 'mithril.openrouter-jev-test)]
   (let [desktop-result (t/run-tests 'mithril.desktop-test)
         failures (+ (:fail result) (:error result) (:fail desktop-result) (:error desktop-result))]
   (when (pos? failures)
