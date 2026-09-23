@@ -93,6 +93,7 @@
     "botProfileDigest": "mith:botProfileDigest",
     "toolProfileDigest": "mith:toolProfileDigest",
     "checkpointMode": "mith:checkpointMode",
+    "decisionMode": "mith:decisionMode",
     "taskDigest": "mith:taskDigest",
     "processDigest": "mith:processDigest",
     "lastEffectDigest": "mith:lastEffectDigest",

@@ -47,6 +47,7 @@
     (is (= scheduler/coding-contract-format (:format compiled)))
     (is (:coding? compiled))
     (is (= 8 (count (:effects compiled))))
+    (is (= "deterministic" (:decision-mode compiled)))
     (is (= "legacy" (:checkpoint-mode compiled)))
     (is (= "semantic"
            (:checkpoint-mode (scheduler/compile-document
@@ -63,6 +64,19 @@
                               coding-artifact)))))
   (is (= :invalid-checkpoint-mode
          (coding-reason (assoc coding-contract "checkpointMode" "unsafe"))))
+  (is (= "jev"
+         (:decision-mode
+          (scheduler/compile-document
+           "jev-coding.mith"
+           (assoc coding-contract "checkpointMode" "ipld-primary"
+                                  "decisionMode" "jev")
+           coding-artifact))))
+  (is (= :jev-requires-primary-checkpoint
+         (coding-reason (assoc coding-contract "decisionMode" "jev"))))
+  (is (= :invalid-decision-mode
+         (coding-reason (assoc coding-contract "checkpointMode" "ipld-primary"
+                                      "decisionMode" "unbounded"))))
+  (is (= :invalid-fields (reason (assoc contract "decisionMode" "jev"))))
   (is (= :invalid-checkpoint-mode
          (reason (assoc contract "checkpointMode" "ipld"))))
   (is (= "ipld-primary"
@@ -133,6 +147,28 @@
         result (scheduler/compile-document "test.mith" parsed artifact)]
     (is (= "semantic" (:checkpoint-mode result)))
     (is (= (assoc contract "checkpointMode" "semantic") parsed))))
+
+(deftest jev-coding-contract-can-use-mithril-form
+  (let [source (str "(mithril/hermes-bpmn-coding-scheduler-contract "
+                    ":id \"https://mithril.fund/id/contract/hermes-coding-test\" "
+                    ":ontology \"" (get coding-contract "ontology") "\" "
+                    ":profile-name \"mithril\" :job-id \"abcdef123456\" "
+                    ":profile-digest \"" (get coding-contract "profileDigest") "\" "
+                    ":bot-profile-digest \"" (get coding-contract "botProfileDigest") "\" "
+                    ":tool-profile-digest \"" (get coding-contract "toolProfileDigest") "\" "
+                    ":task (mithril/task :id \"read-only-test\" :workspace \"/tmp\" "
+                    ":goal \"inspect workspace\" :tool-profile-digest \""
+                    (get coding-contract "toolProfileDigest") "\") "
+                    ":owner \"mithril-scheduler\" "
+                    ":checkpoint-mode \"ipld-primary\" :decision-mode \"jev\" "
+                    ":grants [\"workspace/read\" \"llm/propose-patch\" "
+                    "\"workspace/revert-patch\" \"workspace/apply-patch\" "
+                    "\"amu/compile\" \"test/run\" \"git/status\" \"agent/stop\"])")
+        parsed (compiler/parse-source source)
+        result (scheduler/compile-document "coding.mith" parsed coding-artifact)]
+    (is (= "jev" (:decision-mode result)))
+    (is (= (assoc coding-contract "checkpointMode" "ipld-primary"
+                                  "decisionMode" "jev") parsed))))
 
 (deftest scheduler-distinguishes-held-from-completed-effect
   (let [compiled (scheduler/compile-document "test.mith" contract artifact)
