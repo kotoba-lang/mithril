@@ -25,7 +25,7 @@
         saved (ipld/read! #(local/get-block store %) schema (:head history))]
     (when-not (= state (:state saved))
       (refuse! :state-diverged))
-    (when-not (= ipld/format-id (:format saved))
+    (when-not (ipld/canonical-format? (:format saved))
       (refuse! :legacy-block))
     {:stateCid (:cid saved)
      :semanticGraphDigest (:semantic-graph-digest saved)
@@ -78,7 +78,7 @@
                                          (get-in state [:bpmn :token-state :bpmn/trace])))
                     action (get-in state [:bpmn :model :bpmn/nodes
                                           (:bpmn/at passed) :mithril/action])]
-                (when-not (and (= ipld/format-id (:format saved))
+                (when-not (and (ipld/canonical-format? (:format saved))
                                (= (if previous [previous] []) (:parents saved))
                                (= (ref-name final-state) (ref-name state))
                                (= index (:step state) (count (:receipts state)))
@@ -177,7 +177,8 @@
                                          (get-in state [:bpmn :token-state :bpmn/trace])))
                     action (get-in state [:bpmn :model :bpmn/nodes
                                           (:bpmn/at passed) :mithril/action])]
-                (when-not (and (= ipld/format-id (:format final) (:format requested))
+                (when-not (and (ipld/canonical-format? (:format final))
+                               (ipld/canonical-format? (:format requested))
                                (= [request-cid] (:parents final))
                                (= (if previous [previous] []) (:parents requested))
                                (= (:run-id pending) (:run-id state))
