@@ -121,7 +121,9 @@
           (fail! :mithril.bot/invalid-effects
                  "effects must exactly cover the selected action capabilities" {})))
       (let [process (when-let [process-doc (get doc "process")]
-                      (bpmn/compile-process process-doc action-by-id actions))
+                      (bpmn/compile-process process-doc action-by-id actions
+                                            (contains? (set effects)
+                                                       "llm/propose-patch")))
             legacy-profiles (get doc "legacyProfiles" [])]
         (when-not (and (vector? legacy-profiles)
                        (= (count legacy-profiles) (count (set legacy-profiles)))
@@ -516,8 +518,12 @@
 
 (defn request-effect [state admitted grants owner now-ms]
   (lease-valid! state owner now-ms)
+  (when-not (= :running (:status state))
+    (fail! :mithril.bot/not-running "only a running bot may request an effect" {}))
   (when (:awaiting state)
     (fail! :mithril.bot/effect-in-flight "one effect is already awaiting a receipt" {}))
+  (when (>= (:step state) (get-in state [:policy :max-steps]))
+    (fail! :mithril.bot/step-budget "bot step budget is exhausted" {}))
   (let [action (:action admitted) effect (:effect action) grants (set grants)]
     (when-not (contains? (set (get-in state [:policy :actions])) (:id action))
       (fail! :mithril.bot/action-not-admitted "action is outside the compiled policy" {}))

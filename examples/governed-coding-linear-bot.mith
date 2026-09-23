@@ -1,0 +1,58 @@
+(mithril/bot-profile
+  :id "https://mithril.fund/id/bot/governed-coder-linear"
+  :goal "https://mithril.fund/id/goal/governed-coding-task"
+  :ontology "2a8e807877d14b6eb6d31352f79d2976cffc63eb346afd1734b68ed6825fd9f3"
+  :process
+  (bpmn/process
+    :id "https://mithril.fund/id/bpmn/governed-coder-linear/process"
+    :ontology "2a8e807877d14b6eb6d31352f79d2976cffc63eb346afd1734b68ed6825fd9f3"
+    :nodes
+    [(bpmn/start-event :id "https://mithril.fund/id/bpmn/governed-coder-linear/start")
+     (bpmn/end-event :id "https://mithril.fund/id/bpmn/governed-coder-linear/end")
+     (bpmn/exclusive-gateway :id "https://mithril.fund/id/bpmn/governed-coder-linear/g0")
+     (bpmn/service-task :id "https://mithril.fund/id/bpmn/governed-coder-linear/inspect" :action "https://mithril.fund/id/action/workspace-inspect")
+     (bpmn/service-task :id "https://mithril.fund/id/bpmn/governed-coder-linear/stop0" :action "https://mithril.fund/id/action/stop")
+     (bpmn/exclusive-gateway :id "https://mithril.fund/id/bpmn/governed-coder-linear/g1")
+     (bpmn/service-task :id "https://mithril.fund/id/bpmn/governed-coder-linear/propose" :action "https://mithril.fund/id/action/code-propose")
+     (bpmn/exclusive-gateway :id "https://mithril.fund/id/bpmn/governed-coder-linear/g2")
+     (bpmn/service-task :id "https://mithril.fund/id/bpmn/governed-coder-linear/apply" :action "https://mithril.fund/id/action/patch-apply")
+     (bpmn/exclusive-gateway :id "https://mithril.fund/id/bpmn/governed-coder-linear/g3")
+     (bpmn/service-task :id "https://mithril.fund/id/bpmn/governed-coder-linear/compile" :action "https://mithril.fund/id/action/amu-compile")
+     (bpmn/exclusive-gateway :id "https://mithril.fund/id/bpmn/governed-coder-linear/g4")
+     (bpmn/service-task :id "https://mithril.fund/id/bpmn/governed-coder-linear/test" :action "https://mithril.fund/id/action/test-run")
+     (bpmn/exclusive-gateway :id "https://mithril.fund/id/bpmn/governed-coder-linear/g5")
+     (bpmn/service-task :id "https://mithril.fund/id/bpmn/governed-coder-linear/git" :action "https://mithril.fund/id/action/git-status")
+     (bpmn/exclusive-gateway :id "https://mithril.fund/id/bpmn/governed-coder/g6")
+     (bpmn/service-task :id "https://mithril.fund/id/bpmn/governed-coder-linear/stop" :action "https://mithril.fund/id/action/stop")]
+    :flows
+    [(bpmn/sequence-flow :id "https://mithril.fund/id/bpmn/governed-coder-linear/f0" :source "https://mithril.fund/id/bpmn/governed-coder-linear/start" :target "https://mithril.fund/id/bpmn/governed-coder-linear/g0" :condition "always")
+     (bpmn/sequence-flow :id "https://mithril.fund/id/bpmn/governed-coder-linear/f1" :source "https://mithril.fund/id/bpmn/governed-coder-linear/g0" :target "https://mithril.fund/id/bpmn/governed-coder-linear/inspect" :condition "https://mithril.fund/id/action/workspace-inspect")
+     (bpmn/sequence-flow :id "https://mithril.fund/id/bpmn/governed-coder-linear/f2" :source "https://mithril.fund/id/bpmn/governed-coder-linear/g0" :target "https://mithril.fund/id/bpmn/governed-coder-linear/stop0" :condition "https://mithril.fund/id/action/stop")
+     (bpmn/sequence-flow :id "https://mithril.fund/id/bpmn/governed-coder-linear/f3" :source "https://mithril.fund/id/bpmn/governed-coder-linear/inspect" :target "https://mithril.fund/id/bpmn/governed-coder-linear/g1" :condition "always")
+     (bpmn/sequence-flow :id "https://mithril.fund/id/bpmn/governed-coder-linear/f4" :source "https://mithril.fund/id/bpmn/governed-coder-linear/stop0" :target "https://mithril.fund/id/bpmn/governed-coder-linear/end" :condition "always")
+     (bpmn/sequence-flow :id "https://mithril.fund/id/bpmn/governed-coder-linear/f5" :source "https://mithril.fund/id/bpmn/governed-coder-linear/g1" :target "https://mithril.fund/id/bpmn/governed-coder-linear/propose" :condition "https://mithril.fund/id/action/code-propose")
+     (bpmn/sequence-flow :id "https://mithril.fund/id/bpmn/governed-coder-linear/f6" :source "https://mithril.fund/id/bpmn/governed-coder-linear/propose" :target "https://mithril.fund/id/bpmn/governed-coder-linear/g2" :condition "always")
+     (bpmn/sequence-flow :id "https://mithril.fund/id/bpmn/governed-coder-linear/f7" :source "https://mithril.fund/id/bpmn/governed-coder-linear/g2" :target "https://mithril.fund/id/bpmn/governed-coder-linear/apply" :condition "https://mithril.fund/id/action/patch-apply")
+     (bpmn/sequence-flow :id "https://mithril.fund/id/bpmn/governed-coder-linear/f8" :source "https://mithril.fund/id/bpmn/governed-coder-linear/apply" :target "https://mithril.fund/id/bpmn/governed-coder-linear/g3" :condition "always")
+     (bpmn/sequence-flow :id "https://mithril.fund/id/bpmn/governed-coder-linear/f9" :source "https://mithril.fund/id/bpmn/governed-coder-linear/g3" :target "https://mithril.fund/id/bpmn/governed-coder-linear/compile" :condition "https://mithril.fund/id/action/amu-compile")
+     (bpmn/sequence-flow :id "https://mithril.fund/id/bpmn/governed-coder-linear/f10" :source "https://mithril.fund/id/bpmn/governed-coder-linear/compile" :target "https://mithril.fund/id/bpmn/governed-coder-linear/g4" :condition "always")
+     (bpmn/sequence-flow :id "https://mithril.fund/id/bpmn/governed-coder-linear/f11" :source "https://mithril.fund/id/bpmn/governed-coder-linear/g4" :target "https://mithril.fund/id/bpmn/governed-coder-linear/test" :condition "https://mithril.fund/id/action/test-run")
+     (bpmn/sequence-flow :id "https://mithril.fund/id/bpmn/governed-coder-linear/f12" :source "https://mithril.fund/id/bpmn/governed-coder-linear/test" :target "https://mithril.fund/id/bpmn/governed-coder-linear/g5" :condition "always")
+     (bpmn/sequence-flow :id "https://mithril.fund/id/bpmn/governed-coder-linear/f13" :source "https://mithril.fund/id/bpmn/governed-coder-linear/g5" :target "https://mithril.fund/id/bpmn/governed-coder-linear/git" :condition "https://mithril.fund/id/action/git-status")
+     (bpmn/sequence-flow :id "https://mithril.fund/id/bpmn/governed-coder-linear/f14" :source "https://mithril.fund/id/bpmn/governed-coder-linear/git" :target "https://mithril.fund/id/bpmn/governed-coder/g6" :condition "always")
+     (bpmn/sequence-flow :id "https://mithril.fund/id/bpmn/governed-coder-linear/f15" :source "https://mithril.fund/id/bpmn/governed-coder/g6" :target "https://mithril.fund/id/bpmn/governed-coder-linear/stop" :condition "https://mithril.fund/id/action/stop")
+     (bpmn/sequence-flow :id "https://mithril.fund/id/bpmn/governed-coder-linear/f16" :source "https://mithril.fund/id/bpmn/governed-coder-linear/stop" :target "https://mithril.fund/id/bpmn/governed-coder-linear/end" :condition "always")])
+  :policy
+  (mithril/bot-policy
+    :max-steps 8 :max-retries 2 :lease-seconds 900 :confidence-floor 3000
+    :actions
+    ["https://mithril.fund/id/action/workspace-inspect"
+     "https://mithril.fund/id/action/code-propose"
+     "https://mithril.fund/id/action/patch-apply"
+     "https://mithril.fund/id/action/amu-compile"
+     "https://mithril.fund/id/action/test-run"
+     "https://mithril.fund/id/action/git-status"
+     "https://mithril.fund/id/action/stop"]
+    :effects
+    ["workspace/read" "llm/propose-patch" "workspace/apply-patch"
+     "amu/compile" "test/run" "git/status" "agent/stop"]))

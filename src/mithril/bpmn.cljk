@@ -87,7 +87,7 @@
   service tasks.  Every outgoing gateway flow names its target task's bound
   Mithril action as its condition, making the selected transition explicit and
   replayable instead of embedding routing in host code."
-  [doc action-by-id policy-action-ids]
+  [doc action-by-id policy-action-ids allow-singleton?]
   (require-fields! doc process-keys #{} "BPMN process")
   (when-not (= "bpmn:Process" (get doc "@type"))
     (fail! :mithril.bpmn/not-a-process "process @type must be bpmn:Process" {}))
@@ -128,9 +128,12 @@
                  {:expected (set policy-action-ids) :actual bound-actions}))
         (doseq [gateway (model/nodes-of-type process :exclusive-gateway)]
           (let [outgoing (model/outgoing process (:bpmn/id gateway))]
-            (when-not (<= 2 (count outgoing) 8)
+            ;; A one-way gateway is a checked workflow transition, not a
+            ;; model decision. This lets ontology/BPMN own mandatory coding
+            ;; steps while Jev handles only genuine alternatives.
+            (when-not (<= (if allow-singleton? 1 2) (count outgoing) 8)
               (fail! :mithril.bpmn/gateway-cardinality
-                     "every decision gateway must expose two through eight choices"
+                     "gateway cardinality is outside the admitted profile"
                      {:gateway (:bpmn/id gateway) :choices (count outgoing)}))
             (doseq [flow outgoing]
               (let [target (model/node process (:bpmn/target flow))]
