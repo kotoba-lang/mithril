@@ -1,0 +1,139 @@
+#!/usr/bin/env kbb
+(ns mithril.hermes-scheduler-cli
+  "One Hermes builtin cron occurrence -> one governed Mithril BPMN effect."
+  (:require [cljs.reader :as reader]
+            [clojure.string :as str]
+            [mithril.bot :as bot]
+            [mithril.hermes-scheduler :as scheduler]))
+
+(def fs (js/require "node:fs"))
+(def path (js/require "node:path"))
+(def cp (js/require "node:child_process"))
+
+(defn- text [file] (.readFileSync fs file "utf8"))
+(defn- json [value] (.stringify js/JSON (clj->js value) nil 2))
+(defn- parse-json [value] (js->clj (js/JSON.parse value) :keywordize-keys true))
+(defn- fail! [reason]
+  (throw (ex-info "Hermes BPMN scheduler admission refused"
+                  {:mithril/error :mithril.scheduler/admission-refused :reason reason})))
+
+(defn- run! [program args]
+  (.execFileSync cp program (clj->js args)
+                 #js {:encoding "utf8" :stdio #js ["ignore" "pipe" "pipe"]
+                      :timeout 360000}))
+
+(defn- verified-fleet! [profiles-root manifest-dir contract]
+  (run! "kbb" ["--backend" "sci" "bin/mithril-hermes-fleet.cljk" "verify-profile"
+                profiles-root manifest-dir (:profile-name contract)])
+  (let [index (parse-json (text (.join path manifest-dir "index.json")))
+        entry (first (filter #(= (:profile-name contract) (:profile %)) (:profiles index)))]
+    (when-not (= (:profile-digest contract) (:graph-digest entry))
+      (fail! :profile-digest-drift))))
+
+(defn- live-job! [profiles-root contract]
+  (let [profile-root (.join path profiles-root (:profile-name contract))
+        file (.join path profile-root "cron" "jobs.json")
+        jobs (:jobs (parse-json (text file)))
+        job (first (filter #(= (:job-id contract) (str (:id %))) jobs))]
+    (when-not (and job (:enabled job) (:no_agent job)
+                   (= "mithril-bpmn-adapter.sh" (:script job))
+                   (= (js/process.cwd) (:workdir job)))
+      (fail! :job-not-bound-to-adapter))
+    profile-root))
+
+(defn- running-claim! [profile-root contract]
+  (let [db (.join path profile-root "cron" "executions.db")
+        sql (str "SELECT id,job_id,source,status,pid,claimed_at,scheduled_instant "
+                 "FROM executions WHERE job_id='" (:job-id contract)
+                 "' AND status IN ('claimed','running') ORDER BY claimed_at DESC")
+        raw (run! "/usr/bin/sqlite3" ["-json" db sql])
+        rows (if (str/blank? raw) [] (parse-json raw))
+        admission (scheduler/admit-claim contract rows (.now js/Date))]
+    (when-not (= :admitted admission) (fail! admission))
+    (let [claim (first rows)]
+      (try (.kill js/process (:pid claim) 0)
+           (catch :default _ (fail! :owner-pid-not-alive)))
+      claim)))
+
+(defn- one-tick! [contract-path bot-path profiles-root manifest-dir state-dir]
+  (when-not (every? #(.isAbsolute path %)
+                    [contract-path bot-path profiles-root manifest-dir state-dir])
+    (fail! :paths-must-be-absolute))
+  (let [artifact (bot/compile-text bot-path (text bot-path))
+        contract (scheduler/compile-document
+                  contract-path (js->clj (js/JSON.parse (text contract-path))) artifact)
+        _ (verified-fleet! profiles-root manifest-dir contract)
+        profile-root (live-job! profiles-root contract)
+        claim (running-claim! profile-root contract)
+        execution-id (:id claim)
+        prefix (.join path state-dir execution-id)
+        attempt-path (str prefix ".attempt.json")
+        task-path (str prefix ".task.json")
+        state-path (str prefix ".edn")
+        receipt-path (str prefix ".receipt.json")]
+    (.mkdirSync fs state-dir #js {:recursive true})
+    (when (.existsSync fs receipt-path)
+      (let [prior (parse-json (text receipt-path))]
+        (when-not (and (= (:contractDigest prior) (:digest contract))
+                       (= (:executionId prior) execution-id))
+          (fail! :receipt-conflict))
+        (println (json {:status "duplicate" :executionId execution-id}))
+        (js/process.exit 0)))
+    ;; A crash after the effect but before its receipt is uncertain. Never
+    ;; automatically repeat that occurrence, even when the host effect is read-only.
+    (when (or (.existsSync fs attempt-path) (.existsSync fs state-path))
+      (fail! :uncertain-prior-attempt))
+    (let [task (assoc (:task contract) "id"
+                      (str (get-in contract [:task "id"]) "/" execution-id))]
+      (.writeFileSync fs attempt-path
+                      (str (json {:format scheduler/receipt-format
+                                  :status "attempted" :executionId execution-id
+                                  :contractDigest (:digest contract)}) "\n")
+                      #js {:encoding "utf8" :flag "wx"})
+      (.writeFileSync fs task-path (str (json task) "\n")
+                      #js {:encoding "utf8" :flag "wx"})
+      (let [stdout (run! "kbb" ["--backend" "sci" "bin/mithril-hermes.cljk" "tick"
+                                bot-path task-path state-path (:owner contract)
+                                (str/join "," (sort (:effects contract))) "execute"])
+            result (parse-json (last (remove str/blank? (str/split-lines stdout))))
+            state (reader/read-string (text state-path))
+            receipt (first (:receipts state))
+            action (get bot/action-by-label (:action result))
+            effect (some-> action :effect)
+            effect-name (when effect (str (namespace effect) "/" (name effect)))]
+        (when-not (and (= "completed" (:status result))
+                       (= 1 (:step state)) (= 1 (count (:receipts state)))
+                       (nil? (:awaiting state)) (:bpmn state)
+                       (= (:bot-profile-digest contract) (:profile-digest state))
+                       (= :completed (:status receipt))
+                       (contains? (:effects contract) effect-name))
+          (fail! :tick-or-receipt-mismatch))
+        (let [record {:format scheduler/receipt-format
+                      :status "completed" :executionId execution-id
+                      :source "builtin" :jobId (:job-id contract)
+                      :scheduledInstant (:scheduled_instant claim)
+                      :contractDigest (:digest contract)
+                      :profileDigest (:profile-digest contract)
+                      :botProfileDigest (:bot-profile-digest contract)
+                      :processDigest (get-in state [:bpmn :definition])
+                      :action (:id action) :effect effect-name
+                      :effectId (:effect-id receipt)
+                      :outputDigest (:output-digest receipt)
+                      :step (:step state)}]
+          (.writeFileSync fs receipt-path (str (json record) "\n")
+                          #js {:encoding "utf8" :flag "wx"})
+          (println (json {:status "completed" :executionId execution-id
+                          :effect effect-name :receipt receipt-path})))))))
+
+(let [[command contract-path bot-path profiles-root manifest-dir state-dir & extra]
+      *command-line-args*]
+  (if-not (and (= "tick" command) contract-path bot-path profiles-root
+               manifest-dir state-dir (empty? extra))
+    (do (println "usage: mithril-hermes-scheduler tick <contract.mith> <bot.mith> <profiles-root> <manifest-dir> <state-dir>")
+        (js/process.exit 2))
+    (try (one-tick! contract-path bot-path profiles-root manifest-dir state-dir)
+         (catch :default error
+           (println (str "REFUSE\t" (or (some-> error ex-data :reason name)
+                                        (some-> error ex-data :mithril/error name)
+                                        "scheduler-error")))
+           (set! (.-exitCode js/process) 1)))))

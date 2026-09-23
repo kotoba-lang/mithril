@@ -1,0 +1,91 @@
+(ns mithril.hermes-scheduler
+  "Explicit, read-only Hermes cron to Mithril BPMN admission contract.
+
+  V1 deliberately excludes write effects: a scheduler retry after a lost host
+  receipt cannot safely repeat a non-idempotent write. Each cron occurrence may
+  execute at most one BPMN service task."
+  (:require [clojure.string :as str]
+            [mithril.compiler :as compiler]
+            [mithril.execution :as execution]))
+
+(def contract-format "https://mithril.fund/contract/hermes-bpmn-scheduler-v1")
+(def receipt-format "https://mithril.fund/receipt/hermes-bpmn-scheduler-v1")
+(def readonly-effects #{"workspace/read" "git/status" "agent/stop"})
+
+(def ^:private source-keys
+  #{"@context" "@id" "@type" "ontology" "profileName" "jobId"
+    "profileDigest" "botProfileDigest" "task" "owner" "grants"})
+
+(defn- fail! [reason]
+  (throw (ex-info "Hermes BPMN scheduler contract refused"
+                  {:mithril/error :mithril.scheduler/contract-refused :reason reason})))
+
+(defn- digest? [value]
+  (and (string? value) (boolean (re-matches #"sha256:[0-9a-f]{64}" value))))
+
+(defn compile-document [path doc bot-artifact]
+  (when-not (compiler/source-path? path) (fail! :invalid-extension))
+  (when-not (and (map? doc) (= source-keys (set (keys doc))))
+    (fail! :invalid-fields))
+  (when-not (= compiler/context-uri (get doc "@context"))
+    (fail! :unpinned-context))
+  (when-not (= "HermesBpmnSchedulerContract" (get doc "@type"))
+    (fail! :invalid-type))
+  (when-not (and (string? (get doc "@id"))
+                 (str/starts-with? (get doc "@id") "https://mithril.fund/"))
+    (fail! :invalid-identity))
+  (when-not (and (string? (get doc "ontology"))
+                 (= (get doc "ontology") (get-in bot-artifact [:bot-ir :ontology]))
+                 (get-in bot-artifact [:bot-ir :process])
+                 (= (get doc "botProfileDigest") (:graph-digest bot-artifact)))
+    (fail! :bot-binding-mismatch))
+  (when-not (and (re-matches #"[A-Za-z0-9_-]+" (str (get doc "profileName")))
+                 (re-matches #"[0-9a-f]{12}" (str (get doc "jobId")))
+                 (digest? (get doc "profileDigest")))
+    (fail! :invalid-hermes-binding))
+  (let [task (get doc "task")
+        grants (get doc "grants")
+        effects (set (map (fn [effect]
+                            (if (keyword? effect)
+                              (str (namespace effect) "/" (name effect))
+                              (str effect)))
+                          (get-in bot-artifact [:bot-ir :policy :effects])))]
+    (when-not (and (map? task)
+                   (= #{"id" "workspace" "goal"} (set (keys task)))
+                   (every? #(and (string? %) (not (str/blank? %))) (vals task))
+                   (str/starts-with? (get task "workspace") "/")
+                   (vector? grants)
+                   (= (count grants) (count effects))
+                   (= (set grants) effects)
+                   (every? readonly-effects grants)
+                   (every? readonly-effects effects)
+                   (string? (get doc "owner"))
+                   (not (str/blank? (get doc "owner"))))
+      (fail! :effect-or-task-denied))
+    {:format contract-format
+     :digest (execution/digest doc)
+     :profile-name (get doc "profileName")
+     :job-id (get doc "jobId")
+     :profile-digest (get doc "profileDigest")
+     :bot-profile-digest (:graph-digest bot-artifact)
+     :task task :owner (get doc "owner")
+     :effects effects
+     :grants (set (map keyword grants))}))
+
+(defn admit-claim
+  "Require exactly one fresh, scheduler-originated running occurrence."
+  [contract rows now-ms]
+  (let [row (first rows)
+        claimed (when (string? (:claimed_at row)) (js/Date.parse (:claimed_at row)))]
+    (cond
+      (not= 1 (count rows)) :claim-cardinality
+      (not= (:job-id contract) (:job_id row)) :job-mismatch
+      (not= "builtin" (:source row)) :not-scheduler-originated
+      (not= "running" (:status row)) :not-running
+      (not (and (string? (:id row))
+                (re-matches #"[0-9a-f]{32}" (:id row)))) :invalid-execution-id
+      (not (and (integer? (:pid row)) (pos? (:pid row)))) :missing-owner-pid
+      (str/blank? (:scheduled_instant row)) :missing-scheduled-instant
+      (or (not (number? claimed)) (js/isNaN claimed)
+          (< claimed (- now-ms 600000)) (> claimed (+ now-ms 30000))) :stale-claim
+      :else :admitted)))

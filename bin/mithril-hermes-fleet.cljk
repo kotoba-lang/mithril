@@ -14,6 +14,7 @@
 
 (defn- usage! []
   (println "usage: mithril-hermes-fleet <sync|verify|plan-bpmn> <Hermes profiles root> <output directory>")
+  (println "       mithril-hermes-fleet verify-profile <Hermes profiles root> <output directory> <profile>")
   (println "       mithril-hermes-fleet admit-coding <Hermes profiles root> <output directory> <coding registry>")
   (println "       mithril-hermes-fleet shadow-bpmn <Hermes profiles root> <output directory> <process.mith> <receipt directory> <profile> <job-id>")
   (js/process.exit 2))
@@ -351,10 +352,11 @@
            :receipt target :executionId (:id receipt) :processDigest (:digest compiled)})))))
 
 (let [[command profiles-root output registry-path & extra] *command-line-args*]
-  (if-not (and (contains? #{"sync" "verify" "admit-coding" "plan-bpmn" "shadow-bpmn"} command)
+  (if-not (and (contains? #{"sync" "verify" "verify-profile" "admit-coding" "plan-bpmn" "shadow-bpmn"} command)
                profiles-root output
                (case command
                  "admit-coding" (and registry-path (empty? extra))
+                 "verify-profile" (and registry-path (empty? extra))
                  "shadow-bpmn" (and registry-path (= 3 (count extra)))
                  (and (nil? registry-path) (empty? extra)))
                (.isAbsolute path profiles-root)
@@ -367,6 +369,18 @@
         (case command
           "sync" (write-fleet! output fleet)
           "verify" (verify-fleet! output fleet)
+          "verify-profile"
+          (let [entry (first (filter #(= registry-path (:profile %)) (:entries fleet)))
+                target (when entry (.join path output (:file entry)))
+                index (when (exists? (.join path output "index.json"))
+                        (parse-json (read-text (.join path output "index.json"))))
+                indexed (first (filter #(= registry-path (:profile %)) (:profiles index)))]
+            (when-not (and entry target (exists? target)
+                           (= (:source entry) (read-text target))
+                           (= (:graph-digest entry) (:graph-digest indexed)))
+              (throw (ex-info "Hermes profile differs from compiled Mith manifest"
+                              {:mithril/error :mithril.fleet/profile-drift
+                               :profile registry-path}))))
           "plan-bpmn"
           (do (verify-fleet! output fleet)
               (println (json (bpmn-plan fleet))))
