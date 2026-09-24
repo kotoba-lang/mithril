@@ -1,0 +1,203 @@
+(ns mithril.efficiency
+  "Paired, fail-closed efficiency indices for Hermes and Mithril agent runs."
+  (:require [clojure.string :as str]))
+
+(def format "https://mithril.fund/metric/agent-efficiency-pair-v1")
+(def lanes #{:hermes :mithril})
+
+(defn- first-usage-value [usage keys]
+  (some (fn [key] (when (contains? usage key) (get usage key))) keys))
+
+(defn- normalize-call-usage [usage]
+  {:input-tokens (first-usage-value usage [:input-tokens :input_tokens :prompt-tokens :prompt_tokens])
+   :output-tokens (first-usage-value usage [:output-tokens :output_tokens :completion-tokens :completion_tokens])
+   :reasoning-tokens (first-usage-value usage [:reasoning-tokens :reasoning_tokens])
+   :cost-usd (first-usage-value usage [:cost-usd :cost_usd :cost])})
+
+(defn usage-from-audit
+  "Sum recorded TypeSafe Jev and typed-proposer usage from Mithril audit rows.
+  A missing counter or unreceipted proposal call stays unmeasured."
+  [rows]
+  (let [expected-calls
+        (reduce + (map (fn [row]
+                         (+ (if (or (map? (get-in row [:model :usage]))
+                                    (map? (get-in row [:host :proposer-usage]))
+                                    (and (map? (:model row))
+                                         (not= "deterministic-ontology-workflow"
+                                               (get-in row [:model :source]))
+                                         (or (:model (get-in row [:model :model]))
+                                             (:model row)))) 1 0)
+                            (if (= "llm/propose-patch" (get-in row [:host :operation])) 1 0)))
+                       rows))
+        calls (->> rows
+                   (mapcat (fn [row]
+                             (let [decision (get-in row [:model :usage])
+                                   proposal (get-in row [:host :proposer-usage])]
+                               (cond-> [] (map? decision) (conj decision)
+                                 (map? proposal) (conj proposal)))))
+                   (map normalize-call-usage)
+                   vec)
+        sum-field (fn [key]
+                    (cond
+                      (zero? expected-calls) 0
+                      (and (= expected-calls (count calls))
+                           (every? #(number? (get % key)) calls))
+                      (reduce + (map key calls))))]
+    {:scope "Mithril child inference; excludes Hermes scheduler and outer-session usage"
+     :expected-model-calls expected-calls
+     :model-calls (count calls)
+     :unmeasured-model-calls (max 0 (- expected-calls (count calls)))
+     :input-tokens (sum-field :input-tokens)
+     :output-tokens (sum-field :output-tokens)
+     :reasoning-tokens (sum-field :reasoning-tokens)
+     :cost-usd (sum-field :cost-usd)
+     :unmeasured (conj (vec (filter #(nil? (sum-field %))
+                                    [:input-tokens :output-tokens
+                                     :reasoning-tokens :cost-usd]))
+                       :outer-hermes-session-usage)}))
+(defn- refuse! [reason detail]
+  (throw (ex-info detail {:mithril/error :mithril.efficiency/invalid-receipt
+                          :reason reason :detail detail})))
+
+(defn- nonnegative-number? [value]
+  (and (number? value) (js/Number.isFinite value) (not (neg? value))))
+
+(defn- digest? [value]
+  (and (string? value) (boolean (re-matches #"sha256:[0-9a-f]{64}" value))))
+
+(defn- validate-run! [run]
+  (when-not (map? run) (refuse! :invalid-run "run receipt must be a map"))
+  (when-not (and (string? (:case-id run)) (not (str/blank? (:case-id run)))
+                 (contains? lanes (:lane run))
+                 (digest? (:task-digest run))
+                 (digest? (:outcome-digest run))
+                 (boolean? (:success? run))
+                 (string? (:model run)) (not (str/blank? (:model run)))
+                 (integer? (:turns run)) (not (neg? (:turns run)))
+                 (integer? (:effect-count run)) (not (neg? (:effect-count run)))
+                 (number? (:wall-ms run)) (js/Number.isFinite (:wall-ms run))
+                 (pos? (:wall-ms run))
+                 (map? (:usage run))
+                 (nonnegative-number? (get-in run [:usage :input-tokens]))
+                 (nonnegative-number? (get-in run [:usage :output-tokens])))
+    (refuse! :missing-measurement
+             "run needs identity, outcome, model, usage, turns, effects and wall time"))
+  (when (and (= :mithril (:lane run)) (not (digest? (:ontology-digest run))))
+    (refuse! :missing-ontology "Mithril run must bind the ontology digest"))
+  (doseq [key [:reasoning-tokens :cost-usd]
+          :let [value (get-in run [:usage key])]
+          :when (some? value)]
+    (when-not (nonnegative-number? value)
+      (refuse! :invalid-usage (str (name key) " must be non-negative"))))
+  run)
+
+(defn- ratio-index [mithril hermes]
+  (when (and (nonnegative-number? mithril) (pos? hermes))
+    (* 100 (/ mithril hermes))))
+
+(defn- compare-pair [hermes mithril]
+  (validate-run! hermes)
+  (validate-run! mithril)
+  (when-not (and (= :hermes (:lane hermes)) (= :mithril (:lane mithril))
+                 (= (:case-id hermes) (:case-id mithril)))
+    (refuse! :unpaired "each case needs one Hermes and one Mithril receipt"))
+  (let [same-task? (= (:task-digest hermes) (:task-digest mithril))
+        same-model? (= (:model hermes) (:model mithril))
+        same-outcome? (and (:success? hermes) (:success? mithril)
+                           (= (:outcome-digest hermes) (:outcome-digest mithril)))
+        comparable? (and same-task? same-model?)]
+    {:case-id (:case-id hermes)
+     :comparable? comparable?
+     :outcome-equivalent? (and comparable? same-outcome?)
+     :same-task? same-task?
+     :same-model? same-model?
+     :indices (when (and comparable? same-outcome?)
+                {:tokens (ratio-index
+                          (+ (get-in mithril [:usage :input-tokens])
+                             (get-in mithril [:usage :output-tokens]))
+                          (+ (get-in hermes [:usage :input-tokens])
+                             (get-in hermes [:usage :output-tokens])))
+                 :reasoning-tokens (ratio-index
+                                    (get-in mithril [:usage :reasoning-tokens])
+                                    (get-in hermes [:usage :reasoning-tokens]))
+                 :cost-usd (ratio-index (get-in mithril [:usage :cost-usd])
+                                        (get-in hermes [:usage :cost-usd]))
+                 :wall-ms (ratio-index (:wall-ms mithril) (:wall-ms hermes))
+                 :agent-turns (ratio-index (:turns mithril) (:turns hermes))
+                 :effects (ratio-index (:effect-count mithril) (:effect-count hermes))})
+     :raw {:hermes (select-keys hermes [:usage :wall-ms :turns :effect-count])
+           :mithril (select-keys mithril [:usage :wall-ms :turns :effect-count
+                                          :ontology-digest])}}))
+
+(defn compare-runs
+  "Compare paired receipts. Every index is Mithril/Hermes * 100 (lower is better).
+  Indices are emitted only for exact same-task, same-model, same-outcome pairs."
+  [runs]
+  (when-not (and (vector? runs) (seq runs))
+    (refuse! :empty-cohort "at least one paired case is required"))
+  (let [groups (group-by :case-id runs)
+        pairs (mapv (fn [[case-id group]]
+                      (let [by-lane (group-by :lane group)
+                            hermes (get-in by-lane [:hermes 0])
+                            mithril (get-in by-lane [:mithril 0])]
+                        (when-not (and (= 2 (count group)) hermes mithril
+                                       (= 1 (count (get by-lane :hermes)))
+                                       (= 1 (count (get by-lane :mithril))))
+                          (refuse! :unpaired (str "case " case-id " needs exactly two lane receipts")))
+                        (compare-pair hermes mithril)))
+                    (sort-by key groups))
+        comparable (filter :comparable? pairs)
+        equivalent (filter :outcome-equivalent? pairs)
+        all-equivalent? (and (= (count pairs) (count comparable))
+                             (= (count pairs) (count equivalent)))
+        aggregate (fn [metric]
+                    (let [values (keep #(get-in % [:indices metric]) equivalent)]
+                      (when (and all-equivalent? (= (count values) (count pairs)))
+                        (let [hermes-totals
+                              (map (fn [pair]
+                                     (let [h (get-in pair [:raw :hermes])]
+                                       (case metric
+                                         :tokens (+ (get-in h [:usage :input-tokens])
+                                                    (get-in h [:usage :output-tokens]))
+                                         :reasoning-tokens (get-in h [:usage :reasoning-tokens])
+                                         :cost-usd (get-in h [:usage :cost-usd])
+                                         :wall-ms (:wall-ms h)
+                                         :agent-turns (:turns h)
+                                         :effects (:effect-count h)))) pairs)
+                              mithril-totals
+                              (map (fn [pair]
+                                     (let [m (get-in pair [:raw :mithril])]
+                                       (case metric
+                                         :tokens (+ (get-in m [:usage :input-tokens])
+                                                    (get-in m [:usage :output-tokens]))
+                                         :reasoning-tokens (get-in m [:usage :reasoning-tokens])
+                                         :cost-usd (get-in m [:usage :cost-usd])
+                                         :wall-ms (:wall-ms m)
+                                         :agent-turns (:turns m)
+                                         :effects (:effect-count m)))) pairs)
+                              h (when (every? number? hermes-totals) (reduce + hermes-totals))
+                              m (when (every? number? mithril-totals) (reduce + mithril-totals))]
+                          (ratio-index m h)))))]
+    {:format format
+     :index-definition "100=Hermes baseline; lower Mithril/Hermes ratios mean less resource use for exact-equivalent results"
+     :cases (count pairs)
+     :comparable-cases (count comparable)
+     :exact-outcome-parity (when (seq comparable)
+                             (/ (count equivalent) (count comparable)))
+     :indices (when all-equivalent?
+                {:tokens (aggregate :tokens)
+                 :reasoning-tokens (aggregate :reasoning-tokens)
+                 :cost-usd (aggregate :cost-usd)
+                 :wall-ms (aggregate :wall-ms)
+                 :agent-turns (aggregate :agent-turns)
+                 :effects (aggregate :effects)})
+     :unmeasured (vec (concat
+                       (when (some #(nil? (get-in % [:raw :hermes :usage :reasoning-tokens])) pairs)
+                         [:hermes-reasoning-tokens])
+                       (when (some #(nil? (get-in % [:raw :mithril :usage :reasoning-tokens])) pairs)
+                         [:mithril-reasoning-tokens])
+                       (when (some #(nil? (get-in % [:raw :hermes :usage :cost-usd])) pairs)
+                         [:hermes-cost])
+                       (when (some #(nil? (get-in % [:raw :mithril :usage :cost-usd])) pairs)
+                         [:mithril-cost])))
+     :pairs pairs}))

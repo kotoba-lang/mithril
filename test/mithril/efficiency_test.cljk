@@ -1,0 +1,85 @@
+(ns mithril.efficiency-test
+  (:require [cljs.test :refer [deftest is testing]]
+            [mithril.efficiency :as efficiency]))
+
+(def task-digest (str "sha256:" (apply str (repeat 64 "a"))))
+(def outcome-digest (str "sha256:" (apply str (repeat 64 "b"))))
+(def ontology-digest (str "sha256:" (apply str (repeat 64 "c"))))
+
+(defn run-receipt [lane usage]
+  {:case-id "same-text-task-01" :lane lane :task-digest task-digest
+   :outcome-digest outcome-digest :success? true
+   :model "provider/model-pinned-revision"
+   :usage usage :wall-ms (if (= lane :hermes) 1000 700)
+   :turns (if (= lane :hermes) 4 2) :effect-count 3
+   :ontology-digest (when (= lane :mithril) ontology-digest)})
+
+(deftest paired-index-is-baseline-normalized-and-quality-gated
+  (let [report (efficiency/compare-runs
+                [(run-receipt :hermes {:input-tokens 800 :output-tokens 200
+                                       :reasoning-tokens 100 :cost-usd 0.01})
+                 (run-receipt :mithril {:input-tokens 400 :output-tokens 100
+                                        :reasoning-tokens 50 :cost-usd 0.005})])]
+    (is (= 1 (:exact-outcome-parity report)))
+    (is (= 50 (get-in report [:indices :tokens])))
+    (is (= 50 (get-in report [:indices :reasoning-tokens])))
+    (is (= 70 (get-in report [:indices :wall-ms])))
+    (is (= 50 (get-in report [:indices :cost-usd])))))
+
+(deftest outcome-mismatch-withholds-efficiency-index
+  (let [runs [(run-receipt :hermes {:input-tokens 100 :output-tokens 10})
+              (assoc (run-receipt :mithril {:input-tokens 20 :output-tokens 5})
+                     :outcome-digest (str "sha256:" (apply str (repeat 64 "d"))))]
+        report (efficiency/compare-runs runs)]
+    (is (= 0 (:exact-outcome-parity report)))
+    (is (nil? (:indices report)))
+    (is (false? (get-in report [:pairs 0 :outcome-equivalent?])))))
+
+(deftest failed-result-cannot-earn-resource-efficiency
+  (let [report (efficiency/compare-runs
+                [(run-receipt :hermes {:input-tokens 100 :output-tokens 10})
+                 (assoc (run-receipt :mithril {:input-tokens 20 :output-tokens 5})
+                        :success? false)])]
+    (is (= 0 (:exact-outcome-parity report)))
+    (is (nil? (:indices report)))))
+
+(deftest comparison-refuses-unmatched-case-or-model
+  (is (= :unpaired
+         (try (efficiency/compare-runs [(run-receipt :hermes {:input-tokens 1 :output-tokens 1})])
+              nil (catch :default error (:reason (ex-data error))))))
+  (let [report (efficiency/compare-runs
+                [(run-receipt :hermes {:input-tokens 10 :output-tokens 1})
+                 (assoc (run-receipt :mithril {:input-tokens 5 :output-tokens 1})
+                        :model "other/model")])]
+    (is (= 0 (:comparable-cases report)))
+    (is (nil? (:indices report)))))
+
+(deftest audit-usage-adds-decision-and-typed-proposal-calls
+  (let [usage (efficiency/usage-from-audit
+               [{:model {:model "typesafe/jev-1.13" :usage {:input_tokens 90
+                                                             :output_tokens 10
+                                                             :reasoning_tokens 4
+                                                             :cost 0.001}}}
+                {:host {:proposer-usage {:prompt_tokens 200 :completion_tokens 40
+                                         :reasoning_tokens 12 :cost_usd 0.004}}}])]
+    (is (= 2 (:model-calls usage)))
+    (is (= 290 (:input-tokens usage)))
+    (is (= 50 (:output-tokens usage)))
+    (is (= 16 (:reasoning-tokens usage)))
+    (is (= 0.005 (:cost-usd usage)))
+    (is (= [:outer-hermes-session-usage] (:unmeasured usage)))))
+
+(deftest audit-does-not-invent-zero-usage
+  (let [usage (efficiency/usage-from-audit [{:model {:source "deterministic-ontology-workflow"}}])]
+    (is (= 0 (:model-calls usage)))
+    (is (= 0 (:input-tokens usage)))
+    (is (= [:outer-hermes-session-usage]
+           (:unmeasured usage)))))
+
+(deftest unreceipted-llm-effect-is-not-counted-as-zero
+  (let [usage (efficiency/usage-from-audit
+               [{:host {:operation "llm/propose-patch"}}])]
+    (is (= 1 (:expected-model-calls usage)))
+    (is (= 0 (:model-calls usage)))
+    (is (= 1 (:unmeasured-model-calls usage)))
+    (is (nil? (:input-tokens usage)))))
