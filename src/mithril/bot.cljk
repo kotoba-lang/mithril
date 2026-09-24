@@ -495,6 +495,24 @@
                :output-digest (execution/digest [(:run-id state) (:step state) reason])
                :metrics {:step (:step state)}})))
 
+(defn hold-step-budget
+  "End an effect-free run whose step budget is exhausted before another
+  decision. Re-delivery remains held and cannot create a cron failure storm."
+  [state owner now-ms]
+  (lease-valid! state owner now-ms)
+  (when-not (and (= :running (:status state)) (nil? (:awaiting state))
+                 (>= (:step state) (get-in state [:policy :max-steps])))
+    (fail! :mithril.bot/invalid-budget-hold
+           "budget hold requires an exhausted, effect-free running state" {}))
+  (-> state
+      (assoc :status :held :hold-reason :step-budget-exhausted)
+      (update :semantic-receipts conj
+              {:operation :governor/step-budget :status :held
+               :output-digest (execution/digest [(:run-id state) (:step state)
+                                                 (get-in state [:policy :max-steps])])
+               :metrics {:step (:step state)
+                         :max-steps (get-in state [:policy :max-steps])}})))
+
 (def model-admission-refusals
   #{:mithril.bot/model-confidence-below-floor
     :mithril.bot/invalid-model-result

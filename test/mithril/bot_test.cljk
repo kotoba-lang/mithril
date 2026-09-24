@@ -303,6 +303,22 @@
                                               (model-result state "stop" 0.8 0.2)
                                               "worker-1" 1003))))))
 
+(deftest exhausted-step-budget-becomes-an-effect-free-terminal-hold
+  (let [initial (bot/start-run (profile) (task) "worker-1" 1000)
+        exhausted (assoc initial :step (get-in initial [:policy :max-steps]))
+        held (bot/hold-step-budget exhausted "worker-1" 1001)]
+    (is (= :mithril.bot/invalid-budget-hold
+           (error-code #(bot/hold-step-budget initial "worker-1" 1001))))
+    (is (= :held (:status held)))
+    (is (= :step-budget-exhausted (:hold-reason held)))
+    (is (= (:step exhausted) (:step held)))
+    (is (= (:receipts exhausted) (:receipts held)))
+    (is (= :governor/step-budget
+           (get-in held [:semantic-receipts (dec (count (:semantic-receipts held)))
+                         :operation])))
+    (is (= :terminal (:disposition
+                     (bot/resume-or-start (profile) (task) held "worker-1" 1002))))))
+
 (deftest bpmn-token-is-the-process-authority-through-terminal-stop
   (let [advance (fn [state label now]
                   (complete state
