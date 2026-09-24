@@ -1344,10 +1344,10 @@ must be interpreted as a deployed-stack comparison. The corpus measures a
 bounded read-only tool loop; it is not a benchmark of arbitrary coding tasks or
 proof of scheduler reliability. Each lane's system/ontology context is included
 in its provider-reported usage. Hermes input tokens include provider-reported
-cache-read tokens; missing usage remains unmeasured. Mithril removes a
-completed `git-status` action from its candidate set, so it cannot spend the
-step budget repeating the same status effect; when only `stop` remains, that
-singleton is resolved deterministically.
+cache-read tokens; missing usage remains unmeasured. Mithril removes completed
+actions from its candidate set. BPMN one-way gateways encode mandatory steps,
+and the runtime resolves their sole admitted action deterministically; the
+read-only canary requires inspection, then Git status, then stop.
 
 ## Source contract
 

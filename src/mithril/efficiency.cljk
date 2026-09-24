@@ -88,8 +88,10 @@
                      (nonnegative-number? (get-in run [:usage :output-tokens]))))
     (refuse! :missing-measurement
              "run needs identity, outcome, model, usage, turns, effects and wall time"))
-  (when (and (= :mithril (:lane run)) (not (digest? (:ontology-digest run))))
-    (refuse! :missing-ontology "Mithril run must bind the ontology digest"))
+  (when (and (= :mithril (:lane run))
+             (not (or (digest? (:ontology-digest run))
+                      (digest? (:profile-digest run)))))
+    (refuse! :missing-ontology "Mithril run must bind its decision ontology or profile digest"))
   (doseq [key [:reasoning-tokens :cost-usd]
           :let [value (get-in run [:usage key])]
           :when (some? value)]
@@ -142,7 +144,7 @@
                  :effects (ratio-index (:effect-count mithril) (:effect-count hermes))})
      :raw {:hermes (select-keys hermes [:usage :wall-ms :turns :effect-count])
            :mithril (select-keys mithril [:usage :wall-ms :turns :effect-count
-                                          :ontology-digest])}}))
+                                          :ontology-digest :profile-digest])}}))
 
 (defn compare-runs
   "Compare paired receipts. Every index is Mithril/Hermes * 100 (lower is better).

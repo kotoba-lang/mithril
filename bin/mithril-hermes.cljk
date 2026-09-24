@@ -205,13 +205,13 @@
                          (reader/read-string (read-text state-path)))
                        owner now))
 
-(defn- deterministic-stop [state]
+(defn- deterministic-singleton [state]
   (let [actions (bot/available-actions state)]
-    (when-not (and (= 1 (count actions)) (= :agent/stop (:effect (first actions))))
-      (throw (ex-info "a singleton decision is permitted only for stop"
+    (when-not (= 1 (count actions))
+      (throw (ex-info "deterministic singleton requires exactly one admitted action"
                       {:mithril/error :mithril.hermes/invalid-singleton})))
     {:admitted {:action (first actions) :confidence 10000
-                :probabilities {"stop" 1.0}
+                :probabilities {(:label (first actions)) 1.0}
                 :model {:kind :deterministic/singleton}}
      :audit {:source "deterministic-singleton"}}))
 
@@ -239,7 +239,7 @@
 
       (= 1 (count actions))
       (js/Promise.resolve (if coding? (deterministic-coding state)
-                              (deterministic-stop state)))
+                              (deterministic-singleton state)))
 
       :else
       (let [plan (bot/prepare-request state owner (inc now))]

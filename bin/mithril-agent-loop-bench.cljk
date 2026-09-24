@@ -99,6 +99,22 @@
 (defn- run-dir-for [output-dir run]
   (.join path output-dir (str/replace (:run-id run) #"[^A-Za-z0-9_.-]" "--")))
 
+(defn- bind-profile-digests [receipts output-dir]
+  (mapv (fn [receipt]
+          (if (and (= :mithril (:lane receipt))
+                   (nil? (:ontology-digest receipt))
+                   (nil? (:profile-digest receipt)))
+            (let [state-file (.join path (run-dir-for output-dir receipt) "state.edn")
+                  state (when (.existsSync fs state-file)
+                          (reader/read-string (.readFileSync fs state-file "utf8")))
+                  digest (:profile-digest state)]
+              (when-not (and (string? digest) (re-matches #"sha256:[0-9a-f]{64}" digest))
+                (throw (ex-info "Mithril state is missing its profile digest"
+                                {:reason :missing-profile-digest :run-id (:run-id receipt)})))
+              (assoc receipt :profile-digest digest))
+            receipt))
+        receipts))
+
 (defn- parse-outcome [text]
   (when (string? text)
     (when-let [match (re-find #"(?s)\{[^{}]*:clean\?[^{}]*\}" text)]
@@ -197,12 +213,16 @@
                     (remove str/blank?)
                     (map #(js->clj (.parse js/JSON %) :keywordize-keys true)) vec)
                [])
+        final-state (when (.existsSync fs state-file)
+                      (try (reader/read-string (.readFileSync fs state-file "utf8"))
+                           (catch :default _ nil)))
         decisions (filter #(and (= "model-observed" (:status %))
                                 (map? (get-in % [:model :usage]))) rows)
         usages (map #(get-in % [:model :usage]) decisions)
         sum-usage (fn [key]
-                    (when (and (seq usages) (every? #(number? (get % key)) usages))
-                      (reduce + (map key usages))))
+                    (if (empty? usages) 0
+                        (when (every? #(number? (get % key)) usages)
+                          (reduce + (map key usages)))))
         status-row (first (filter #(= "git/status" (get-in % [:host :operation])) rows))
         host (when status-row (:host status-row))
         observed (when host (select-keys host [:clean? :modified-tracked :untracked]))
@@ -211,10 +231,11 @@
         completed-effects (count (filter #(and (= "completed" (:status %)) (:host %)) rows))
         terminal? (and (= "completed" (get-in result [:parsed :run-status]))
                        (= "completed" (:status (last (filter :host rows)))))
-        success? (and terminal? (map? observed) (= 1 (count model-ids)))]
+        success? (and terminal? (map? observed) (<= (count model-ids) 1))]
     {:run-id (:run-id run) :case-id (:case-id run) :lane :mithril
      :task-digest (:task-digest run) :requested-model (:requested-model run)
-     :model (first model-ids) :success? (boolean success?)
+     :model (or (first model-ids) "deterministic/ontology-bpmn")
+     :success? (boolean success?)
      :observed-outcome (or observed {:error :missing-git-status-effect})
      :usage {:input-tokens (sum-usage :input_tokens)
              :output-tokens (sum-usage :output_tokens)
@@ -222,6 +243,7 @@
              :cost-usd (sum-usage :cost)}
      :wall-ms elapsed :turns (count decisions) :effect-count completed-effects
      :ontology-digest ontology
+     :profile-digest (:profile-digest final-state)
      :runner {:run-status (get-in result [:parsed :run-status])
               :tick-exit (.-status (:process result))
               :model-calls (count decisions)}}))
@@ -283,11 +305,14 @@
                   (throw (ex-info "usage: mithril-agent-loop-bench pilot <plan.edn> <runs-dir> <receipts.edn>"
                                   {:reason :usage})))
                 (run-cohort! plan-path output-dir receipts-path true))
-      "report" (let [[_ plan-path receipts-path output-path] args]
+      "report" (let [[_ plan-path receipts-path output-path runs-dir] args]
                  (when-not (and plan-path receipts-path output-path)
-                   (throw (ex-info "usage: mithril-agent-loop-bench report <plan.edn> <receipts.edn> <report.edn>"
+                   (throw (ex-info "usage: mithril-agent-loop-bench report <plan.edn> <receipts.edn> <report.edn> [runs-dir]"
                                    {:reason :usage})))
-                 (let [report (bench/report (read-edn plan-path) (read-edn receipts-path))
+                 (let [receipts (read-edn receipts-path)
+                       receipts (if runs-dir (bind-profile-digests receipts runs-dir) receipts)
+                       _ (when runs-dir (write-edn! receipts-path receipts))
+                       report (bench/report (read-edn plan-path) receipts)
                        comparison (:paired-comparison report)]
                    (write-edn! output-path report)
                    (println "REPORT" (:corpus-id report)

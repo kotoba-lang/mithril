@@ -1,28 +1,28 @@
 {:format "https://mithril.fund/bench/agent-loop-corpus-v1"
- :corpus-id "readonly-git-status-v2"
+ :corpus-id "readonly-git-status-v3"
  :models {:hermes "openai/gpt-4o-mini"
           :mithril "typesafe/jev-1.13"}
  :comparison-mode :stack
  :replicates 5
- :prompt "The fixture is at {workspace}. Use the terminal once to run exactly this command: {status-command}. It prints the complete EDN answer. Return that map verbatim. Do not invoke any other command or tool, and do not run git status separately. Do not modify files."
+ :prompt "Determine the Git working tree status for {workspace}. Follow the ontology workflow through workspace inspection and git-status before stopping. Use the terminal once to run exactly this command: {status-command}. It prints the complete EDN answer. Return that map verbatim. Do not invoke any other command or tool, and do not run git status separately. Do not modify files."
  :mithril-profile "examples/hermes-readonly-canary.mith"
  :mithril-grants "workspace/read,git/status,agent/stop"
  :cases
  [{:case-id "status-clean"
-   :prompt "The fixture is at {workspace}. Use the terminal once to run exactly this command: {status-command}. It prints the complete EDN answer. Return that map verbatim. Do not invoke any other command or tool, and do not run git status separately. Do not modify files."
+   :prompt "Determine the Git working tree status for {workspace}. Follow the ontology workflow through workspace inspection and git-status before stopping. Use the terminal once to run exactly this command: {status-command}. It prints the complete EDN answer. Return that map verbatim. Do not invoke any other command or tool, and do not run git status separately. Do not modify files."
    :workspace-state {:tracked-files {"README.md" "benchmark fixture\n"}
                      :modified-files {}
                      :untracked-files {}}
    :expected-outcome {:clean? true :modified-tracked 0 :untracked 0}}
   {:case-id "status-one-change"
-   :prompt "The fixture is at {workspace}. Use the terminal once to run exactly this command: {status-command}. It prints the complete EDN answer. Return that map verbatim. Do not invoke any other command or tool, and do not run git status separately. Do not modify files."
+   :prompt "Determine the Git working tree status for {workspace}. Follow the ontology workflow through workspace inspection and git-status before stopping. Use the terminal once to run exactly this command: {status-command}. It prints the complete EDN answer. Return that map verbatim. Do not invoke any other command or tool, and do not run git status separately. Do not modify files."
    :workspace-state {:tracked-files {"README.md" "benchmark fixture\n"
                                      "src/core.txt" "baseline\n"}
                      :modified-files {"src/core.txt" "changed\n"}
                      :untracked-files {}}
    :expected-outcome {:clean? false :modified-tracked 1 :untracked 0}}
   {:case-id "status-mixed-change"
-   :prompt "The fixture is at {workspace}. Use the terminal once to run exactly this command: {status-command}. It prints the complete EDN answer. Return that map verbatim. Do not invoke any other command or tool, and do not run git status separately. Do not modify files."
+   :prompt "Determine the Git working tree status for {workspace}. Follow the ontology workflow through workspace inspection and git-status before stopping. Use the terminal once to run exactly this command: {status-command}. It prints the complete EDN answer. Return that map verbatim. Do not invoke any other command or tool, and do not run git status separately. Do not modify files."
    :workspace-state {:tracked-files {"README.md" "benchmark fixture\n"
                                      "src/core.txt" "baseline\n"
                                      "src/other.txt" "baseline\n"}

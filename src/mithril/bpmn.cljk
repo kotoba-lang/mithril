@@ -129,9 +129,9 @@
         (doseq [gateway (model/nodes-of-type process :exclusive-gateway)]
           (let [outgoing (model/outgoing process (:bpmn/id gateway))]
             ;; A one-way gateway is a checked workflow transition, not a
-            ;; model decision. This lets ontology/BPMN own mandatory coding
-            ;; steps while Jev handles only genuine alternatives.
-            (when-not (<= (if allow-singleton? 1 2) (count outgoing) 8)
+            ;; model decision. BPMN owns mandatory steps; Jev handles only
+            ;; genuine alternatives.
+            (when-not (<= 1 (count outgoing) 8)
               (fail! :mithril.bpmn/gateway-cardinality
                      "gateway cardinality is outside the admitted profile"
                      {:gateway (:bpmn/id gateway) :choices (count outgoing)}))
