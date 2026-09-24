@@ -161,7 +161,10 @@
   "Verify the CID-primary two-phase journal, with an optional checked initial
   state block for the first Jev decision's causal parent."
   [store schema state-path rows]
-  (let [history (local/verify-ref! store schema (primary/ref-name state-path))
+  (let [history (local/verify-ref-nodes! store schema (primary/ref-name state-path))
+        verified-node (fn [cid]
+                        (or (get (:nodes history) cid)
+                            (refuse! :primary-unreachable-cid)))
         builtin (filterv #(= "builtin" (get-in % [:execution :source])) rows)
         completed (filterv #(contains? #{"completed" "effect-failed"}
                                        (get-in % [:receipt :status])) builtin)
@@ -202,9 +205,9 @@
           (loop [remaining completed previous nil index 1]
             (if-let [{:keys [receipt]} (first remaining)]
               (let [final-cid (:stateCid receipt)
-                    final (ipld/read! #(local/get-block store %) schema final-cid)
+                    final (verified-node final-cid)
                     request-cid (first (:parents final))
-                    requested (ipld/read! #(local/get-block store %) schema request-cid)
+                    requested (verified-node request-cid)
                     state (:state final)
                     pending (:state requested)
                     effect (last (:receipts state))
@@ -214,9 +217,7 @@
                     successful? (not= "effect-failed" (:status receipt))
                     baseline-cid (when (and baseline? (= index 1))
                                    (first (:parents requested)))
-                    baseline (when baseline-cid
-                               (ipld/read! #(local/get-block store %) schema
-                                           baseline-cid))]
+                    baseline (when baseline-cid (verified-node baseline-cid))]
                 (when-not (and (ipld/canonical-format? (:format final))
                                (ipld/canonical-format? (:format requested))
                                (= [request-cid] (:parents final))
@@ -256,18 +257,17 @@
                 (recur (next remaining) final-cid (inc index)))
               previous))
           held-cid (when (seq held) (get-in (first held) [:receipt :stateCid]))
-          held-block (when held-cid
-                       (ipld/read! #(local/get-block store %) schema held-cid))
+          held-block (when held-cid (verified-node held-cid))
           held-parent (when held-block (first (:parents held-block)))
           baseline (when (and held-block (empty? completed))
-                     (ipld/read! #(local/get-block store %) schema held-parent))
+                     (verified-node held-parent))
           previous-state (cond
                            (seq completed)
-                           (:state (ipld/read! #(local/get-block store %) schema last-cid))
+                           (:state (verified-node last-cid))
                            baseline (:state baseline))
           held-state (:state held-block)
           final-cid (or held-cid last-cid)
-          final (ipld/read! #(local/get-block store %) schema final-cid)]
+          final (verified-node final-cid)]
       (when (seq held)
         (when-not (if effect-held?
                     (and (= held-cid last-cid)

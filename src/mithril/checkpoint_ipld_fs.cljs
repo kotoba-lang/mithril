@@ -160,6 +160,10 @@
 (defn verify-ref! [store schema name]
   (checkpoint-ipld/verify-history! #(get-block store %) schema (read-ref store name)))
 
+(defn verify-ref-nodes! [store schema name]
+  (checkpoint-ipld/verify-history-nodes!
+   #(get-block store %) schema (read-ref store name)))
+
 (defn upgrade-ref-v7!
   "Re-encode a verified causal history as v7 under a new ref. The source ref
   remains untouched; every parent transition is checked again before publish."

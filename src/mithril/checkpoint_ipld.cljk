@@ -321,8 +321,9 @@
           :else (recur (into remaining (:parents (read! get-fn schema current)))
                        (conj seen current)))))))
 
-(defn verify-history!
-  "Verify every reachable IPLD block and its checked semantic projection."
+(defn verify-history-nodes!
+  "Verify every reachable IPLD block and return its checked nodes for this call.
+  The returned map is invocation-local, never a persisted trust cache."
   [get-fn schema head]
   (loop [queue [head] checked {}]
     (cond
@@ -339,20 +340,27 @@
                            (<= (:step prior) (:step child)))
               (refuse! :invalid-ancestry))
             (decision-proof/verify-transition! (:state prior) (:state child))))
-        {:head head :blocks (count checked)})
+        {:head head :blocks (count checked)
+         :nodes (into {} (map (fn [[id binding]] [id (:block binding)]) checked))})
       :else
       (let [current (first queue)
             remaining (subvec (vec queue) 1)]
         (if (contains? checked current)
           (recur remaining checked)
-          (let [{:keys [state parents]} (read! get-fn schema current)
+          (let [{:keys [state parents] :as block} (read! get-fn schema current)
                 binding {:parents parents
                          :run-id (:run-id state)
                          :profile-digest (:profile-digest state)
                          :task-identity (checkpoint/task-identity state)
                          :step (:step state)
-                         :state state}]
+                         :state state
+                         :block block}]
             (recur (into remaining parents) (assoc checked current binding))))))))
+
+(defn verify-history!
+  "Verify every reachable IPLD block and its checked semantic projection."
+  [get-fn schema head]
+  (dissoc (verify-history-nodes! get-fn schema head) :nodes))
 
 (defn merge-facts!
   "Three-way merge of disjoint, additive facts over one immutable ancestor.

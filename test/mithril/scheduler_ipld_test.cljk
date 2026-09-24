@@ -32,7 +32,8 @@
       :status :completed :output-digest (execution/digest :inspected)}
      "scheduler-ipld-test" 1002)))
 (defn- reason [f]
-  (try (f) nil (catch :default error (:reason (ex-data error)))))
+  (try (f) nil (catch :default error
+               (or (:reason (ex-data error)) (:type (ex-data error))))))
 
 (deftest primary-state-path-is-bound-to-one-readonly-occurrence
   (let [row {:execution {:id "0123456789abcdef0123456789abcdef"
@@ -181,15 +182,34 @@
                                :scheduled_instant "2026-09-23T00:00:00Z"}
                    :receipt receipt}]
             verify #(scheduler-ipld/verify-primary-occurrences!
-                     store schema state-path %)]
-        (is (= 2 (:semanticBlocks (verify rows))))
+                     store schema state-path %)
+            original-get local/get-block
+            reads (atom {})]
+        (with-redefs [local/get-block (fn [block-store cid]
+                                       (swap! reads update cid (fnil inc 0))
+                                       (original-get block-store cid))]
+          (is (= 2 (:semanticBlocks (verify rows)))))
+        (is (= {(:stateCid c1) 1 (:stateCid c2) 1} @reads))
         (is (= finished (:state (verify rows))))
+        (is (= :primary-unreachable-cid
+               (reason #(verify (assoc-in rows [0 :receipt :stateCid]
+                                          "bafyreifake")))))
         (is (= :primary-effect-or-cid-mismatch
                (reason #(verify (assoc-in rows [0 :receipt :effectId]
                                           "sha256:wrong")))))
         (is (= :primary-scheduler-series-mismatch
                (reason #(verify (assoc-in rows [0 :execution :source]
-                                          "direct"))))))
+                                          "direct")))))
+        ;; A new invocation must check bytes again; the invocation-local map
+        ;; cannot hide a corrupt ancestor after an earlier success.
+        (is (= :ipld/cid-mismatch
+               (reason #(with-redefs
+                          [local/get-block
+                           (fn [block-store cid]
+                             (if (= cid (:stateCid c1))
+                               (original-get block-store (:stateCid c2))
+                               (original-get block-store cid)))]
+                          (verify rows))))))
       (finally (.rmSync fs directory #js {:recursive true :force true})))))
 
 (deftest primary-scheduler-verifies-failed-effect-and-causal-retry
