@@ -355,6 +355,34 @@ Tests assert one block read per invocation and rejection when an ancestor
 returns bytes for another CID on a later invocation. This is not a persistent
 trust cache or an IPQ completeness proof. A cross-tick cache would require an
 explicit versioned trust anchor, ref-head binding and tamper/upgrade tests.
+
+`mithril.checkpoint-ipq` provides a separate, bounded transport proof for an
+immutable checkpoint head. `export-history!` verifies the complete Mithril
+history, selects its parent CID links, and writes a root-first CARv1;
+`verify-history-car!` replays the selector against only the CAR bytes and then
+reruns Mithril's ontology, SHACL, graph-digest and causal-transition checks.
+The caller supplies the expected root; the archive cannot choose it. The
+profile is limited to 32 blocks, 64 selector path components, 4 MiB of selected
+blocks and 4 MiB plus framing allowance for the input CAR. It rejects missing,
+altered, excess or semantically invalid blocks. This is not yet an HTTP IPQ
+endpoint, a completeness proof for arbitrary queries, a cross-tick trust
+cache, or synchronization of mutable refs.
+
+```sh
+kbb --backend sci bin/mithril-checkpoint-ipq.cljk export \
+  /absolute/checkpoint-store session-ref /absolute/history.car
+kbb --backend sci bin/mithril-checkpoint-ipq.cljk verify \
+  /absolute/history.car bafy...expected-head
+```
+
+On 2026-09-24 the isolated seven-occurrence model-authored scheduler canary
+exported a 15-block, 1.1 MiB CAR. Offline verification returned the same
+head `bafyreig6y3vrenugkkppy6kkkzx36lipx75nbfst5wnvwkgufd3z7iklty` and
+semantic graph digest `sha256:07ff91cd7cfbd749f1418352367cd411a96ccb7d2790cb5229da1f5e62034355`
+in 23.04 s on one local run. The test suite pins refusal reasons for a
+foreign root, missing ancestor, altered CID bytes, unused block and changed
+ontology digest. Transport does not make semantic verification free.
+
 The Node-only IPLD store now installs Node SHA-256 through the existing
 `multiformats/install-sha256!` agreement gate before CID reads and writes.
 It does not bypass rehashing or semantic validation. On the same isolated

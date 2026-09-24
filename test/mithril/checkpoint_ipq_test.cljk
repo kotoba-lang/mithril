@@ -1,0 +1,100 @@
+(ns mithril.checkpoint-ipq-test
+  (:require [cljs.test :refer [deftest is]]
+            [ipld.car :as car]
+            [ipld.car.trustless :as trustless]
+            [ipld.core :as ipld]
+            [mithril.bot :as bot]
+            [mithril.checkpoint :as checkpoint]
+            [mithril.checkpoint-ipq :as checkpoint-ipq]
+            [mithril.checkpoint-ipld :as checkpoint-ipld]
+            [mithril.checkpoint-ipld-fs :as local]))
+
+(def fs (js/require "node:fs"))
+(def path (js/require "node:path"))
+(def os (js/require "node:os"))
+
+(defn- schema []
+  (checkpoint/schema (.readFileSync fs checkpoint/ontology-path "utf8")))
+
+(defn- initial-state []
+  (bot/start-run (bot/compile-text "examples/governed-coding-bot.mith"
+                                   (.readFileSync fs "examples/governed-coding-bot.mith" "utf8"))
+                 {:id "ipq-proof" :workspace "/tmp" :goal "transport checked facts"}
+                 "ipq-proof" 1000))
+
+(defn- reason [f]
+  (try (f) nil
+       (catch :default error
+         (or (:reason (ex-data error)) (:type (ex-data error))))))
+
+(deftest selector-reaches-the-published-block-boundary
+  (let [chain (loop [remaining 32 parent nil blocks []]
+                (if (zero? remaining)
+                  blocks
+                  (let [block (ipld/node->block
+                               {"parents" (if parent [(ipld/link (:cid parent))] [])})]
+                    (recur (dec remaining) block (conj blocks block)))))
+        head (:cid (last chain))
+        by-cid (into {} (map (juxt :cid :bytes)) chain)
+        selected (trustless/selection-car #(get by-cid %) head
+                                          checkpoint-ipq/history-selector
+                                          checkpoint-ipq/limits)]
+    (is (= 32 (count (:blocks selected))))))
+
+(deftest checked-history-round-trips-through-trustless-car
+  (let [directory (.mkdtempSync fs (.join path (.tmpdir os) "mithril-ipq-"))]
+    (try
+      (let [store (local/open! directory)
+            checked-schema (schema)
+            _ (local/import-state! store checked-schema "run" (initial-state))
+            _ (local/advance-fact! store checked-schema "run" :review/approved)
+            head (local/advance-fact! store checked-schema "run" :source/verified)
+            exported (checkpoint-ipq/export-history! store checked-schema head)
+            verified (checkpoint-ipq/verify-history-car!
+                      checked-schema head (:bytes exported))
+            decoded (car/decode (:bytes exported))
+            blocks (mapv (fn [{:keys [cid]}]
+                           {:cid cid :bytes (get (:blocks decoded) cid)})
+                         (:entries decoded))
+            truncated (:bytes (car/encode {:roots [head]
+                                           :blocks (butlast blocks)}))
+            altered (:bytes (car/encode {:roots [head]
+                                         :blocks (cons (assoc (first blocks)
+                                                              :bytes (:bytes (second blocks)))
+                                                       (rest blocks))}))
+            extra (:bytes (car/encode {:roots [head]
+                                       :blocks (conj (vec blocks)
+                                                     (ipld/node->block {"unreached" true}))}))]
+        (is (= 3 (:blocks exported)))
+        (is (= head (:root verified)))
+        (is (= 3 (:blocks verified)))
+        (is (contains? (get-in verified [:state :facts]) :source/verified))
+        (is (= :ipld/car-root-mismatch
+               (reason #(checkpoint-ipq/verify-history-car!
+                         checked-schema (:cid (ipld/node->block {"other" true}))
+                         (:bytes exported)))))
+        (is (= :ipld/missing-block
+               (reason #(checkpoint-ipq/verify-history-car!
+                         checked-schema head truncated))))
+        (is (= :ipld/cid-mismatch
+               (reason #(checkpoint-ipq/verify-history-car!
+                         checked-schema head altered))))
+        (is (= :unused-car-blocks
+               (reason #(checkpoint-ipq/verify-history-car!
+                         checked-schema head extra))))
+        (is (= :invalid-node
+               (reason #(checkpoint-ipq/verify-history-car!
+                         (assoc checked-schema :ontology-digest "sha256:changed")
+                         head (:bytes exported)))))
+        (is (= :history-over-ipq-limit
+               (reason #(with-redefs [checkpoint-ipld/verify-history-nodes!
+                                      (fn [& _] {:blocks 33})]
+                          (checkpoint-ipq/export-history! store checked-schema head)))))
+        (is (= :invalid-car-bytes
+               (reason #(checkpoint-ipq/verify-history-car!
+                         checked-schema head "not bytes"))))
+        (is (= :car-over-limit
+               (reason #(checkpoint-ipq/verify-history-car!
+                         checked-schema head
+                         (js/Uint8Array. (inc checkpoint-ipq/max-car-bytes)))))))
+      (finally (.rmSync fs directory #js {:recursive true :force true})))))
