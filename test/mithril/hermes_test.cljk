@@ -40,7 +40,9 @@
                 effect
                 {:stat-fn identity :list-fn identity
                  :git-fn (fn [_] "## main\n M secret-name.txt\n")})]
-    (is (= 1 (get-in result [:audit :changed-lines])))
+    (is (= {:repository true :clean? false :modified-tracked 1 :untracked 0
+            :branch-observed true}
+           (:audit result)))
     (is (not (some #{"secret-name.txt"} (tree-seq coll? seq result))))))
 
 (deftest host-failure-is-a-receipt-and-mutation-is-refused

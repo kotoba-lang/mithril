@@ -591,7 +591,13 @@
                                    "status" "--porcelain=v1" "--branch"))
                lines (->> (.split status-text "\n")
                           (remove empty?) vec)
-               output {:repository true :changed-lines (max 0 (dec (count lines)))
+               changes (rest lines)
+               untracked (count (filter #(str/starts-with? % "??") changes))
+               modified-tracked (- (count changes) untracked)
+               output {:repository true
+                       :clean? (zero? (count changes))
+                       :modified-tracked modified-tracked
+                       :untracked untracked
                        :branch-observed (boolean (seq lines))}]
            (completed effect output output))
 

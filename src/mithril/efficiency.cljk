@@ -72,7 +72,8 @@
                  (digest? (:task-digest run))
                  (digest? (:outcome-digest run))
                  (boolean? (:success? run))
-                 (string? (:model run)) (not (str/blank? (:model run)))
+                 (or (and (string? (:model run)) (not (str/blank? (:model run))))
+                     (and (false? (:success? run)) (nil? (:model run))))
                  (or (nil? (:turns run))
                      (and (integer? (:turns run)) (not (neg? (:turns run)))))
                  (or (nil? (:effect-count run))
@@ -81,8 +82,10 @@
                  (number? (:wall-ms run)) (js/Number.isFinite (:wall-ms run))
                  (pos? (:wall-ms run))
                  (map? (:usage run))
-                 (nonnegative-number? (get-in run [:usage :input-tokens]))
-                 (nonnegative-number? (get-in run [:usage :output-tokens])))
+                 (or (nil? (get-in run [:usage :input-tokens]))
+                     (nonnegative-number? (get-in run [:usage :input-tokens])))
+                 (or (nil? (get-in run [:usage :output-tokens]))
+                     (nonnegative-number? (get-in run [:usage :output-tokens]))))
     (refuse! :missing-measurement
              "run needs identity, outcome, model, usage, turns, effects and wall time"))
   (when (and (= :mithril (:lane run)) (not (digest? (:ontology-digest run))))
@@ -98,28 +101,37 @@
   (when (and (nonnegative-number? mithril) (pos? hermes))
     (* 100 (/ mithril hermes))))
 
-(defn- compare-pair [hermes mithril]
+(defn- compare-pair [hermes mithril mode]
   (validate-run! hermes)
   (validate-run! mithril)
   (when-not (and (= :hermes (:lane hermes)) (= :mithril (:lane mithril))
                  (= (:case-id hermes) (:case-id mithril)))
     (refuse! :unpaired "each case needs one Hermes and one Mithril receipt"))
+  (when (and (:success? hermes) (nil? (:model hermes)))
+    (refuse! :missing-model "successful run needs the resolved model identity"))
+  (when (and (:success? mithril) (nil? (:model mithril)))
+    (refuse! :missing-model "successful run needs the resolved model identity"))
   (let [same-task? (= (:task-digest hermes) (:task-digest mithril))
         same-model? (= (:model hermes) (:model mithril))
         same-outcome? (and (:success? hermes) (:success? mithril)
                            (= (:outcome-digest hermes) (:outcome-digest mithril)))
-        comparable? (and same-task? same-model?)]
+        comparable? (and same-task? (or same-model? (= :stack mode)))]
     {:case-id (:case-id hermes)
      :comparable? comparable?
      :outcome-equivalent? (and comparable? same-outcome?)
      :same-task? same-task?
      :same-model? same-model?
+     :comparison-mode mode
      :indices (when (and comparable? same-outcome?)
                 {:tokens (ratio-index
-                          (+ (get-in mithril [:usage :input-tokens])
-                             (get-in mithril [:usage :output-tokens]))
-                          (+ (get-in hermes [:usage :input-tokens])
-                             (get-in hermes [:usage :output-tokens])))
+                          (when (and (number? (get-in mithril [:usage :input-tokens]))
+                                     (number? (get-in mithril [:usage :output-tokens])))
+                            (+ (get-in mithril [:usage :input-tokens])
+                               (get-in mithril [:usage :output-tokens])))
+                          (when (and (number? (get-in hermes [:usage :input-tokens]))
+                                     (number? (get-in hermes [:usage :output-tokens])))
+                            (+ (get-in hermes [:usage :input-tokens])
+                               (get-in hermes [:usage :output-tokens]))))
                  :reasoning-tokens (ratio-index
                                     (get-in mithril [:usage :reasoning-tokens])
                                     (get-in hermes [:usage :reasoning-tokens]))
@@ -134,8 +146,12 @@
 
 (defn compare-runs
   "Compare paired receipts. Every index is Mithril/Hermes * 100 (lower is better).
-  Indices are emitted only for exact same-task, same-model, same-outcome pairs."
-  [runs]
+  Same-model mode isolates loop differences. Stack mode compares model+loop
+  stacks and records model inequality. Both require same-task and outcome parity."
+  ([runs] (compare-runs runs {:mode :same-model}))
+  ([runs {:keys [mode] :or {mode :same-model}}]
+  (when-not (contains? #{:same-model :stack} mode)
+    (refuse! :invalid-mode "comparison mode must be :same-model or :stack"))
   (when-not (and (vector? runs) (seq runs))
     (refuse! :empty-cohort "at least one paired case is required"))
   (let [groups (group-by :case-id runs)
@@ -147,21 +163,21 @@
                                        (= 1 (count (get by-lane :hermes)))
                                        (= 1 (count (get by-lane :mithril))))
                           (refuse! :unpaired (str "case " case-id " needs exactly two lane receipts")))
-                        (compare-pair hermes mithril)))
+                        (compare-pair hermes mithril mode)))
                     (sort-by key groups))
         comparable (filter :comparable? pairs)
         equivalent (filter :outcome-equivalent? pairs)
-        all-equivalent? (and (= (count pairs) (count comparable))
-                             (= (count pairs) (count equivalent)))
         aggregate (fn [metric]
                     (let [values (keep #(get-in % [:indices metric]) equivalent)]
-                      (when (and all-equivalent? (= (count values) (count pairs)))
+                      (when (and (seq equivalent) (= (count values) (count equivalent)))
                         (let [hermes-totals
                               (map (fn [pair]
                                      (let [h (get-in pair [:raw :hermes])]
                                        (case metric
-                                         :tokens (+ (get-in h [:usage :input-tokens])
-                                                    (get-in h [:usage :output-tokens]))
+                                         :tokens (when (and (number? (get-in h [:usage :input-tokens]))
+                                                            (number? (get-in h [:usage :output-tokens])))
+                                                   (+ (get-in h [:usage :input-tokens])
+                                                      (get-in h [:usage :output-tokens])))
                                          :reasoning-tokens (get-in h [:usage :reasoning-tokens])
                                          :cost-usd (get-in h [:usage :cost-usd])
                                          :wall-ms (:wall-ms h)
@@ -171,8 +187,10 @@
                               (map (fn [pair]
                                      (let [m (get-in pair [:raw :mithril])]
                                        (case metric
-                                         :tokens (+ (get-in m [:usage :input-tokens])
-                                                    (get-in m [:usage :output-tokens]))
+                                         :tokens (when (and (number? (get-in m [:usage :input-tokens]))
+                                                            (number? (get-in m [:usage :output-tokens])))
+                                                   (+ (get-in m [:usage :input-tokens])
+                                                      (get-in m [:usage :output-tokens])))
                                          :reasoning-tokens (get-in m [:usage :reasoning-tokens])
                                          :cost-usd (get-in m [:usage :cost-usd])
                                          :wall-ms (:wall-ms m)
@@ -182,12 +200,18 @@
                               m (when (every? number? mithril-totals) (reduce + mithril-totals))]
                           (ratio-index m h)))))]
     {:format format
-     :index-definition "100=Hermes baseline; lower Mithril/Hermes ratios mean less resource use for exact-equivalent results"
+     :comparison-mode mode
+     :index-definition (if (= :stack mode)
+                         "100=Hermes model+loop stack; lower Mithril/Hermes ratios mean less resource use for exact-equivalent results; model inequality is not a loop-only causal comparison"
+                         "100=Hermes baseline; lower Mithril/Hermes ratios mean less resource use for exact-equivalent results")
      :cases (count pairs)
      :comparable-cases (count comparable)
+     :equivalent-cases (count equivalent)
+     :equivalence-coverage (when (seq comparable)
+                             (/ (count equivalent) (count comparable)))
      :exact-outcome-parity (when (seq comparable)
                              (/ (count equivalent) (count comparable)))
-     :indices (when all-equivalent?
+     :indices (when (seq equivalent)
                 {:tokens (aggregate :tokens)
                  :reasoning-tokens (aggregate :reasoning-tokens)
                  :cost-usd (aggregate :cost-usd)
@@ -197,6 +221,12 @@
      :unmeasured (vec (concat
                        (when (some #(nil? (get-in % [:raw :hermes :usage :reasoning-tokens])) pairs)
                          [:hermes-reasoning-tokens])
+                       (when (some #(or (nil? (get-in % [:raw :hermes :usage :input-tokens]))
+                                        (nil? (get-in % [:raw :hermes :usage :output-tokens]))) pairs)
+                         [:hermes-tokens])
+                       (when (some #(or (nil? (get-in % [:raw :mithril :usage :input-tokens]))
+                                        (nil? (get-in % [:raw :mithril :usage :output-tokens]))) pairs)
+                         [:mithril-tokens])
                        (when (some #(nil? (get-in % [:raw :mithril :usage :reasoning-tokens])) pairs)
                          [:mithril-reasoning-tokens])
                        (when (some #(nil? (get-in % [:raw :hermes :usage :cost-usd])) pairs)
@@ -211,4 +241,4 @@
                          [:hermes-effects])
                        (when (some #(nil? (get-in % [:raw :mithril :effect-count])) pairs)
                          [:mithril-effects])))
-     :pairs pairs}))
+     :pairs pairs})))

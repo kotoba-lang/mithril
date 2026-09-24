@@ -4,7 +4,7 @@
             [mithril.efficiency :as efficiency]))
 
 (def corpus-format "https://mithril.fund/bench/agent-loop-corpus-v1")
-(def plan-format "https://mithril.fund/bench/agent-loop-plan-v1")
+(def plan-format "https://mithril.fund/bench/agent-loop-plan-v2")
 
 (defn- canonical [value]
   (cond
@@ -32,13 +32,16 @@
 (defn- replicate-label [n]
   (str (if (< n 10) "0" "") n))
 
-(defn- validate-corpus! [corpus model]
+(defn- validate-corpus! [corpus models]
   (when-not (= corpus-format (:format corpus))
     (refuse! :invalid-corpus "corpus format must be agent-loop-corpus-v1"))
-  (when-not (and (string? model) (not (str/blank? model)))
-    (refuse! :missing-model "plan needs one exact provider/model identifier"))
-  (when-not (= (:model-id corpus) model)
-    (refuse! :model-mismatch (str "corpus requires exact model " (:model-id corpus))))
+  (when-not (and (map? models) (= #{:hermes :mithril} (set (keys models)))
+                 (every? #(and (string? %) (not (str/blank? %))) (vals models)))
+    (refuse! :missing-models "plan needs one exact requested model id per lane"))
+  (when-not (= (:models corpus) models)
+    (refuse! :model-mismatch (str "corpus requires lane models " (:models corpus))))
+  (when-not (contains? #{:same-model :stack} (:comparison-mode corpus))
+    (refuse! :invalid-comparison-mode "comparison-mode must be :same-model or :stack"))
   (when-not (and (integer? (:replicates corpus)) (>= (:replicates corpus) 3))
     (refuse! :insufficient-replicates "corpus needs at least three paired repetitions"))
   (when-not (and (vector? (:cases corpus)) (>= (count (:cases corpus)) 3))
@@ -61,8 +64,13 @@
       (refuse! :invalid-case "each case needs a prompt, workspace fixture and expected status map")))
   corpus)
 
-(defn make-plan [corpus model]
-  (validate-corpus! corpus model)
+(defn make-plan
+  ([corpus] (make-plan corpus (:models corpus)))
+  ([corpus model-or-models]
+  (let [models (if (string? model-or-models)
+                 {:hermes model-or-models :mithril model-or-models}
+                 model-or-models)]
+  (validate-corpus! corpus models)
   (let [cases (mapv (fn [case]
                       (assoc case
                              :task-digest (digest (select-keys case
@@ -85,7 +93,9 @@
                           :replicate replicate
                           :order (+ 1 order)
                           :lane lane
-                          :model model
+                          :requested-model (get models lane)
+                          :mithril-profile (:mithril-profile corpus)
+                          :mithril-grants (:mithril-grants corpus)
                           :task-digest (:task-digest case)
                           :prompt (:prompt case)
                           :workspace-state (:workspace-state case)
@@ -97,12 +107,13 @@
     {:format plan-format
      :corpus-id (:corpus-id corpus)
      :corpus-digest (digest corpus)
-     :model model
+     :models models
+     :comparison-mode (:comparison-mode corpus)
      :replicates (:replicates corpus)
      :case-count (count cases)
      :pair-count (* (:replicates corpus) (count cases))
      :cases cases
-     :runs (vec (map-indexed (fn [i run] (assoc run :sequence (inc i))) runs))}))
+     :runs (vec (map-indexed (fn [i run] (assoc run :sequence (inc i))) runs))}))))
 
 (defn report [plan receipts]
   (when-not (= plan-format (:format plan))
@@ -120,7 +131,7 @@
     (let [bound
           (mapv (fn [receipt]
                   (let [run (get planned (:run-id receipt))]
-                    (doseq [key [:case-id :lane :task-digest :model]]
+                    (doseq [key [:case-id :lane :task-digest :requested-model]]
                       (when-not (= (get run key) (get receipt key))
                         (refuse! :receipt-binding (str (:run-id receipt) " mismatches " key))))
                     (let [outcome-digest (digest (:observed-outcome receipt))]
@@ -134,13 +145,14 @@
                                             (= (:expected-outcome-digest run)
                                                outcome-digest))))))
                 receipts)
-          comparison (efficiency/compare-runs bound)
+          comparison (efficiency/compare-runs bound {:mode (:comparison-mode plan)})
           expected-pairs (:pair-count plan)
           successful-runs (count (filter :success? bound))]
       {:format plan-format
        :corpus-id (:corpus-id plan)
        :corpus-digest (:corpus-digest plan)
-       :model (:model plan)
+       :models (:models plan)
+       :comparison-mode (:comparison-mode plan)
        :case-count (:case-count plan)
        :replicates (:replicates plan)
        :runs (count bound)
