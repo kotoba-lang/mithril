@@ -177,6 +177,17 @@
   (checkpoint-ipld/verify-history-nodes!
    #(get-block store %) schema (read-ref store name)))
 
+(defn create-verified-ref!
+  "Publish a previously imported immutable head under a new local name only
+  after rechecking every stored block and causal transition. No existing ref
+  is advanced or overwritten. The check and publication share the ref lock."
+  [store schema name head]
+  (with-write-lock store
+    (fn []
+      (when (.existsSync fs (ref-path store name)) (refuse! :ref-exists))
+      (checkpoint-ipld/verify-history! #(get-block store %) schema head)
+      (create-ref-under-lock! store name head))))
+
 (defn upgrade-ref-v7!
   "Re-encode a verified causal history as v7 under a new ref. The source ref
   remains untouched; every parent transition is checked again before publish."

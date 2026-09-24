@@ -51,6 +51,25 @@
                                        :blocks (:blocks result)
                                        :semanticGraphDigest
                                        (:semantic-graph-digest result)})))))
+      "import"
+      (let [[directory ref archive root & extra] args]
+        (when (or (seq extra) (not directory) (not ref)
+                  (not archive) (not root))
+          (refuse! :invalid-arguments))
+        (absolute! directory)
+        (absolute! archive)
+        (when-not (.existsSync fs archive) (refuse! :missing-car))
+        (when (> (.-size (.statSync fs archive)) checkpoint-ipq/max-car-bytes)
+          (refuse! :car-over-limit))
+        (let [store (local/open! directory)
+              result (checkpoint-ipq/import-history!
+                      store (schema) ref root (.readFileSync fs archive))]
+          (println (.stringify js/JSON
+                             (clj->js {:status "imported"
+                                       :root (:root result)
+                                       :blocks (:blocks result)
+                                       :semanticGraphDigest
+                                       (:semantic-graph-digest result)})))))
       (refuse! :invalid-command))
     (catch :default error
       (println (str "REFUSE\t" (or (some-> error ex-data :reason name)
