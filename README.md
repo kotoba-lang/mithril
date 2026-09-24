@@ -324,6 +324,26 @@ failed attempt. Both jobs were paused. This establishes one scheduler-driven
 closed loop, not fleet-wide Hermes parity or a speed advantage: its seven
 occurrences took 51.9 to 147.5 seconds each.
 
+Another isolated v7 Hermes job (`eda7d7f99bdb`) on 2026-09-24 joined the
+previously separate scheduler and real-model paths. Jev selected
+`workspace-inspect`; the auxiliary OpenRouter model returned one typed
+`(mithril/edit-proposal ...)` for the allowlisted `examples/hello-web.mith`.
+The host admitted and applied only the GET `/hello` body edit, preserving the
+HEAD route. Mithril `compile-web`, an actual HTTP 200 response assertion, Git
+status and stop then completed. All seven `source=builtin` executions finished,
+and the repeat-limited job disabled itself. Independent primary verification
+reported seven completed effects, no failed or direct effects, 15 causal CID
+blocks and a matched projection at
+`bafyreig6y3vrenugkkppy6kkkzx36lipx75nbfst5wnvwkgufd3z7iklty`;
+independent v7 checkpoint verification agreed on the head and completed state.
+The Jev call used 793 input and 36 output tokens ($0.000033306); the patch
+model call used 803 prompt and 209 completion tokens ($0.00022495). Those are
+provider-reported subtotals, not an all-in cost comparison with Hermes.
+Occurrence durations ranged from 31.3 to 107.4 seconds in this one run.
+The `amu/compile` effect still invoked Mithril `compile-web`; real Amu
+compilation, arbitrary coding, fleet-wide parity, and distributed refs remain
+unverified.
+
 The primary scheduler verifier now reuses its fully checked CID nodes within
 one verification call. It still rehashes every reachable block and reruns
 Mithril/OWL/SPARQL/SHACL validation on each new invocation; the reuse only
