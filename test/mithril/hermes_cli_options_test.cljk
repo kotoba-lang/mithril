@@ -1,0 +1,20 @@
+(ns mithril.hermes-cli-options-test
+  (:require [cljs.test :refer [deftest is]]))
+
+(def fs (js/require "node:fs"))
+(def cp (js/require "node:child_process"))
+
+(deftest readonly-jev-option-is-not-a-tool-profile-path
+  (let [dir (.mkdtempSync fs "/tmp/mithril-jev-cli-options-")
+        task-path (str dir "/missing-task.json")
+        tick (.spawnSync cp "kbb"
+                         #js ["--backend" "sci" "bin/mithril-hermes.cljk" "tick"
+                              "examples/hermes-readonly-bot.mith" task-path
+                              (str dir "/state.edn") "cli-test"
+                              "workspace/read,agent/stop" "ipld-execute" "jev"]
+                         #js {:cwd (.cwd js/process) :encoding "utf8"})]
+    (try
+      (is (= 1 (.-status tick)))
+      (is (.includes (.-stdout tick) task-path))
+      (is (not (.includes (.-stdout tick) "open 'jev'")))
+      (finally (.rmSync fs dir #js {:recursive true :force true})))))

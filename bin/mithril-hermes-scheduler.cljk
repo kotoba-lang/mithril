@@ -25,9 +25,20 @@
                   {:mithril/error :mithril.scheduler/admission-refused :reason reason})))
 
 (defn- run! [program args]
-  (.execFileSync cp program (clj->js args)
-                 #js {:encoding "utf8" :stdio #js ["ignore" "pipe" "pipe"]
-                      :timeout 360000}))
+  (try
+    (.execFileSync cp program (clj->js args)
+                   #js {:encoding "utf8" :stdio #js ["ignore" "pipe" "pipe"]
+                        :timeout 360000})
+    (catch :default error
+      (let [output (str (or (.-stdout error) ""))
+            refusal (some (fn [line]
+                            (second (re-find #"^REFUSE\t([A-Za-z0-9_-]+)(?:\t|$)" line)))
+                          (str/split-lines output))]
+        (throw (ex-info "Mithril scheduler child command failed"
+                        {:reason :child-process-failed
+                         :child-exit-code (.-status error)
+                         :child-refusal refusal}
+                        error))))))
 
 (defn- held-record [contract claim execution-id state]
   {:format (if (:coding? contract)
@@ -335,4 +346,9 @@
            (println (str "REFUSE\t" (or (some-> error ex-data :reason name)
                                         (some-> error ex-data :mithril/error name)
                                         "scheduler-error")))
+           (when-let [data (ex-data error)]
+             (when (= :child-process-failed (:reason data))
+               (println (str "CHILD-EXIT\t" (:child-exit-code data)))
+               (when-let [refusal (:child-refusal data)]
+                 (println (str "CHILD-REFUSAL\t" refusal)))))
            (set! (.-exitCode js/process) 1)))))
