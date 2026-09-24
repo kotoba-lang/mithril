@@ -427,6 +427,8 @@ kbb --backend sci bin/mithril-checkpoint-ipld.cljk assert /absolute/private/stor
 kbb --backend sci bin/mithril-checkpoint-ipld.cljk verify /absolute/private/store left
 kbb --backend sci bin/mithril-checkpoint-ipld.cljk show /absolute/private/store left
 kbb --backend sci bin/mithril-checkpoint-ipld.cljk domain /absolute/private/store left
+kbb --backend sci bin/mithril-checkpoint-ipld.cljk decision-output /absolute/private/store left
+kbb --backend sci bin/mithril-checkpoint-ipld.cljk upgrade /absolute/private/store left left-v7
 ```
 
 `import` requires the `.mith` file to be the exact projection of the paired
@@ -435,28 +437,31 @@ the same run; divergent effects, receipts, workflow tokens, or deletions are
 rejected. This is an immutable, content-addressed branch experiment, not a
 general Unison merge or a distributed store. It does not sync refs between
 machines, provide crash-durable fsync, or establish fleet-wide Hermes profile
-equivalence. `domain` emits the verified v6 domain RDF view as JSON-LD and
-refuses older block formats; `verify` reports its separate `domainGraphDigest`.
+equivalence. `domain` emits the verified v6/v7 domain RDF view as JSON-LD;
+`decision-output` exposes the v7 Jev-output RDF Dataset, and `verify` reports
+separate domain and decision-output graph digests. `upgrade` re-encodes a
+verified causal history under a new ref, leaving the source ref unchanged.
+It refuses publication if the source head advances during conversion.
 
-New checkpoint blocks use v6. Their complete executable state is a canonical
+New checkpoint blocks use v7. Their complete executable state is a canonical
 RDF Dataset stored as a compact IPLD `stateDataset` (term dictionary plus
 indexed triples). The reader expands its quads, reconstructs the state from
 them, and rejects noncanonical or orphaned graph nodes; it does not read an
-EDN string or v3 typed tree to recover v6. The same graph can be projected as
-JSON-LD. The reader continues to verify v1 through v5 blocks under their original
+EDN string or v3 typed tree to recover v6/v7. The same graph can be projected as
+JSON-LD. The reader continues to verify v1 through v6 blocks under their original
 identities rather than rewriting history. Alongside the legacy `graphDigest`,
-v2 through v6 store a separate
+v2 through v7 store a separate
 `semanticGraphDigest` computed from the
 [`bot-checkpoint` context](resources/context-bot-checkpoint-v1.jsonld) with
 absolute predicate IRIs and an explicit RDF field-loss check. The CID binds
 the ontology source and `.mith` semantic projection. Existing v1 blocks remain
 readable but do not acquire the stronger semantic digest retroactively.
 The original domain-level OWL/SHACL graph remains a checked, lossy summary;
-v5 and v6's structural RDF Dataset carries the complete runtime state, and a
+v5 through v7's structural RDF Dataset carries the complete runtime state, and a
 CID-bound [`state-graph-v1.mith`](ontology/state-graph-v1.mith) ontology now
 checks its node types by OWL 2 RL subclass entailment and its entry, item,
 value and scalar fields by a bounded SHACL Core subset (count, datatype,
-class). V6 also stores a separate, compact `domainDataset` projected
+class). V6/v7 also store a separate, compact `domainDataset` projected
 deterministically from that executable state. The CID binds both datasets,
 the versioned [`bot-domain-v1.mith`](ontology/bot-domain-v1.mith) OWL/SHACL
 ontology, and `domainGraphDigest`, which hashes the canonical RDF Dataset
@@ -465,13 +470,29 @@ and `Fact` become queryable nodes. Receipt action identity is reconstructed
 from the run ID, step index, and closed action catalog; ambiguity is refused.
 OWL 2 RL derives `Run` and effect-event superclasses; the declared SHACL
 shapes check count, datatype and class; a real SPARQL query checks receipt and
-fact links. Incoming v6 blocks are rederived from the full state rather than
+fact links. Incoming v6/v7 blocks are rederived from the full state rather than
 trusting a supplied projection. Unknown shapes and constraints are refused.
 This is not full OWL 2 or full SHACL Core, and it does not make every nested
 field independently queryable as a domain predicate. A legacy `bot-run-v1`
 state may omit `task-digest`; the checkpoint derives it
 from the preserved task value, while a mismatching declared digest or a
 non-legacy omission is rejected.
+
+V7 also stores `decisionOutputDataset` and its independent RDF graph digest.
+It is assembled from each admitted Jev decision's v2 `.mith` output form:
+the reader re-parses that form, checks its declared shape and proof-bound
+fields, and rejects a digest or source mismatch. The dataset contains typed
+decision nodes without copying the model's full result text into this
+queryable projection. The exact checkpoint CID still binds the complete
+state, all three RDF datasets, and their ontology sources. This is not a
+general schema-evolution mechanism: historical ontology files and the
+checkpoint schema must remain available for old CIDs.
+
+On 2026-09-24, the isolated real-Jev Hermes canary's 17-block v6 history was
+re-encoded under a new v7 ref without changing the v6 ref. Both heads
+verified with the same final executable state and domain graph digest; the
+v7 output dataset contained one Jev decision and 13 RDF triples. This is
+local migration evidence, not a live-fleet cutover or distributed Unison sync.
 
 The verified seven-effect v5 Hermes final state was read under its historical
 CID and emitted as an in-memory v6 block: exact state equality, 93 domain
@@ -821,8 +842,9 @@ ref/history verification, the parent state is used to reconstruct the
 candidate set, re-admit the recorded choice, and replay the effect request;
 altered or missing decision evidence is refused. This is local causal replay,
 not a provider-signed response or proof that the model's choice was correct.
-The domain RDF projection still describes facts and effects rather than
-individual decision receipts, and older checkpoint formats remain readable.
+The v6 domain RDF projection still describes facts and effects rather than
+individual decision receipts. V7 adds a separate persisted decision-output
+RDF Dataset; older checkpoint formats remain readable.
 New Jev decisions additionally carry a v2 `mithril/jev-decision` output form.
 [`jev-decision-v2.mith`](ontology/jev-decision-v2.mith) declares its own
 `JevDecision` class, `SemanticDecision` superclass, and exact-field SHACL

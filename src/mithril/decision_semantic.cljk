@@ -2,6 +2,8 @@
   "Versioned .mith/JSON-LD decision output with RDF identity, declared SHACL
   validation, and an executed OWL 2 RL/SPARQL entailment check."
   (:require [clojure.string :as str]
+            #?(:cljs [cljs.reader :as reader]
+               :clj [clojure.edn :as reader])
             [json-ld-api.core :as jsonld]
             [json-ld-api.to-rdf :as to-rdf]
             [rdf-canon.core :as rdf-canon]
@@ -137,3 +139,47 @@
       {:ontology-digest (:ontology-digest schema)
        :graph-digest (graph-digest! document)
        :source source :document document :shape-report report})))
+
+(defn checked-output-quads!
+  "Recover a persisted Jev output as checked RDF, without trusting its stored
+  source or digest. The parent transition separately replays the model choice."
+  [schema proof]
+  (when-not (and (= "https://mithril.fund/receipt/jev-decision-v2"
+                    (:format proof))
+                 (= (:ontology-digest schema)
+                    (:output-ontology-digest proof))
+                 (string? (:output-source proof))
+                 (<= (count (:output-source proof)) 8192)
+                 (string? (:model-result-source proof))
+                 (<= (count (:model-result-source proof)) 8192))
+    (refuse! :invalid-persisted-output))
+  (let [document (try (form/parse (:output-source proof))
+                      (catch #?(:cljs :default :clj Exception) _
+                        (refuse! :invalid-persisted-output)))
+        model-result (try (reader/read-string (:model-result-source proof))
+                          (catch #?(:cljs :default :clj Exception) _
+                            (refuse! :invalid-persisted-output)))
+        data (into {}
+                   (for [[field label] fields]
+                     [field (get document label)]))
+        expected (-> (select-keys proof
+                                  [:run-id :step :state-digest
+                                   :decision-state-digest :domain-graph-digest
+                                   :domain-ontology-digest :effect-id :request-id])
+                     (assoc :model-result-digest (execution/digest model-result)
+                            :selected-action (:action-id proof)
+                            :model-id (:model proof)))
+        report (execution/validate-shape (:shape schema) data)]
+    (when-not (and (= context-uri (get document "@context"))
+                   (= "JevDecision" (get document "@type"))
+                   (= (set (concat ["@id" "@context" "@type"] (vals fields)))
+                      (set (keys document)))
+                   (:valid? report)
+                   (= expected (dissoc data :confidence))
+                   (integer? (:confidence data))
+                   (<= 0 (:confidence data) 10000)
+                   (= (:output-source proof) (source-text data))
+                   (= (:output-graph-digest proof) (graph-digest! document)))
+      (refuse! :invalid-persisted-output))
+    (to-rdf/to-rdf
+     (jsonld/expand document {:contexts {context-uri context-document}}))))

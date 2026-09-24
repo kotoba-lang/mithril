@@ -19,6 +19,8 @@
   (println "       mithril-checkpoint-ipld verify <store-dir> <ref>")
   (println "       mithril-checkpoint-ipld show <store-dir> <ref>")
   (println "       mithril-checkpoint-ipld domain <store-dir> <ref>")
+  (println "       mithril-checkpoint-ipld decision-output <store-dir> <ref>")
+  (println "       mithril-checkpoint-ipld upgrade <store-dir> <source-ref> <new-ref>")
   (js/process.exit 2))
 
 (defn- fact [value]
@@ -85,6 +87,8 @@
                             :graphDigest (:graph-digest saved)
                             :semanticGraphDigest (:semantic-graph-digest saved)
                             :domainGraphDigest (:domain-graph-digest saved)
+                            :decisionOutputGraphDigest
+                            (:decision-output-graph-digest saved)
                             :runStatus (clojure.core/name (get-in saved [:state :status]))}))))
 
         "show"
@@ -101,8 +105,9 @@
           (let [store (local/open! directory)
                 saved (ipld-checkpoint/read!
                        #(local/get-block store %) schema (local/read-ref store name))]
-            (when-not (= ipld-checkpoint/format-id (:format saved))
-              (throw (ex-info "domain RDF requires a v6 checkpoint"
+            (when-not (contains? #{ipld-checkpoint/format-v6
+                                   ipld-checkpoint/format-id} (:format saved))
+              (throw (ex-info "domain RDF requires a v6 or v7 checkpoint"
                               {:reason :domain-format-required})))
             (let [state (assoc (:state saved) :task-digest
                                (checkpoint/task-identity (:state saved)))
@@ -113,6 +118,26 @@
                 (throw (ex-info "domain RDF digest differs from the CID block"
                                 {:reason :domain-graph-digest-mismatch})))
               (println (json document)))))
+
+        "decision-output"
+        (let [[directory name & extra] args]
+          (when-not (and directory name (empty? extra)) (usage!))
+          (let [store (local/open! directory)
+                saved (ipld-checkpoint/read!
+                       #(local/get-block store %) schema (local/read-ref store name))]
+            (when-not (= ipld-checkpoint/format-id (:format saved))
+              (throw (ex-info "decision RDF requires a v7 checkpoint"
+                              {:reason :decision-format-required})))
+            (println (json {:cid (:cid saved)
+                            :graphDigest (:decision-output-graph-digest saved)
+                            :dataset (:decision-output-dataset saved)}))))
+
+        "upgrade"
+        (let [[directory source target & extra] args]
+          (when-not (and directory source target (empty? extra)) (usage!))
+          (let [store (local/open! directory)
+                result (local/upgrade-ref-v7! store schema source target)]
+            (println (json (assoc result :status "upgraded")))))
 
         (usage!)))
     (catch :default error

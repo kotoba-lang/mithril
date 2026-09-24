@@ -1,6 +1,7 @@
 (ns mithril.decision-proof-test
   (:require [cljs.test :refer [deftest is]]
             [clojure.string :as str]
+            [ipld.core :as blocks]
             [mithril.bot :as bot]
             [mithril.checkpoint :as checkpoint]
             [mithril.checkpoint-ipld :as ipld]
@@ -8,6 +9,7 @@
             [mithril.decision-input :as decision-input]
             [mithril.decision-proof :as proof]
             [mithril.decision-semantic :as semantic]
+            [mithril.domain-rdf :as domain-rdf]
             [mithril.execution :as execution]
             [mithril.form :as form]
             [mithril.ipld-session :as session]
@@ -116,6 +118,10 @@
            (set (keys document))))
     (is (= (:ontology-digest schema) (:output-ontology-digest proof-data)))
     (is (= (:graph-digest rebuilt) (:output-graph-digest proof-data)))
+    (is (seq (semantic/checked-output-quads! schema proof-data)))
+    (is (= :invalid-persisted-output
+           (reason #(semantic/checked-output-quads!
+                     schema (assoc proof-data :format proof/legacy-format-id)))))
     (is (true? (get-in rebuilt [:shape-report :valid?])))
     (is (= :invalid-ontology
            (reason #(semantic/schema
@@ -130,6 +136,48 @@
                                   (update semantic/context-document "@context"
                                           dissoc "effectId")]
                       (semantic/build schema proof-data admitted model-result)))))))
+
+(deftest v7-persists-checked-decision-rdf-and-v6-remains-readable
+  (let [{:keys [state model-result audit admitted]} (fixture)
+        requested (:state (proof/request-effect state admitted model-result audit
+                                                #{:workspace/read}
+                                                "proof-worker" 1002 1003))
+        decision-index (dec (count (:semantic-receipts requested)))
+        storage (atom {})
+        put (fn [cid bytes] (swap! storage assoc cid bytes))
+        get-block (fn [cid] (get @storage cid))
+        cid (ipld/put! put get-block schema requested [])
+        saved (ipld/read! get-block schema cid)
+        dataset (domain-rdf/unpack-quads! (:decision-output-dataset saved))
+        decision-types (filter #(and (= domain-rdf/rdf-type
+                                          (get-in % [:predicate :value]))
+                                     (= semantic/decision-class
+                                        (get-in % [:object :value]))) dataset)
+        v7-node (blocks/get-node get-block cid)
+        v6-node (-> v7-node
+                    (dissoc "decisionOntologySource" "decisionOntologyDigest"
+                            "decisionOutputDataset" "decisionOutputGraphDigest")
+                    (assoc "format" ipld/format-v6))
+        v6 (blocks/node->block v6-node)
+        bad-digest (blocks/node->block
+                    (assoc v7-node "decisionOutputGraphDigest"
+                           (execution/digest :forged)))]
+    (is (= ipld/format-id (:format saved)))
+    (is (= 1 (count decision-types)))
+    (is (= (:decision-output-graph-digest saved)
+           (domain-rdf/graph-digest dataset)))
+    (put (:cid v6) (:bytes v6))
+    (put (:cid bad-digest) (:bytes bad-digest))
+    (is (= requested (:state (ipld/read! get-block schema (:cid v6)))))
+    (is (= ipld/format-v6 (:format (ipld/read! get-block schema (:cid v6)))))
+    (is (= :decision-graph-digest-mismatch
+           (reason #(ipld/read! get-block schema (:cid bad-digest)))))
+    (is (= :invalid-persisted-output
+           (reason #(ipld/block schema
+                                (assoc-in requested
+                                          [:semantic-receipts decision-index :proof
+                                           :output-graph-digest]
+                                          (execution/digest :forged)) []))))))
 
 (deftest rewritten-output-cannot-pass-parent-replay
   (let [{:keys [state model-result audit admitted]} (fixture)
