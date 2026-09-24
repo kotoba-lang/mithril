@@ -176,3 +176,30 @@
       (finally
         (.rmSync fs source-dir #js {:recursive true :force true})
         (.rmSync fs target-dir #js {:recursive true :force true})))))
+
+(deftest import-refuses-ontology-contract-change-before-publication
+  (let [source-dir (.mkdtempSync fs (.join path (.tmpdir os) "mithril-ipq-ontology-source-"))
+        target-dir (.mkdtempSync fs (.join path (.tmpdir os) "mithril-ipq-ontology-target-"))]
+    (try
+      (let [checked-schema (schema)
+            source (local/open! source-dir)
+            target (local/open! target-dir)
+            head (local/import-state! source checked-schema "source" (initial-state))
+            car-bytes (:bytes (checkpoint-ipq/export-history!
+                               source checked-schema head))
+            source-contract checkpoint-ipld/ontology-source-contract
+            calls (atom 0)]
+        (is (= :ontology-contract-changed
+               (reason #(with-redefs [checkpoint-ipld/ontology-source-contract
+                                      (fn []
+                                        (let [snapshot (source-contract)]
+                                          (if (= 1 (swap! calls inc))
+                                            snapshot
+                                            (assoc snapshot :state "changed"))))]
+                          (checkpoint-ipq/import-history!
+                           target checked-schema "invalid" head car-bytes)))))
+        (is (= 2 @calls))
+        (is (false? (local/ref-exists? target "invalid"))))
+      (finally
+        (.rmSync fs source-dir #js {:recursive true :force true})
+        (.rmSync fs target-dir #js {:recursive true :force true})))))

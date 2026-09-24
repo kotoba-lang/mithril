@@ -363,7 +363,8 @@ history, selects its parent CID links, and writes a root-first CARv1;
 reruns Mithril's ontology, SHACL, graph-digest and causal-transition checks.
 `import-history!` writes the checked immutable blocks to a separate local
 store, compares every stored byte with the CAR-verified bytes under the local
-ref lock, and only then publishes a new ref. This reuses the CAR's full
+ref lock, also checks that the local state/domain/decision ontology sources
+have not changed, and only then publishes a new ref. This reuses the CAR's full
 ontology/SHACL/causal proof within the same call instead of recomputing it;
 later standalone verification still checks the current disk contents.
 The imported ref can be forked and its additive fact branches merged locally;
@@ -394,12 +395,15 @@ ontology digest. Transport does not make semantic verification free. Import
 into a distinct store is a local immutable-history transfer, not distributed
 mutable-ref synchronization or a remote IPQ service.
 
-On the same 15-block CAR, two sequential fresh-store A/B pairs on 2026-09-24
-measured import wall times of 68.22/69.92 s before this in-call proof reuse
-and 25.84/51.83 s after it; user CPU times were 44.81/43.21 s versus
-24.20/26.22 s. These are load-sensitive local samples, not fleet throughput
-or a persistent-cache result. The optimized import was independently verified
-after publication with the same 15-block head and semantic graph digest.
+On the same 15-block CAR, two fresh-store A/B pairs on 2026-09-24 measured
+import wall times of 68.22/69.92 s before this in-call proof reuse and
+25.84/51.83 s for its initial version; user CPU times were 44.81/43.21 s
+versus 24.20/26.22 s. With the ontology-stability and CID guards included,
+a final pair measured 123.27 s wall / 47.20 s user CPU before versus
+70.35 s wall / 26.18 s user CPU after. These are load-sensitive local samples,
+not fleet throughput or a persistent-cache result. The final guarded import
+was independently verified after publication with the same 15-block head and
+semantic graph digest.
 
 The Node-only IPLD store now installs Node SHA-256 through the existing
 `multiformats/install-sha256!` agreement gate before CID reads and writes.

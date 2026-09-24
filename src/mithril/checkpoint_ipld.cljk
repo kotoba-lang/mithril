@@ -61,6 +61,14 @@
                          decision-semantic/ontology-path "utf8")
      :clj (slurp decision-semantic/ontology-path)))
 
+(defn ontology-source-contract
+  "Snapshot the local ontology inputs read by checkpoint verification.
+  A CAR proof may only be reused for import while these sources stay equal."
+  []
+  {:state (local-state-ontology-source)
+   :domain (local-domain-ontology-source)
+   :decision (local-decision-ontology-source)})
+
 (defn- refuse! [reason]
   (throw (ex-info "Mithril IPLD checkpoint refused"
                   {:mithril/error :mithril.checkpoint-ipld/refused

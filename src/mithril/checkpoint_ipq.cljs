@@ -80,9 +80,11 @@
   before a failure are harmless immutable data with no published ref."
   [store schema name expected-root car-bytes]
   (when (local/ref-exists? store name) (refuse! :ref-exists))
-  (let [{:keys [loaded] :as checked}
+  (let [ontology-contract (checkpoint-ipld/ontology-source-contract)
+        {:keys [loaded] :as checked}
         (verify-history-car! schema expected-root car-bytes)]
     (doseq [{:keys [cid bytes]} loaded]
       (local/put-block! store cid bytes))
-    (local/create-byte-matched-ref! store name expected-root loaded)
+    (local/create-byte-matched-ref!
+     store name expected-root loaded ontology-contract)
     (dissoc checked :loaded)))
