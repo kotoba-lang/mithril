@@ -59,7 +59,7 @@
                      (reason #(session/load! store schema state-path)))))))
       (finally (.rmSync fs directory #js {:recursive true :force true})))))
 
-(deftest primary-session-continues-a-verified-v2-head-into-v5
+(deftest primary-session-continues-a-verified-v2-head-into-v7
   (let [directory (.mkdtempSync fs (.join path (.tmpdir os) "mithril-ipld-upgrade-"))]
     (try
       (let [state-path (.join path directory "run.edn")
@@ -76,7 +76,9 @@
             v2-node (-> (ipld-core/get-node #(local/get-block store %) base-id)
                         (dissoc "stateDataset" "stateOntologySource" "stateOntologyDigest"
                                 "domainOntologySource" "domainOntologyDigest"
-                                "domainDataset" "domainGraphDigest")
+                                "domainDataset" "domainGraphDigest"
+                                "decisionOntologySource" "decisionOntologyDigest"
+                                "decisionOutputDataset" "decisionOutputGraphDigest")
                         (assoc "format" ipld/format-v2
                                "stateEdn" (execution/canonical-edn-text s0)
                                "parents" [(ipld-core/link base-id)]))

@@ -53,3 +53,26 @@
         (is (= left (local/read-ref reopened "left")))
         (is (= right (local/read-ref reopened "right"))))
       (finally (.rmSync fs dir #js {:recursive true :force true})))))
+
+(deftest upgrade-ref-refuses-a-source-head-that-advanced-during-reencoding
+  (let [dir (.mkdtempSync fs (.join path (.tmpdir os) "mithril-ipld-upgrade-"))]
+    (try
+      (let [schema (schema)
+            store (local/open! dir)
+            base (local/import-state! store schema "source" (state))
+            original-put ipld-checkpoint/put!
+            moved? (atom false)]
+        (is (= :ref-conflict
+               (reason #(with-redefs
+                          [ipld-checkpoint/put!
+                           (fn [& args]
+                             (let [id (apply original-put args)]
+                               (when (compare-and-set! moved? false true)
+                                 (local/advance-fact! store schema "source"
+                                                      :source/advanced))
+                               id))]
+                          (local/upgrade-ref-v7! store schema "source" "new")))))
+        (is @moved?)
+        (is (not= base (local/read-ref store "source")))
+        (is (false? (local/ref-exists? store "new"))))
+      (finally (.rmSync fs dir #js {:recursive true :force true})))))

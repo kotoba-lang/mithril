@@ -200,12 +200,12 @@
                                    (assoc :format "https://mithril.fund/state/bot-run-v2"))
                                []))))))
 
-(deftest semantic-v6-binds-domain-rdf-and-reads-v1-through-v5
+(deftest semantic-v7-binds-decision-rdf-and-reads-v1-through-v6
   (let [{:keys [put-fn get-fn]} (fixture)
         s (state)
         current (store/put! put-fn get-fn schema s [])
-        v6 (store/read! get-fn schema current)
-        v6-node (ipld/get-node get-fn current)
+        v7 (store/read! get-fn schema current)
+        v7-node (ipld/get-node get-fn current)
         shipped (js->clj (js/JSON.parse
                           (.readFileSync fs "resources/context-bot-checkpoint-v1.jsonld"
                                          "utf8")))
@@ -219,6 +219,11 @@
                   "source" (:source block)
                   "parents" []}
         old (ipld/node->block old-node)
+        v6-node (-> v7-node
+                    (dissoc "decisionOntologySource" "decisionOntologyDigest"
+                            "decisionOutputDataset" "decisionOutputGraphDigest")
+                    (assoc "format" store/format-v6))
+        v6 (ipld/node->block v6-node)
         v5-node (-> v6-node
                     (dissoc "domainOntologySource" "domainOntologyDigest"
                             "domainDataset" "domainGraphDigest")
@@ -239,24 +244,28 @@
                            "stateEdn" (execution/canonical-edn-text s)))
         v2 (ipld/node->block v2-node)]
     (put-fn (:cid old) (:bytes old))
+    (put-fn (:cid v6) (:bytes v6))
     (put-fn (:cid v5) (:bytes v5))
     (put-fn (:cid v4) (:bytes v4))
     (put-fn (:cid v3) (:bytes v3))
     (put-fn (:cid v2) (:bytes v2))
     (is (= checkpoint/semantic-context-document shipped))
-    (is (= store/format-id (:format v6)))
-    (is (not (contains? v6-node "stateEdn")))
-    (is (not (contains? v6-node "stateNode")))
-    (is (map? (get v6-node "stateDataset")))
-    (is (map? (get v6-node "domainDataset")))
-    (is (string? (get v6-node "stateOntologySource")))
-    (is (string? (get v6-node "domainOntologySource")))
-    (is (re-matches #"sha256:[0-9a-f]{64}" (get v6-node "stateOntologyDigest")))
-    (is (re-matches #"sha256:[0-9a-f]{64}" (:domain-graph-digest v6)))
-    (is (= s (:state v6)))
+    (is (= store/format-id (:format v7)))
+    (is (not (contains? v7-node "stateEdn")))
+    (is (not (contains? v7-node "stateNode")))
+    (is (map? (get v7-node "stateDataset")))
+    (is (map? (get v7-node "domainDataset")))
+    (is (map? (get v7-node "decisionOutputDataset")))
+    (is (string? (get v7-node "stateOntologySource")))
+    (is (string? (get v7-node "domainOntologySource")))
+    (is (re-matches #"sha256:[0-9a-f]{64}" (get v7-node "stateOntologyDigest")))
+    (is (re-matches #"sha256:[0-9a-f]{64}" (:domain-graph-digest v7)))
+    (is (= s (:state v7)))
     (is (= checkpoint/semantic-context-uri
-           (get (form/parse (:semantic-source v6)) "@context")))
-    (is (re-matches #"sha256:[0-9a-f]{64}" (:semantic-graph-digest v6)))
+           (get (form/parse (:semantic-source v7)) "@context")))
+    (is (re-matches #"sha256:[0-9a-f]{64}" (:semantic-graph-digest v7)))
+    (is (= store/format-v6 (:format (store/read! get-fn schema (:cid v6)))))
+    (is (= s (:state (store/read! get-fn schema (:cid v6)))))
     (is (= store/format-v5 (:format (store/read! get-fn schema (:cid v5)))))
     (is (= s (:state (store/read! get-fn schema (:cid v5)))))
     (is (= store/format-v4 (:format (store/read! get-fn schema (:cid v4)))))

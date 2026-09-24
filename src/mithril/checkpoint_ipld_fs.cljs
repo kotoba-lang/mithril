@@ -159,3 +159,40 @@
 
 (defn verify-ref! [store schema name]
   (checkpoint-ipld/verify-history! #(get-block store %) schema (read-ref store name)))
+
+(defn upgrade-ref-v7!
+  "Re-encode a verified causal history as v7 under a new ref. The source ref
+  remains untouched; every parent transition is checked again before publish."
+  [store schema source target]
+  (when (ref-exists? store target) (refuse! :ref-exists))
+  (let [old-head (read-ref store source)
+        old-history (checkpoint-ipld/verify-history!
+                     #(get-block store %) schema old-head)
+        mapped (atom {})]
+    (letfn [(recode [id]
+              (if-let [known (get @mapped id)]
+                known
+                (let [{:keys [state parents]}
+                      (checkpoint-ipld/read! #(get-block store %) schema id)
+                      next-parents (vec (sort (map recode parents)))
+                      next-id (checkpoint-ipld/put!
+                               #(put-block! store %1 %2)
+                               #(get-block store %) schema state next-parents)]
+                  (swap! mapped assoc id next-id)
+                  next-id)))]
+      (let [new-head (recode old-head)
+            new-history (checkpoint-ipld/verify-history!
+                         #(get-block store %) schema new-head)]
+        (when-not (and (= (:blocks old-history) (:blocks new-history))
+                       (= (:state (checkpoint-ipld/read!
+                                   #(get-block store %) schema old-head))
+                          (:state (checkpoint-ipld/read!
+                                   #(get-block store %) schema new-head))))
+          (refuse! :upgrade-history-mismatch))
+        (with-write-lock store
+          (fn []
+            (when-not (= old-head (read-ref store source))
+              (refuse! :ref-conflict))
+            (create-ref-under-lock! store target new-head)))
+        {:source source :target target :old-head old-head
+         :new-head new-head :blocks (:blocks new-history)}))))

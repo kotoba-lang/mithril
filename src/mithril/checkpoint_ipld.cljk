@@ -10,6 +10,7 @@
             [mithril.checkpoint :as checkpoint]
             [mithril.domain-rdf :as domain-rdf]
             [mithril.decision-proof :as decision-proof]
+            [mithril.decision-semantic :as decision-semantic]
             [mithril.execution :as execution]
             [mithril.state-ontology :as state-ontology]
             [mithril.state-rdf :as state-rdf]
@@ -21,9 +22,10 @@
 (def format-v3 "https://mithril.fund/block/bot-checkpoint-ipld-v3")
 (def format-v4 "https://mithril.fund/block/bot-checkpoint-ipld-v4")
 (def format-v5 "https://mithril.fund/block/bot-checkpoint-ipld-v5")
-(def format-id "https://mithril.fund/block/bot-checkpoint-ipld-v6")
+(def format-v6 "https://mithril.fund/block/bot-checkpoint-ipld-v6")
+(def format-id "https://mithril.fund/block/bot-checkpoint-ipld-v7")
 (defn canonical-format? [value]
-  (contains? #{format-v2 format-v3 format-v4 format-v5 format-id} value))
+  (contains? #{format-v2 format-v3 format-v4 format-v5 format-v6 format-id} value))
 (def node-keys-v1
   #{"format" "ontologyDigest" "checkpointDigest" "graphDigest"
     "stateDigest" "stateEdn" "source" "parents"})
@@ -40,6 +42,9 @@
 (def node-keys-v6
   (into node-keys-v5 #{"domainOntologySource" "domainOntologyDigest"
                        "domainDataset" "domainGraphDigest"}))
+(def node-keys-v7
+  (into node-keys-v6 #{"decisionOntologySource" "decisionOntologyDigest"
+                       "decisionOutputDataset" "decisionOutputGraphDigest"}))
 
 (defn- local-state-ontology-source []
   #?(:cljs (.readFileSync (js/require "node:fs")
@@ -50,6 +55,11 @@
   #?(:cljs (.readFileSync (js/require "node:fs")
                          domain-rdf/ontology-path "utf8")
      :clj (slurp domain-rdf/ontology-path)))
+
+(defn- local-decision-ontology-source []
+  #?(:cljs (.readFileSync (js/require "node:fs")
+                         decision-semantic/ontology-path "utf8")
+     :clj (slurp decision-semantic/ontology-path)))
 
 (defn- refuse! [reason]
   (throw (ex-info "Mithril IPLD checkpoint refused"
@@ -128,18 +138,46 @@
       (throw (ex-info "checkpoint violates domain SHACL shape"
                       {:mithril/error :mithril.checkpoint-ipld/domain-shacl-violation
                        :report report})))
-    (assoc base "format" format-id
+    (assoc base "format" format-v6
            "domainOntologySource" domain-source
            "domainOntologyDigest" (:ontology-digest checked)
            "domainDataset" (domain-rdf/pack-quads dataset)
            "domainGraphDigest" (domain-rdf/graph-digest dataset))))
 
+(defn- decision-output-dataset [state checked]
+  (let [records (filterv #(and (= :decide/jev (:operation %))
+                               (= :admitted (:status %)))
+                         (:semantic-receipts state))
+        proofs (mapv :proof records)
+        _ (when (> (count proofs) 64) (refuse! :too-many-decisions))
+        quads (vec (mapcat #(decision-semantic/checked-output-quads! checked %)
+                           proofs))
+        subjects (filterv #(= decision-semantic/decision-class
+                              (get-in % [:object :value]))
+                          (filter #(= state-rdf/rdf-type
+                                      (get-in % [:predicate :value])) quads))]
+    (when-not (= (count proofs)
+                 (count (set (map #(get-in % [:subject :value]) subjects))))
+      (refuse! :duplicate-decision-output))
+    quads))
+
+(defn- node-v7 [schema state parents state-source domain-source decision-source]
+  (let [base (node-v6 schema state parents state-source domain-source)
+        checked (decision-semantic/schema decision-source)
+        dataset (decision-output-dataset state checked)]
+    (assoc base "format" format-id
+           "decisionOntologySource" decision-source
+           "decisionOntologyDigest" (:ontology-digest checked)
+           "decisionOutputDataset" (domain-rdf/pack-quads dataset)
+           "decisionOutputGraphDigest" (domain-rdf/graph-digest dataset))))
+
 (defn block
   "Create canonical DAG-CBOR bytes and a real CID for one checked state."
   [schema state parents]
-  (ipld/node->block (node-v6 schema state parents
+  (ipld/node->block (node-v7 schema state parents
                              (local-state-ontology-source)
-                             (local-domain-ontology-source))))
+                             (local-domain-ontology-source)
+                             (local-decision-ontology-source))))
 
 (defn read!
   "Resolve and rehash a CID, then rerun Mithril parsing, OWL, SPARQL and SHACL
@@ -149,15 +187,18 @@
   (let [value (ipld/get-node get-fn id)]
     (when-not value (refuse! :missing-block))
     (let [version (get value "format")
-          v6? (= format-id version)
+          v7? (= format-id version)
+          v6? (= format-v6 version)
           v5? (= format-v5 version)
           v4? (= format-v4 version)
           v3? (= format-v3 version)
           semantic? (canonical-format? version)]
     (when-not (and (map? value)
-                   (contains? #{format-v1 format-v2 format-v3 format-v4 format-v5 format-id}
+                   (contains? #{format-v1 format-v2 format-v3 format-v4 format-v5
+                                format-v6 format-id}
                               version)
-                   (= (cond v6? node-keys-v6
+                   (= (cond v7? node-keys-v7
+                            v6? node-keys-v6
                             v5? node-keys-v5
                             v4? node-keys-v4
                             v3? node-keys-v3
@@ -172,7 +213,7 @@
                                (get value "semanticContext"))
                             (string? (get value "semanticSource"))
                             (string? (get value "semanticGraphDigest"))))
-                   (cond v6? (and (map? (get value "stateDataset"))
+                   (cond (or v7? v6?) (and (map? (get value "stateDataset"))
                                   (map? (get value "domainDataset"))
                                   (string? (get value "domainGraphDigest"))
                                   (string? (get value "stateOntologyDigest"))
@@ -180,7 +221,13 @@
                                      (get value "stateOntologySource"))
                                   (string? (get value "domainOntologyDigest"))
                                   (= (local-domain-ontology-source)
-                                     (get value "domainOntologySource")))
+                                     (get value "domainOntologySource"))
+                                  (or (not v7?)
+                                      (and (map? (get value "decisionOutputDataset"))
+                                           (string? (get value "decisionOutputGraphDigest"))
+                                           (string? (get value "decisionOntologyDigest"))
+                                           (= (local-decision-ontology-source)
+                                              (get value "decisionOntologySource")))))
                          v5? (and (map? (get value "stateDataset"))
                                   (string? (get value "stateOntologySource"))
                                   (string? (get value "stateOntologyDigest"))
@@ -194,13 +241,29 @@
       (refuse! :invalid-node))
     (let [parents (mapv ipld/link-cid (get value "parents"))
           _ (valid-parents! parents)
-          state (cond (or v6? v5? v4?)
+          state (cond (or v7? v6? v5? v4?)
                       (state-rdf/decode-packed! (get value "stateDataset"))
                       v3? (state-node/decode-canonical! (get value "stateNode"))
                       :else (try (reader/read-string (get value "stateEdn"))
                                  (catch #?(:cljs :default :clj Exception) _
                                    (refuse! :invalid-state-edn))))
-          expected (cond v6? (let [domain-dataset
+          expected (cond v7? (let [domain-dataset
+                                      (domain-rdf/unpack-quads!
+                                       (get value "domainDataset"))
+                                  _ (when-not (= (get value "domainGraphDigest")
+                                                 (domain-rdf/graph-digest domain-dataset))
+                                      (refuse! :domain-graph-digest-mismatch))
+                                  decision-dataset
+                                      (domain-rdf/unpack-quads!
+                                       (get value "decisionOutputDataset"))]
+                                  (when-not (= (get value "decisionOutputGraphDigest")
+                                               (domain-rdf/graph-digest decision-dataset))
+                                    (refuse! :decision-graph-digest-mismatch))
+                                  (node-v7 schema state parents
+                                           (get value "stateOntologySource")
+                                           (get value "domainOntologySource")
+                                           (get value "decisionOntologySource")))
+                         v6? (let [domain-dataset
                                      (domain-rdf/unpack-quads!
                                       (get value "domainDataset"))]
                                  (when-not (= (get value "domainGraphDigest")
@@ -222,6 +285,8 @@
        :semantic-source (get value "semanticSource")
        :semantic-graph-digest (get value "semanticGraphDigest")
        :domain-graph-digest (get value "domainGraphDigest")
+       :decision-output-graph-digest (get value "decisionOutputGraphDigest")
+       :decision-output-dataset (get value "decisionOutputDataset")
        :checkpoint-digest (get value "checkpointDigest")}))))
 
 (defn put!

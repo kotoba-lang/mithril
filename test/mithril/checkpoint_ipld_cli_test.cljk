@@ -38,19 +38,34 @@
         (is (= 0 (.-status (invoke "merge" directory "base" "left" "right" "merged"))))
         (let [verified (invoke "verify" directory "merged")
               shown (invoke "show" directory "merged")
-              domain (invoke "domain" directory "merged")]
+              domain (invoke "domain" directory "merged")
+              decision-output (invoke "decision-output" directory "merged")]
           (is (= 0 (.-status verified)) (output verified))
           (is (re-find #"\"blocks\":4" (output verified)))
           (is (re-find #"\"domainGraphDigest\":\"sha256:" (output verified)))
+          (is (re-find #"\"decisionOutputGraphDigest\":\"sha256:"
+                       (output verified)))
           (is (= 0 (.-status shown)) (output shown))
           (is (re-find #"mithril/bot-checkpoint-semantic" (output shown)))
           (is (re-find #"review/approved" (output shown)))
           (is (re-find #"source/verified" (output shown)))
           (is (= 0 (.-status domain)) (output domain))
+          (is (= 0 (.-status decision-output)) (output decision-output))
+          (is (= [] (get-in (js->clj (js/JSON.parse (.-stdout decision-output)))
+                             ["dataset" "triples"])))
           (let [document (js->clj (js/JSON.parse (.-stdout domain)))
                 graph (get document "@graph")]
             (is (some #(= "Run" (get % "@type")) graph))
             (is (= 3 (count (filter #(= "Fact" (get % "@type")) graph))))))
+        (let [upgraded (invoke "upgrade" directory "merged" "upgraded")
+              verified (invoke "verify" directory "upgraded")]
+          (is (= 0 (.-status upgraded)) (output upgraded))
+          (is (re-find #"\"status\":\"upgraded\"" (output upgraded)))
+          (is (= 0 (.-status verified)) (output verified))
+          (is (re-find #"\"blocks\":4" (output verified)))
+          (is (re-find #"bot-checkpoint-ipld-v7" (output verified)))
+          (is (re-find #"REFUSE\tref-exists"
+                       (output (invoke "upgrade" directory "merged" "upgraded")))))
         (.writeFileSync fs source-file
                         (str (checkpoint/form-text (checkpoint/projection state nil)) "\n"))
         (is (= 0 (.-status (invoke "import" source-file state-file
