@@ -384,6 +384,11 @@
                                        (some-> cause ex-data :type)
                                        (:type data)
                                        :network-error))))))]
+      ;; CID replay can block the event loop longer than Node's default 5 s
+      ;; keep-alive timeout. Keep the local test connection valid between
+      ;; sequential requests so a stale pooled socket cannot masquerade as
+      ;; an IPQ HTTP-status refusal.
+      (set! (.-keepAliveTimeout server) 120000)
       (.listen server 0 "127.0.0.1"
                (fn []
                  (let [origin (str "http://127.0.0.1:"
