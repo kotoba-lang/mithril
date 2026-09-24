@@ -1,0 +1,81 @@
+#!/usr/bin/env kbb
+(ns mithril.checkpoint-ipq-loopback-probe
+  "Exercise Mithril's real IPQ/1 client against the pinned pure IPQ/1 handler
+  over loopback HTTP. Source and target stores must be distinct."
+  (:require [kotobase.protocols.ipq :as ipq]
+            [mithril.checkpoint :as checkpoint]
+            [mithril.checkpoint-ipq :as checkpoint-ipq]
+            [mithril.checkpoint-ipld-fs :as local]))
+
+(def fs (js/require "node:fs"))
+(def http (js/require "node:http"))
+(def path (js/require "node:path"))
+
+(let [[source-dir source-ref target-dir target-ref & extra] *command-line-args*]
+  (when (or (seq extra)
+            (not-every? #(and (string? %) (.isAbsolute path %))
+                        [source-dir target-dir])
+            (not (string? source-ref)) (not (string? target-ref))
+            (= source-dir target-dir))
+    (throw (ex-info "expected source-dir source-ref target-dir target-ref"
+                    {:reason :invalid-arguments})))
+  (let [source (local/open! source-dir)
+        target (local/open! target-dir)
+        head (local/read-ref source source-ref)
+        schema (checkpoint/schema (.readFileSync fs checkpoint/ontology-path "utf8"))
+        requests (atom 0)
+        served-bytes (atom 0)
+        server (.createServer
+                http
+                (fn [request response]
+                  (swap! requests inc)
+                  (let [url (js/URL. (.-url request) "http://127.0.0.1")
+                        result (ipq/handle
+                                {:blocks {:get (fn [cid]
+                                                 (when-let [bytes (local/get-block source cid)]
+                                                   {:bytes bytes
+                                                    :content-type "application/vnd.ipld.dag-cbor"}))}}
+                                {:method :get
+                                 :path (.-pathname url)
+                                 :query {"selector" (.get (.-searchParams url) "selector")}
+                                 :headers {"accept" (.. request -headers -accept)}})]
+                    (let [body (if (= :base64 (:body-encoding result))
+                                 (.from js/Buffer (:body result) "base64")
+                                 (:body result))]
+                      (swap! served-bytes + (.-length body))
+                      (.writeHead response (:status result) (clj->js (:headers result)))
+                      (.end response body)))))]
+    (.listen server 0 "127.0.0.1"
+             (fn []
+               (let [origin (str "http://127.0.0.1:" (.-port (.address server)))
+                     start (.now js/Date)]
+                 (-> (checkpoint-ipq/fetch-import-history!
+                      target schema target-ref origin head)
+                     (.then (fn [imported]
+                              (let [import-ms (- (.now js/Date) start)
+                                    verified (local/verify-ref! target schema target-ref)]
+                                (when-not (and (= head (:root imported))
+                                               (= head (:head verified)))
+                                  (throw (ex-info "imported head differs"
+                                                  {:reason :head-mismatch})))
+                                (println (.stringify
+                                          js/JSON
+                                          (clj->js {:status "verified"
+                                                    :transport "real-ipq/1-handler-loopback"
+                                                    :root head
+                                                    :blocks (:blocks imported)
+                                                    :semanticGraphDigest
+                                                    (:semantic-graph-digest imported)
+                                                    :requests @requests
+                                                    :carBytes @served-bytes
+                                                    :importMs import-ms
+                                                    :totalMs (- (.now js/Date) start)
+                                                    :target target-dir}))))))
+                     (.catch (fn [error]
+                               (let [data (ex-data (or (ex-cause error) error))]
+                                 (println (str "REFUSE\t"
+                                               (or (some-> data :reason name)
+                                                   (some-> data :type name)
+                                                   "ipq-probe-error")))
+                                 (set! (.-exitCode js/process) 1))))
+                     (.finally (fn [] (.close server)))))))))

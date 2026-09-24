@@ -1,8 +1,9 @@
 (ns mithril.checkpoint-ipq-test
-  (:require [cljs.test :refer [deftest is]]
+  (:require [cljs.test :refer [async deftest is]]
             [ipld.car :as car]
             [ipld.car.trustless :as trustless]
             [ipld.core :as ipld]
+            [kotobase.protocols.ipq :as ipq]
             [mithril.bot :as bot]
             [mithril.checkpoint :as checkpoint]
             [mithril.checkpoint-ipq :as checkpoint-ipq]
@@ -12,6 +13,7 @@
 (def fs (js/require "node:fs"))
 (def path (js/require "node:path"))
 (def os (js/require "node:os"))
+(def http (js/require "node:http"))
 
 (defn- schema []
   (checkpoint/schema (.readFileSync fs checkpoint/ontology-path "utf8")))
@@ -203,3 +205,128 @@
       (finally
         (.rmSync fs source-dir #js {:recursive true :force true})
         (.rmSync fs target-dir #js {:recursive true :force true})))))
+
+(deftest ipq-http-fetch-imports-only-the-expected-verified-history
+  (async done
+    (let [source-dir (.mkdtempSync fs (.join path (.tmpdir os) "mithril-ipq-http-source-"))
+          target-dir (.mkdtempSync fs (.join path (.tmpdir os) "mithril-ipq-http-target-"))
+          source (local/open! source-dir)
+          target (local/open! target-dir)
+          checked-schema (schema)
+          _ (local/import-state! source checked-schema "source" (initial-state))
+          head (local/advance-fact! source checked-schema "source" :source/verified)
+          mode (atom :normal)
+          server (.createServer http
+                                (fn [request response]
+                                  (let [url (js/URL. (.-url request) "http://127.0.0.1")
+                                        request-data {:method :get
+                                                      :path (.-pathname url)
+                                                      :query {"selector" (.get (.-searchParams url)
+                                                                                "selector")}
+                                                      :headers {"accept" (.. request -headers -accept)}}]
+                                    (if (= :redirect @mode)
+                                      (do (.writeHead response 302
+                                                      #js {"location" "http://127.0.0.1/other"})
+                                          (.end response))
+                                    (if (= :status @mode)
+                                      (do (.writeHead response 503) (.end response "unavailable"))
+                                      (if (= :oversize @mode)
+                                        (do (.writeHead response 200
+                                                        #js {"content-type" "application/vnd.ipld.car"
+                                                             "x-ipq-profile" "1"})
+                                            (.end response
+                                                  (.alloc js/Buffer
+                                                          (inc checkpoint-ipq/max-car-bytes))))
+                                      (let [served (ipq/handle
+                                                    {:blocks {:get (fn [cid]
+                                                                     (when-let [bytes (local/get-block source cid)]
+                                                                       {:bytes bytes
+                                                                        :content-type "application/vnd.ipld.dag-cbor"}))}}
+                                                    request-data)
+                                            bytes (.from js/Buffer (:body served) "base64")
+                                            headers (assoc (:headers served)
+                                                           "content-type"
+                                                           (if (= :type @mode)
+                                                             "text/html"
+                                                             (get-in served [:headers "content-type"]))
+                                                           "x-ipq-profile"
+                                                           (if (= :profile @mode) "2" "1"))]
+                                        (.writeHead response (:status served) (clj->js headers))
+                                        (.end response
+                                              (if (= :tamper @mode)
+                                                (let [decoded (car/decode bytes)
+                                                      blocks (mapv (fn [{:keys [cid]}]
+                                                                     {:cid cid
+                                                                      :bytes (get (:blocks decoded) cid)})
+                                                                   (:entries decoded))
+                                                      changed (assoc (first blocks)
+                                                                     :bytes (:bytes (second blocks)))]
+                                                  (:bytes (car/encode
+                                                           {:roots [head]
+                                                            :blocks (cons changed (rest blocks))})))
+                                                bytes)))))))))
+          refused (fn [origin name expected]
+                    (-> (checkpoint-ipq/fetch-import-history!
+                         target checked-schema name origin expected)
+                        (.then (fn [_] :unexpected-success)
+                               (fn [error]
+                                 (let [data (ex-data error)
+                                       cause (ex-cause error)]
+                                   (or (:reason data)
+                                       (some-> cause ex-data :reason)
+                                       (some-> cause ex-data :type)
+                                       (:type data)
+                                       :network-error))))))]
+      (.listen server 0 "127.0.0.1"
+               (fn []
+                 (let [origin (str "http://127.0.0.1:"
+                                   (.-port (.address server)))]
+                   (-> (checkpoint-ipq/fetch-import-history!
+                        target checked-schema "received" origin head)
+                       (.then
+                        (fn [result]
+                          (is (= head (:root result)))
+                          (is (= head (local/read-ref target "received")))
+                          (is (= :invalid-ipq-origin
+                                 (reason #(checkpoint-ipq/selection-url
+                                           "http://example.com" head))))
+                          (is (= :invalid-cid
+                                 (reason #(checkpoint-ipq/selection-url origin "BAD"))))
+                          (reset! mode :status)
+                          (refused origin "bad-status" head))
+                        (fn [error] (throw error)))
+                       (.then (fn [outcome]
+                                (is (= :ipq-http-status outcome))
+                                (is (false? (local/ref-exists? target "bad-status")))
+                                (reset! mode :type)
+                                (refused origin "bad-type" head)))
+                       (.then (fn [outcome]
+                                (is (= :ipq-content-type outcome))
+                                (is (false? (local/ref-exists? target "bad-type")))
+                                (reset! mode :profile)
+                                (refused origin "bad-profile" head)))
+                       (.then (fn [outcome]
+                                (is (= :ipq-profile-mismatch outcome))
+                                (is (false? (local/ref-exists? target "bad-profile")))
+                                (reset! mode :tamper)
+                                (refused origin "tampered" head)))
+                       (.then (fn [outcome]
+                                (is (= :ipld/cid-mismatch outcome))
+                                (is (false? (local/ref-exists? target "tampered")))
+                                (reset! mode :oversize)
+                                (refused origin "oversize" head)))
+                       (.then (fn [outcome]
+                                (is (= :car-over-limit outcome))
+                                (is (false? (local/ref-exists? target "oversize")))
+                                (reset! mode :redirect)
+                                (refused origin "redirect" head)))
+                       (.then (fn [outcome]
+                                (is (= :ipq-fetch-failed outcome))
+                                (is (false? (local/ref-exists? target "redirect")))))
+                       (.catch (fn [error]
+                                 (is false (str "unexpected IPQ test error: " error))))
+                       (.finally (fn []
+                                   (.close server)
+                                   (.rmSync fs source-dir #js {:recursive true :force true})
+                                   (.rmSync fs target-dir #js {:recursive true :force true})
+                                   (done))))))))))

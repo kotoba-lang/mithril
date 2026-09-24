@@ -372,9 +372,30 @@ an existing ref is never overwritten by import.
 The caller supplies the expected root; the archive cannot choose it. The
 profile is limited to 32 blocks, 64 selector path components, 4 MiB of selected
 blocks and 4 MiB plus framing allowance for the input CAR. It rejects missing,
-altered, excess or semantically invalid blocks. This is not yet an HTTP IPQ
-endpoint, a completeness proof for arbitrary queries, a cross-tick trust
-cache, or synchronization of mutable refs.
+altered, excess or semantically invalid blocks. `fetch-import` now consumes an
+IPQ/1 HTTP selection for a caller-supplied head CID and feeds its bounded CAR
+into the same semantic import gate. It checks CAR media type and IPQ profile,
+refuses redirects, and enforces a 120-second request timeout and byte ceiling
+while streaming even if the server omits Content-Length. HTTPS origins are accepted; plain HTTP is limited
+to loopback for local tests. IPQ/1's published selector-depth limit is 32, so
+longer histories may be explicitly refused by the server. This is not a
+completeness proof for arbitrary queries, a cross-tick trust cache, or
+synchronization of mutable refs.
+
+The loopback interoperability probe runs the pinned pure IPQ/1 handler behind
+Node HTTP, imports into a distinct local store, then verifies that store again:
+
+```sh
+kbb --backend sci --classpath "$(kbb -Spath)" \
+  bin/mithril-checkpoint-ipq-loopback-probe.cljk \
+  /absolute/source-store source-ref /absolute/empty-target-store imported
+```
+
+On 2026-09-24 this path imported the existing 15-block scheduler history in
+one HTTP request. The independently re-read target had the same head CID and
+semantic graph digest. One local run measured 38,322 ms for fetch plus guarded
+import and 65,318 ms through independent verification. This is one loopback
+sample, not a network throughput or cache speedup claim.
 
 ```sh
 kbb --backend sci bin/mithril-checkpoint-ipq.cljk export \
@@ -383,6 +404,10 @@ kbb --backend sci bin/mithril-checkpoint-ipq.cljk verify \
   /absolute/history.car bafy...expected-head
 kbb --backend sci bin/mithril-checkpoint-ipq.cljk import \
   /absolute/other-checkpoint-store received /absolute/history.car bafy...expected-head
+kbb --backend sci --classpath "$(kbb -Spath)" \
+  bin/mithril-checkpoint-ipq.cljk fetch-import \
+  /absolute/other-checkpoint-store received https://trusted-ipq-origin.example \
+  bafy...expected-head
 ```
 
 On 2026-09-24 the isolated seven-occurrence model-authored scheduler canary
@@ -1371,7 +1396,7 @@ kbb --backend sci --classpath "$CP" bin/mithril.cljk compile-library lib/web/v1.
 kbb --backend sci --classpath "$CP" bin/mithril.cljk compile-web examples/hello-web.mith lib/web/v1.mith
 kbb --backend sci bin/mithril.cljk emit-desktop examples/mithril-desktop.mith
 kbb --backend sci --classpath "$CP" bin/mithril.cljk request examples/hello-web.mith lib/web/v1.mith GET /hello
-kbb --backend sci --classpath "$CP":test test/run.cljk
+kbb --backend sci --classpath "$(kbb -Spath):test" test/run.cljk
 kbb --backend sci --classpath "$CP":test test/run_synthesis.cljk
 amu check src/mithril/runtime.kotoba --jvm-free
 ```

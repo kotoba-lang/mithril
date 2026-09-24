@@ -5,6 +5,7 @@
   ontology and causal verifier remains mandatory on import. This local adapter
   does not claim a remote IPQ service or a distributed mutable ref."
   (:require [ipld.car.trustless :as trustless]
+            [ipld.selector :as selector]
             [mithril.checkpoint-ipld :as checkpoint-ipld]
             [mithril.checkpoint-ipld-fs :as local]))
 
@@ -21,6 +22,7 @@
   {:max-blocks 32 :max-bytes 4194304 :max-depth 64 :max-matches 32})
 
 (def max-car-bytes (+ (:max-bytes limits) 65536))
+(def ipq-car-content-type "application/vnd.ipld.car")
 
 (defn- refuse! [reason]
   (throw (ex-info "Mithril checkpoint CAR refused"
@@ -88,3 +90,90 @@
     (local/create-byte-matched-ref!
      store name expected-root loaded ontology-contract)
     (dissoc checked :loaded)))
+
+(defn selection-url
+  "Build an IPQ/1 request from an explicit endpoint origin and expected head.
+  HTTP is allowed only for loopback experiments; production origins use HTTPS."
+  [origin expected-root]
+  (when-not (and (string? expected-root)
+                 (re-matches #"b[a-z2-7]+" expected-root))
+    (refuse! :invalid-cid))
+  (let [url (try (js/URL. origin)
+                 (catch :default _ (refuse! :invalid-ipq-origin)))
+        hostname (.-hostname url)]
+    (when-not (and (empty? (.-username url))
+                   (empty? (.-password url))
+                   (= "/" (.-pathname url))
+                   (empty? (.-search url))
+                   (empty? (.-hash url))
+                   (or (= "https:" (.-protocol url))
+                       (and (= "http:" (.-protocol url))
+                            (contains? #{"localhost" "127.0.0.1" "[::1]"}
+                                       hostname))))
+      (refuse! :invalid-ipq-origin))
+    (str (.-origin url) "/ipq/v1/selection/" expected-root
+         "?selector=" (.toString (.from js/Buffer (selector/encode history-selector))
+                                "base64url"))))
+
+(defn fetch-history-car!
+  "Fetch a bounded IPQ/1 CAR. Headers are hints; the streaming byte ceiling
+  and trustless CAR replay are authoritative. Redirects are never followed."
+  ([origin expected-root]
+   (fetch-history-car! js/fetch origin expected-root))
+  ([fetch-fn origin expected-root]
+   (let [url (selection-url origin expected-root)]
+     (-> (fetch-fn url #js {:redirect "error"
+                           :signal (.timeout js/AbortSignal 120000)
+                           :headers #js {"accept" ipq-car-content-type}})
+         (.then
+          (fn [response]
+            (when-not (= 200 (.-status response))
+              (refuse! :ipq-http-status))
+            (let [headers (.-headers response)
+                  content-type (.get headers "content-type")
+                  profile (.get headers "x-ipq-profile")
+                  length-header (.get headers "content-length")
+                  length-number (when length-header (js/Number length-header))]
+              (when-not (= "1" profile) (refuse! :ipq-profile-mismatch))
+              (when-not (and (string? content-type)
+                             (re-matches #"(?i)application/vnd\.ipld\.car(?:\s*;.*)?"
+                                         content-type))
+                (refuse! :ipq-content-type))
+              (when (and length-header
+                         (or (not (js/Number.isSafeInteger length-number))
+                             (neg? length-number)
+                             (> length-number max-car-bytes)))
+                (refuse! :car-over-limit))
+              (when-not (some? (.-body response))
+                (refuse! :ipq-missing-body))
+              (let [reader (.getReader (.-body response))]
+                (letfn [(receive [chunks size]
+                          (-> (.read reader)
+                              (.then (fn [part]
+                                       (if (.-done part)
+                                         (js/Uint8Array.
+                                          (.concat js/Buffer (into-array chunks) size))
+                                         (let [bytes (.-value part)
+                                               next-size (+ size (.-byteLength bytes))]
+                                           (when (> next-size max-car-bytes)
+                                             (.cancel reader)
+                                             (refuse! :car-over-limit))
+                                           (receive (conj chunks (.from js/Buffer bytes))
+                                                    next-size)))))))]
+                  (receive [] 0))))))
+         (.catch (fn [error]
+                   (let [cause (or (ex-cause error) error)
+                         data (ex-data cause)]
+                     (if (or (:reason data) (:type data))
+                       (throw cause)
+                       (refuse! :ipq-fetch-failed)))))))))
+
+(defn fetch-import-history!
+  "Fetch by caller-supplied head, replay the CAR, check ontology and causality,
+  then publish a local ref only through import-history!'s guarded path."
+  ([store schema name origin expected-root]
+   (fetch-import-history! js/fetch store schema name origin expected-root))
+  ([fetch-fn store schema name origin expected-root]
+   (-> (fetch-history-car! fetch-fn origin expected-root)
+       (.then (fn [car-bytes]
+                (import-history! store schema name expected-root car-bytes))))))

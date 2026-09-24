@@ -70,6 +70,32 @@
                                        :blocks (:blocks result)
                                        :semanticGraphDigest
                                        (:semantic-graph-digest result)})))))
+      "fetch-import"
+      (let [[directory ref origin root & extra] args]
+        (when (or (seq extra) (not directory) (not ref)
+                  (not origin) (not root))
+          (refuse! :invalid-arguments))
+        (absolute! directory)
+        (checkpoint-ipq/selection-url origin root)
+        (let [store (local/open! directory)]
+          (-> (checkpoint-ipq/fetch-import-history!
+               store (schema) ref origin root)
+              (.then (fn [result]
+                       (println (.stringify js/JSON
+                                          (clj->js {:status "imported"
+                                                    :transport "ipq/1-http"
+                                                    :root (:root result)
+                                                    :blocks (:blocks result)
+                                                    :semanticGraphDigest
+                                                    (:semantic-graph-digest result)})))))
+              (.catch (fn [error]
+                        (let [cause (or (ex-cause error) error)
+                              data (ex-data cause)]
+                          (println (str "REFUSE\t"
+                                        (or (some-> data :reason name)
+                                            (some-> data :type name)
+                                            "ipq-http-error")))
+                          (set! (.-exitCode js/process) 1)))))))
       (refuse! :invalid-command))
     (catch :default error
       (println (str "REFUSE\t" (or (some-> error ex-data :reason name)
