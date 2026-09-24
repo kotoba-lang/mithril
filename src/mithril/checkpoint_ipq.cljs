@@ -1,0 +1,63 @@
+(ns mithril.checkpoint-ipq
+  "Bounded IPQ-style CAR transport for a Mithril CID checkpoint history.
+
+  CAR replay proves the selected bytes and their CID links. Mithril's own
+  ontology and causal verifier remains mandatory on import. This local adapter
+  does not claim a remote IPQ service or a distributed mutable ref."
+  (:require [ipld.car.trustless :as trustless]
+            [mithril.checkpoint-ipld :as checkpoint-ipld]
+            [mithril.checkpoint-ipld-fs :as local]))
+
+(def history-selector
+  {:selector :explore-recursive
+   :limit {:mode :depth :depth 32}
+   :sequence {:selector :explore-fields
+              :fields {"parents" {:selector :explore-all
+                                   :next {:selector :explore-recursive-edge}}}}})
+
+(def limits
+  ;; Each parent hop crosses a map field and a list index, so a 32-block
+  ;; history needs up to 62 selector path components, not 32.
+  {:max-blocks 32 :max-bytes 4194304 :max-depth 64 :max-matches 32})
+
+(defn- refuse! [reason]
+  (throw (ex-info "Mithril checkpoint CAR refused"
+                  {:mithril/error :mithril.checkpoint-ipq/refused
+                   :reason reason})))
+
+(defn export-history!
+  "Export a fully checked, immutable history rooted at head as a bounded CAR.
+  The selector must touch exactly the nodes the semantic verifier reached."
+  [store schema head]
+  (let [history (checkpoint-ipld/verify-history-nodes!
+                 #(local/get-block store %) schema head)]
+    (when (> (:blocks history) (:max-blocks limits))
+      (refuse! :history-over-ipq-limit))
+    (let [selected (trustless/selection-car
+                    #(local/get-block store %) head history-selector limits)
+          expected (set (keys (:nodes history)))
+          actual (set (map :cid (:blocks selected)))]
+      (when-not (= expected actual)
+        (refuse! :selector-incomplete-history))
+      {:root head :blocks (:blocks history)
+       :bytes (get-in selected [:car :bytes])})))
+
+(defn verify-history-car!
+  "Replay a CAR against the caller's root, then rerun Mithril's complete
+  ontology, SHACL, graph-digest and causal-history verification using only
+  replayed bytes. No filesystem or archive-declared root is trusted."
+  [schema expected-root car-bytes]
+  (let [replayed (trustless/verify-selection-car
+                  car-bytes expected-root history-selector limits)
+        loaded (:loaded replayed)]
+    (when (seq (:unused replayed))
+      (refuse! :unused-car-blocks))
+    (let [blocks (into {} (map (juxt :cid :bytes)) loaded)
+          history (checkpoint-ipld/verify-history-nodes!
+                   #(get blocks %) schema expected-root)]
+      (when-not (= (set (keys blocks)) (set (keys (:nodes history))))
+        (refuse! :selector-incomplete-history))
+      {:root expected-root :blocks (:blocks history)
+       :state (get-in history [:nodes expected-root :state])
+       :semantic-graph-digest
+       (get-in history [:nodes expected-root :semantic-graph-digest])})))
