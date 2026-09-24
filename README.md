@@ -355,6 +355,15 @@ Tests assert one block read per invocation and rejection when an ancestor
 returns bytes for another CID on a later invocation. This is not a persistent
 trust cache or an IPQ completeness proof. A cross-tick cache would require an
 explicit versioned trust anchor, ref-head binding and tamper/upgrade tests.
+The Node-only IPLD store now installs Node SHA-256 through the existing
+`multiformats/install-sha256!` agreement gate before CID reads and writes.
+It does not bypass rehashing or semantic validation. On the same isolated
+15-block verifier fixture, three sequential cold A/B pairs returned the same
+CID and result: portable wall times 38.07/32.53/23.97 s and host-digest times
+34.85/17.51/20.48 s (2026-09-24). These are load-sensitive local samples,
+not a fleet speedup or a cache/IPQ measurement. IPQ would help bounded remote
+block selection; a cross-invocation semantic cache still needs a checked
+trust anchor and schema/ontology version binding.
 Before execution it rejects a prior unreceipted attempt, an in-flight effect,
 or a terminal state. A lost host receipt is held for explicit reconciliation,
 not retried by a later cron tick. This is a bounded scheduler execution
