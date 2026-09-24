@@ -1,0 +1,30 @@
+{:format "https://mithril.fund/bench/agent-loop-corpus-v1"
+ :corpus-id "readonly-git-status-v1"
+ :model-id "typesafe/jev-1.13"
+ :replicates 5
+ :prompt "Inspect the supplied disposable Git workspace. Return exactly one EDN map with :clean? (boolean), :modified-tracked (integer), and :untracked (integer). Do not modify files."
+ :mithril-profile "examples/hermes-readonly-canary.mith"
+ :mithril-grants "git/status,agent/stop"
+ :cases
+ [{:case-id "status-clean"
+   :prompt "Inspect the supplied disposable Git workspace. Return exactly one EDN map with :clean? (boolean), :modified-tracked (integer), and :untracked (integer). Do not modify files."
+   :workspace-state {:tracked-files {"README.md" "benchmark fixture\n"}
+                     :modified-files {}
+                     :untracked-files {}}
+   :expected-outcome {:clean? true :modified-tracked 0 :untracked 0}}
+  {:case-id "status-one-change"
+   :prompt "Inspect the supplied disposable Git workspace. Return exactly one EDN map with :clean? (boolean), :modified-tracked (integer), and :untracked (integer). Do not modify files."
+   :workspace-state {:tracked-files {"README.md" "benchmark fixture\n"
+                                     "src/core.txt" "baseline\n"}
+                     :modified-files {"src/core.txt" "changed\n"}
+                     :untracked-files {}}
+   :expected-outcome {:clean? false :modified-tracked 1 :untracked 0}}
+  {:case-id "status-mixed-change"
+   :prompt "Inspect the supplied disposable Git workspace. Return exactly one EDN map with :clean? (boolean), :modified-tracked (integer), and :untracked (integer). Do not modify files."
+   :workspace-state {:tracked-files {"README.md" "benchmark fixture\n"
+                                     "src/core.txt" "baseline\n"
+                                     "src/other.txt" "baseline\n"}
+                     :modified-files {"src/core.txt" "changed\n"
+                                      "src/other.txt" "changed\n"}
+                     :untracked-files {"scratch.txt" "temporary\n"}}
+   :expected-outcome {:clean? false :modified-tracked 2 :untracked 1}}]}

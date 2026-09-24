@@ -1,0 +1,122 @@
+#!/usr/bin/env kbb
+(ns mithril.agent-loop-bench-cli
+  (:require [cljs.reader :as reader]
+            [clojure.string :as str]
+            [mithril.agent-loop-bench :as bench]))
+
+(def fs (js/require "node:fs"))
+(def path (js/require "node:path"))
+(def child-process (js/require "node:child_process"))
+
+(defn- read-edn [file]
+  (reader/read-string (.readFileSync fs file "utf8")))
+
+(defn- write-edn! [file value]
+  (.mkdirSync fs (.dirname path file) #js {:recursive true})
+  (.writeFileSync fs file (str (pr-str value) "\n") "utf8"))
+
+(defn- safe-file-path [root relative]
+  (when-not (and (string? relative) (not (.isAbsolute path relative)))
+    (throw (ex-info "fixture paths must be relative" {:reason :unsafe-fixture-path})))
+  (let [base (.resolve path root)
+        target (.resolve path base relative)
+        rel (.relative path base target)]
+    (when (or (= rel "..") (str/starts-with? rel (str ".." (.-sep path))))
+      (throw (ex-info "fixture path escapes its run directory" {:reason :unsafe-fixture-path})))
+    target))
+
+(defn- write-files! [root files]
+  (doseq [[relative content] files]
+    (when-not (string? content)
+      (throw (ex-info "fixture file content must be text" {:reason :invalid-fixture})))
+    (let [target (safe-file-path root relative)]
+      (.mkdirSync fs (.dirname path target) #js {:recursive true})
+      (.writeFileSync fs target content "utf8"))))
+
+(defn- run-git! [dir args]
+  (let [result (.spawnSync child-process "git" (clj->js (into ["-C" dir] args))
+                           #js {:encoding "utf8" :stdio "pipe"})]
+    (when (or (.-error result) (not (zero? (.-status result))))
+      (throw (ex-info (str "fixture git setup failed: " (or (some-> result .-stderr str/trim)
+                                                            (some-> result .-error .-message)))
+                      {:reason :fixture-git-failed})))
+    (.-stdout result)))
+
+(defn- materialize! [plan output-dir]
+  (when (.existsSync fs output-dir)
+    (throw (ex-info "output directory already exists; choose a fresh path"
+                    {:reason :output-exists})))
+  (.mkdirSync fs output-dir #js {:recursive true})
+  (doseq [run (:runs plan)]
+    (let [run-dir (.join path output-dir (str/replace (:run-id run) #"[^A-Za-z0-9_.-]" "--"))
+          workspace (.join path run-dir "workspace")
+          {:keys [tracked-files modified-files untracked-files]} (:workspace-state run)
+          task {:id (:run-id run) :workspace workspace :goal (:prompt run)}]
+      (.mkdirSync fs workspace #js {:recursive true})
+      (write-files! workspace tracked-files)
+      (run-git! workspace ["init" "--quiet" "--initial-branch=main"])
+      (run-git! workspace ["-c" "user.name=Agent Loop Bench"
+                           "-c" "user.email=bench@localhost" "add" "--all"])
+      (run-git! workspace ["-c" "user.name=Agent Loop Bench"
+                           "-c" "user.email=bench@localhost"
+                           "commit" "--quiet" "-m" "benchmark fixture"])
+      (write-files! workspace modified-files)
+      (write-files! workspace untracked-files)
+      (.writeFileSync fs (.join path run-dir "prompt.txt") (str (:prompt run) "\n") "utf8")
+      (.writeFileSync fs (.join path run-dir "task.json")
+                      (str (js/JSON.stringify (clj->js task) nil 2) "\n") "utf8")
+      (write-edn! (.join path run-dir "expected-outcome.edn") (:expected-outcome run))
+      (write-edn! (.join path run-dir "run.edn")
+                  (dissoc run :workspace-state :expected-outcome))))
+  (write-edn! (.join path output-dir "plan.edn") plan)
+  (println "PREPARED" (:pair-count plan) "PAIRS" "RUNS" (count (:runs plan))
+           "UNDER" (.resolve path output-dir)))
+
+(defn- fail! [error]
+  (let [data (ex-data error)
+        reason (:reason data)
+        detail (or (:detail data) (.-message error))]
+    (binding [*out* *err*]
+      (println "REFUSE" (or (some-> reason name) "invalid-input") detail))
+    (set! (.-exitCode js/process) 2)))
+
+(defn -main [& args]
+  (try
+    (case (first args)
+      "plan" (let [[_ corpus-path model output-path] args]
+               (when-not (and corpus-path model output-path)
+                 (throw (ex-info "usage: mithril-agent-loop-bench plan <corpus.edn> <exact-model-id> <plan.edn>"
+                                 {:reason :usage})))
+               (let [plan (bench/make-plan (read-edn corpus-path) model)]
+                 (write-edn! output-path plan)
+                 (println "PLAN" (:corpus-id plan)
+                          "CASES" (:case-count plan)
+                          "PAIRS" (:pair-count plan)
+                          "RUNS" (count (:runs plan))
+                          "MODEL" (:model plan))))
+      "prepare" (let [[_ plan-path output-dir] args]
+                  (when-not (and plan-path output-dir)
+                    (throw (ex-info "usage: mithril-agent-loop-bench prepare <plan.edn> <fresh-output-dir>"
+                                    {:reason :usage})))
+                  (materialize! (read-edn plan-path) output-dir))
+      "report" (let [[_ plan-path receipts-path output-path] args]
+                 (when-not (and plan-path receipts-path output-path)
+                   (throw (ex-info "usage: mithril-agent-loop-bench report <plan.edn> <receipts.edn> <report.edn>"
+                                   {:reason :usage})))
+                 (let [report (bench/report (read-edn plan-path) (read-edn receipts-path))
+                       comparison (:paired-comparison report)]
+                   (write-edn! output-path report)
+                   (println "REPORT" (:corpus-id report)
+                            "PAIRS" (get-in comparison [:cases])
+                            "PARITY" (get-in comparison [:exact-outcome-parity])
+                            "TOKEN_INDEX" (get-in comparison [:indices :tokens])
+                            "WALL_INDEX" (get-in comparison [:indices :wall-ms]))))
+      (throw (ex-info "usage: mithril-agent-loop-bench <plan|report> ..."
+                      {:reason :usage})))
+    (catch :default error
+      (fail! error))))
+
+(let [args (if (seq *command-line-args*)
+             *command-line-args*
+             (subvec (vec (js->clj (.-argv js/process))) 2))]
+  (apply -main args))

@@ -1,0 +1,73 @@
+(ns mithril.agent-loop-bench-test
+  (:require [cljs.test :refer [deftest is testing]]
+            [mithril.agent-loop-bench :as bench]))
+
+(def prompt "Inspect the fixture and report clean, modified and untracked counts.")
+(defn- corpus []
+  {:format bench/corpus-format :corpus-id "bench-test" :model-id "typesafe/jev-1.13"
+   :replicates 3
+   :cases (mapv (fn [[id modified untracked]]
+                  {:case-id id :prompt prompt
+                   :workspace-state {:tracked-files {"a.txt" "base"}
+                                     :modified-files (if (pos? modified) {"a.txt" "changed"} {})
+                                     :untracked-files (if (pos? untracked) {"u.txt" "new"} {})}
+                   :expected-outcome {:clean? (and (zero? modified) (zero? untracked))
+                                      :modified-tracked modified :untracked untracked}})
+                [["clean" 0 0] ["modified" 1 0] ["untracked" 0 1]])})
+
+(defn- receipts-for [plan]
+  (mapv (fn [run]
+          (cond-> {:run-id (:run-id run)
+                   :case-id (:case-id run)
+                   :lane (:lane run)
+                   :task-digest (:task-digest run)
+                   :model (:model run)
+                   :success? true
+                   :observed-outcome (:expected-outcome run)
+                   :usage {:input-tokens (if (= :hermes (:lane run)) 100 50)
+                           :output-tokens 10}
+                   :wall-ms (if (= :hermes (:lane run)) 1000 700)}
+            (= :mithril (:lane run)) (assoc :ontology-digest (bench/digest "test-ontology"))))
+        (:runs plan)))
+
+(deftest plan-is-counterbalanced-and-binds-identical-task-pairs
+  (let [plan (bench/make-plan (corpus) "typesafe/jev-1.13")
+        pairs (group-by :case-id (:runs plan))]
+    (is (= 3 (:case-count plan)))
+    (is (= 9 (:pair-count plan)))
+    (is (= 18 (count (:runs plan))))
+    (is (every? #(= #{:hermes :mithril} (set (map :lane %))) (vals pairs)))
+    (is (every? #(apply = (map :task-digest %)) (vals pairs)))
+    (is (= 18 (count (distinct (map :sequence (:runs plan))))))))
+
+(deftest report-scores-only-receipts-matching-the-oracle
+  (let [plan (bench/make-plan (corpus) "typesafe/jev-1.13")
+        receipts (receipts-for plan)
+        report (bench/report plan receipts)
+        comparison (:paired-comparison report)]
+    (is (= 18 (:successful-runs report)))
+    (is (= 1 (:exact-outcome-parity comparison)))
+    (is (= 54.54545454545454 (get-in comparison [:indices :tokens])))
+    (is (= 70 (get-in comparison [:indices :wall-ms])))
+    (is (nil? (get-in comparison [:indices :effects])))
+    (is (some #{:hermes-effects :mithril-effects}
+              (:unmeasured comparison)))))
+
+(deftest result-mismatch-withholds-cohort-index
+  (let [plan (bench/make-plan (corpus) "typesafe/jev-1.13")
+        receipts (receipts-for plan)
+        target (first (filter #(= :mithril (:lane %)) receipts))
+        changed (assoc target :observed-outcome {:clean? false
+                                                  :modified-tracked 99
+                                                  :untracked 2})
+        report (bench/report plan (mapv #(if (= (:run-id %) (:run-id target)) changed %) receipts))]
+    (is (= (/ 8 9) (get-in report [:paired-comparison :exact-outcome-parity])))
+    (is (nil? (get-in report [:paired-comparison :indices])))
+    (is (= 17 (:successful-runs report)))))
+
+(deftest report-refuses-incomplete-receipt-cohort
+  (let [plan (bench/make-plan (corpus) "typesafe/jev-1.13")
+        receipts (vec (rest (receipts-for plan)))]
+    (is (= :missing-run
+           (try (bench/report plan receipts) nil
+                (catch :default error (:reason (ex-data error))))))))

@@ -1274,6 +1274,65 @@ qualification still needs a predeclared multi-case corpus, repeated paired
 runs, successful test/receipt validation, and live scheduler-originated
 receipts; one local run is not a fleet reliability claim.
 
+### Reproducible Hermes / Mithril loop bench
+
+`bench/agent-loops/corpus.edn` predeclares three read-only Git-status cases and
+five repetitions per case. `mithril-agent-loop-bench plan` binds each task and
+fixture to a SHA-256 digest, pins one exact model id for both lanes, and
+counterbalances Hermes-first and Mithril-first order. `prepare` creates a fresh
+throwaway Git workspace for every lane/run pair, so each run starts with the
+same committed fixture plus the case's declared changes. Oracle outputs stay
+outside each workspace.
+
+```sh
+kbb --backend sci bin/mithril-agent-loop-bench.cljk plan \
+  bench/agent-loops/corpus.edn typesafe/jev-1.13 /tmp/agent-loop-plan.edn
+kbb --backend sci bin/mithril-agent-loop-bench.cljk prepare \
+  /tmp/agent-loop-plan.edn /tmp/agent-loop-runs
+```
+
+Run the rows in `plan.edn` in `:sequence` order. Hermes runs use the row's
+`prompt.txt` and `workspace` with one-shot usage capture, for example:
+
+```sh
+python -m hermes_cli.main --provider openrouter --model typesafe/jev-1.13 \
+  --toolsets terminal --in <run-workspace> --usage-file <run>/hermes-usage.json \
+  -z "$(cat <run>/prompt.txt)"
+```
+
+For the Mithril row, use the same prompt and workspace from `task.json`, the
+declared read-only profile and grants, and a new state file for that run:
+
+```sh
+kbb --backend sci bin/mithril-hermes.cljk tick \
+  examples/hermes-readonly-canary.mith <run>/task.json <run>/state.edn \
+  <run-id> git/status,agent/stop execute
+```
+
+Continue the Mithril tick until its terminal stop receipt. Normalize each
+observed result to a map with `:clean?`, `:modified-tracked`, and `:untracked`.
+Write one EDN receipt per `:run-id` with its exact `:case-id`, `:lane`,
+`:task-digest`, provider-resolved `:model`, `:success?`, `:observed-outcome`,
+`:usage` (`:input-tokens` and `:output-tokens` required), and `:wall-ms`.
+Include `:ontology-digest` on Mithril receipts. `:turns` and `:effect-count`
+may be nil when the runner does not expose them; the report leaves those indices
+unmeasured instead of fabricating zero. The report computes result digests
+itself, checks every outcome against the predeclared oracle, and rejects
+missing, duplicate, or unplanned receipts.
+
+```sh
+kbb --backend sci bin/mithril-agent-loop-bench.cljk report \
+  /tmp/agent-loop-runs/plan.edn /tmp/agent-loop-receipts.edn \
+  /tmp/agent-loop-report.edn
+```
+
+The token index is only emitted when every paired run returns the expected
+same result with the same resolved model and task digest. The corpus measures a
+bounded read-only tool loop; it is not a benchmark of arbitrary coding tasks or
+proof of scheduler reliability. The Hermes and Mithril rows share the user
+prompt and fixture, while their system/ontology context is counted as part of
+the respective real usage.
+
 ## Source contract
 
 - `.mith` and `.mithril` are aliases. The suffix and surface syntax never enter
