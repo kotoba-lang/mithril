@@ -362,7 +362,8 @@ history, selects its parent CID links, and writes a root-first CARv1;
 `verify-history-car!` replays the selector against only the CAR bytes and then
 reruns Mithril's ontology, SHACL, graph-digest and causal-transition checks.
 The caller supplies the expected root; the archive cannot choose it. The
-profile is limited to 32 blocks, 64 selector path components and 4 MiB, and rejects missing,
+profile is limited to 32 blocks, 64 selector path components, 4 MiB of selected
+blocks and 4 MiB plus framing allowance for the input CAR. It rejects missing,
 altered, excess or semantically invalid blocks. This is not yet an HTTP IPQ
 endpoint, a completeness proof for arbitrary queries, a cross-tick trust
 cache, or synchronization of mutable refs.

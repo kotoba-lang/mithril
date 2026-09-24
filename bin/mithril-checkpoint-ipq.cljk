@@ -41,6 +41,8 @@
           (refuse! :invalid-arguments))
         (absolute! archive)
         (when-not (.existsSync fs archive) (refuse! :missing-car))
+        (when (> (.-size (.statSync fs archive)) checkpoint-ipq/max-car-bytes)
+          (refuse! :car-over-limit))
         (let [result (checkpoint-ipq/verify-history-car!
                       (schema) root (.readFileSync fs archive))]
           (println (.stringify js/JSON

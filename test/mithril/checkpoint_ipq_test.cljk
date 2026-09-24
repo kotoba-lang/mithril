@@ -89,5 +89,12 @@
         (is (= :history-over-ipq-limit
                (reason #(with-redefs [checkpoint-ipld/verify-history-nodes!
                                       (fn [& _] {:blocks 33})]
-                          (checkpoint-ipq/export-history! store checked-schema head))))))
+                          (checkpoint-ipq/export-history! store checked-schema head)))))
+        (is (= :invalid-car-bytes
+               (reason #(checkpoint-ipq/verify-history-car!
+                         checked-schema head "not bytes"))))
+        (is (= :car-over-limit
+               (reason #(checkpoint-ipq/verify-history-car!
+                         checked-schema head
+                         (js/Uint8Array. (inc checkpoint-ipq/max-car-bytes)))))))
       (finally (.rmSync fs directory #js {:recursive true :force true})))))

@@ -20,6 +20,8 @@
   ;; history needs up to 62 selector path components, not 32.
   {:max-blocks 32 :max-bytes 4194304 :max-depth 64 :max-matches 32})
 
+(def max-car-bytes (+ (:max-bytes limits) 65536))
+
 (defn- refuse! [reason]
   (throw (ex-info "Mithril checkpoint CAR refused"
                   {:mithril/error :mithril.checkpoint-ipq/refused
@@ -39,14 +41,20 @@
           actual (set (map :cid (:blocks selected)))]
       (when-not (= expected actual)
         (refuse! :selector-incomplete-history))
-      {:root head :blocks (:blocks history)
-       :bytes (get-in selected [:car :bytes])})))
+      (let [bytes (get-in selected [:car :bytes])]
+        (when (> (.-length bytes) max-car-bytes)
+          (refuse! :car-over-limit))
+        {:root head :blocks (:blocks history) :bytes bytes}))))
 
 (defn verify-history-car!
   "Replay a CAR against the caller's root, then rerun Mithril's complete
   ontology, SHACL, graph-digest and causal-history verification using only
   replayed bytes. No filesystem or archive-declared root is trusted."
   [schema expected-root car-bytes]
+  (when-not (instance? js/Uint8Array car-bytes)
+    (refuse! :invalid-car-bytes))
+  (when (> (.-length car-bytes) max-car-bytes)
+    (refuse! :car-over-limit))
   (let [replayed (trustless/verify-selection-car
                   car-bytes expected-root history-selector limits)
         loaded (:loaded replayed)]
