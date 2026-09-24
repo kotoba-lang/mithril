@@ -111,8 +111,14 @@
                                              :source/verified)
             car-bytes (:bytes (checkpoint-ipq/export-history!
                                source checked-schema source-head))
-            imported (checkpoint-ipq/import-history!
-                      target checked-schema "received" source-head car-bytes)
+            semantic-checks (atom 0)
+            semantic-check checkpoint-ipld/verify-history-nodes!
+            imported (with-redefs [checkpoint-ipld/verify-history-nodes!
+                                   (fn [& args]
+                                     (swap! semantic-checks inc)
+                                     (apply semantic-check args))]
+                       (checkpoint-ipq/import-history!
+                        target checked-schema "received" source-head car-bytes))
             _ (local/fork-ref! target "received" "left")
             _ (local/fork-ref! target "received" "right")
             left (local/advance-fact! target checked-schema "left"
@@ -122,6 +128,7 @@
             merged (local/merge-refs! target checked-schema
                                       "received" "left" "right" "merged")]
         (is (= source-head (:root imported)))
+        (is (= 1 @semantic-checks))
         (is (= source-head (local/read-ref target "received")))
         (is (.equals (local/get-block source source-head)
                      (local/get-block target source-head)))
@@ -134,6 +141,64 @@
         (is (= :ipld/car-root-mismatch
                (reason #(checkpoint-ipq/import-history!
                          target checked-schema "invalid" left car-bytes))))
+        (is (false? (local/ref-exists? target "invalid"))))
+      (finally
+        (.rmSync fs source-dir #js {:recursive true :force true})
+        (.rmSync fs target-dir #js {:recursive true :force true})))))
+
+(deftest import-refuses-disk-block-changed-after-car-verification
+  (let [source-dir (.mkdtempSync fs (.join path (.tmpdir os) "mithril-ipq-proof-source-"))
+        target-dir (.mkdtempSync fs (.join path (.tmpdir os) "mithril-ipq-proof-target-"))]
+    (try
+      (let [checked-schema (schema)
+            source (local/open! source-dir)
+            target (local/open! target-dir)
+            head (local/import-state! source checked-schema "source" (initial-state))
+            car-bytes (:bytes (checkpoint-ipq/export-history!
+                               source checked-schema head))
+            put-block! local/put-block!
+            changed? (atom false)]
+        (is (= :import-block-mismatch
+               (reason #(with-redefs [local/put-block!
+                                      (fn [store cid bytes]
+                                        (let [result (put-block! store cid bytes)]
+                                          (when (compare-and-set! changed? false true)
+                                            (let [tampered (.from js/Buffer bytes)]
+                                              (aset tampered 0 (bit-xor 1 (aget tampered 0)))
+                                              (.writeFileSync fs
+                                                              (.join path target-dir "blocks" cid)
+                                                              tampered)))
+                                          result))]
+                          (checkpoint-ipq/import-history!
+                           target checked-schema "invalid" head car-bytes)))))
+        (is @changed?)
+        (is (false? (local/ref-exists? target "invalid"))))
+      (finally
+        (.rmSync fs source-dir #js {:recursive true :force true})
+        (.rmSync fs target-dir #js {:recursive true :force true})))))
+
+(deftest import-refuses-ontology-contract-change-before-publication
+  (let [source-dir (.mkdtempSync fs (.join path (.tmpdir os) "mithril-ipq-ontology-source-"))
+        target-dir (.mkdtempSync fs (.join path (.tmpdir os) "mithril-ipq-ontology-target-"))]
+    (try
+      (let [checked-schema (schema)
+            source (local/open! source-dir)
+            target (local/open! target-dir)
+            head (local/import-state! source checked-schema "source" (initial-state))
+            car-bytes (:bytes (checkpoint-ipq/export-history!
+                               source checked-schema head))
+            source-contract checkpoint-ipld/ontology-source-contract
+            calls (atom 0)]
+        (is (= :ontology-contract-changed
+               (reason #(with-redefs [checkpoint-ipld/ontology-source-contract
+                                      (fn []
+                                        (let [snapshot (source-contract)]
+                                          (if (= 1 (swap! calls inc))
+                                            snapshot
+                                            (assoc snapshot :state "changed"))))]
+                          (checkpoint-ipq/import-history!
+                           target checked-schema "invalid" head car-bytes)))))
+        (is (= 2 @calls))
         (is (false? (local/ref-exists? target "invalid"))))
       (finally
         (.rmSync fs source-dir #js {:recursive true :force true})
