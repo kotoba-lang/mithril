@@ -73,6 +73,55 @@
        :semantic-graph-digest
        (get-in history [:nodes expected-root :semantic-graph-digest])})))
 
+;; Reinitializing this module invalidates every prior proof token. In
+;; particular, a hot reload of verifier code must not retain old proofs.
+(def ^:private proof-caches (js/WeakMap.))
+
+(defn verification-cache
+  "One-entry, process-local cache for proofs over exact immutable CAR bytes.
+  It never certifies mutable local ref or block storage."
+  []
+  (let [token (js/Object.)]
+    (.set proof-caches token nil)
+    token))
+
+(defn- copy-proof [proof]
+  (update proof :loaded
+          (fn [blocks]
+            (mapv (fn [{:keys [bytes] :as block}]
+                    (assoc block :bytes (.from js/Buffer bytes)))
+                  blocks))))
+
+(defn verify-history-car-cached!
+  "Reuse a semantic proof only for byte-identical CAR input under the same
+  root, schema and local ontology sources. A hit still compares all CAR bytes;
+  importing the proof always rechecks the destination blocks under its lock."
+  [cache schema expected-root car-bytes]
+  (when-not (.has proof-caches cache)
+    (refuse! :invalid-verification-cache))
+  (when-not (instance? js/Uint8Array car-bytes)
+    (refuse! :invalid-car-bytes))
+  (when (> (.-length car-bytes) max-car-bytes)
+    (refuse! :car-over-limit))
+  (let [ontology-contract (checkpoint-ipld/ontology-source-contract)
+        {:keys [root checked-schema sources car proof]} (.get proof-caches cache)]
+    (if (and (= root expected-root)
+             (= checked-schema schema)
+             (= sources ontology-contract)
+             (some? car)
+             (.equals car car-bytes))
+      (copy-proof proof)
+      (let [checked (verify-history-car! schema expected-root car-bytes)]
+        (when-not (= ontology-contract
+                     (checkpoint-ipld/ontology-source-contract))
+          (refuse! :ontology-contract-changed))
+        (.set proof-caches cache {:root expected-root
+                                 :checked-schema schema
+                                 :sources ontology-contract
+                                 :car (.from js/Buffer car-bytes)
+                                 :proof (copy-proof checked)})
+        checked))))
+
 (defn import-history!
   "Verify a CAR against the caller's expected root, persist only its reached
   CID-checked blocks, then compare every stored byte with the CAR-verified
@@ -80,16 +129,20 @@
   reused within this call; later verifications still re-read the store.
   An existing name is never changed. Partial block writes
   before a failure are harmless immutable data with no published ref."
-  [store schema name expected-root car-bytes]
-  (when (local/ref-exists? store name) (refuse! :ref-exists))
-  (let [ontology-contract (checkpoint-ipld/ontology-source-contract)
-        {:keys [loaded] :as checked}
-        (verify-history-car! schema expected-root car-bytes)]
-    (doseq [{:keys [cid bytes]} loaded]
-      (local/put-block! store cid bytes))
-    (local/create-byte-matched-ref!
-     store name expected-root loaded ontology-contract)
-    (dissoc checked :loaded)))
+  ([store schema name expected-root car-bytes]
+   (import-history! store schema name expected-root car-bytes nil))
+  ([store schema name expected-root car-bytes cache]
+   (when (local/ref-exists? store name) (refuse! :ref-exists))
+   (let [ontology-contract (checkpoint-ipld/ontology-source-contract)
+         {:keys [loaded] :as checked}
+         (if cache
+           (verify-history-car-cached! cache schema expected-root car-bytes)
+           (verify-history-car! schema expected-root car-bytes))]
+     (doseq [{:keys [cid bytes]} loaded]
+       (local/put-block! store cid bytes))
+     (local/create-byte-matched-ref!
+      store name expected-root loaded ontology-contract)
+     (dissoc checked :loaded))))
 
 (defn selection-url
   "Build an IPQ/1 request from an explicit endpoint origin and expected head.
@@ -172,8 +225,10 @@
   "Fetch by caller-supplied head, replay the CAR, check ontology and causality,
   then publish a local ref only through import-history!'s guarded path."
   ([store schema name origin expected-root]
-   (fetch-import-history! js/fetch store schema name origin expected-root))
+   (fetch-import-history! js/fetch store schema name origin expected-root nil))
   ([fetch-fn store schema name origin expected-root]
+   (fetch-import-history! fetch-fn store schema name origin expected-root nil))
+  ([fetch-fn store schema name origin expected-root cache]
    (-> (fetch-history-car! fetch-fn origin expected-root)
        (.then (fn [car-bytes]
-                (import-history! store schema name expected-root car-bytes))))))
+                (import-history! store schema name expected-root car-bytes cache))))))

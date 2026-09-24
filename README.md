@@ -405,11 +405,52 @@ assertions. A combined latest-base run executed 27 tests / 144 assertions with
 2 failures in the agent-loop benchmark and Hermes audit expectations; both
 failures were reproduced on the unmodified pre-IPQ main. A separate
 latest-base IPQ-only run was stopped after more than 16 minutes without a
-result, so it is **not** counted as green. The next verification is an IPQ-only
-run on current main, followed by a cold/warm comparison that counts block
-reads and hashes as well as wall time. A cross-invocation cache remains
-unimplemented; it must bind root CID, ontology/schema/verifier versions and
-the integrity of the backing bytes before skipping any verification.
+result, so it is **not** counted as green. A subsequent IPQ-only run on
+current main passed 6 tests / 45 assertions with no failures. The cold/warm
+comparison below covers one local block; a multi-block comparison with block
+read/hash counts remains open. A durable cross-process cache remains
+unimplemented; it would need a versioned trust anchor and protection against
+changed backing bytes.
+
+An opt-in, process-local **exact-CAR proof cache** now supplies that bounded
+reuse for repeated imports. A cache token is opaque and holds one copied CAR
+and its copied semantic proof. A hit requires the same expected root, equal
+schema and ontology source contract, and byte-for-byte equality of the entire
+CAR; a module reload invalidates tokens. Every destination still checks its
+stored block bytes under the ref lock before publishing a new ref, and later
+`verify-ref!` calls independently rehash and rerun ontology validation. The
+default import path remains uncached. `fetch-import-history!` accepts an
+explicit cache only through its seven-argument form; IPQ HTTP response guards
+run on every fetch. This is **not** a durable trust cache, a mutable-ref cache,
+or an excuse to skip verification of changed disk bytes. A service that hot
+reloads any verifier dependency must discard its token and create a new cache.
+
+`bin/mithril-checkpoint-ipq-cache-bench.cljk` makes a one-block local fixture
+with no arguments, or accepts an absolute source store and ref. It imports
+the same CAR into two fresh stores and independently reverifies both. Three
+local one-block runs on 2026-09-24 used a 94,357-byte CAR and measured cold
+import 5,978/13,124/7,727 ms versus exact-byte warm import 3/2/3 ms,
+respectively, with one semantic history check during each pair of imports.
+Those wall times are load-sensitive and omit fixture construction, CAR export
+and independent reverify. Those one-block timings alone do not establish
+multi-block, network, or fleet-wide speedup.
+
+The same command against the isolated 15-block, 1,176,213-byte history at
+`/private/tmp/mithril-ipq-http-15block-20260924` completed one local pair:
+84,071 ms cold import versus 30 ms exact-byte warm import, one semantic
+history check during the pair, and independent successful reverify of both
+target stores. This is a single load-sensitive sample, not a p95 or network
+measurement; CAR export and the two reverifications are outside those import
+timings. The warm path still performs full CAR byte comparison and destination
+block byte matching before publishing a ref.
+
+Run that pair with:
+
+```sh
+kbb --backend sci --classpath "$(kbb -Spath)" \
+  bin/mithril-checkpoint-ipq-cache-bench.cljk \
+  /absolute/source-checkpoint-store source-ref
+```
 
 ```sh
 kbb --backend sci bin/mithril-checkpoint-ipq.cljk export \
