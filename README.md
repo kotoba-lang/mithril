@@ -305,6 +305,36 @@ body while HEAD remained unchanged. This proves that bounded code proposal
 can use Mithril input/output in this one local case; it does **not** establish
 scheduler-originated real-model execution, arbitrary coding, Amu compiler
 parity, fleet migration, or full Hermes tool/delivery equivalence.
+
+A separate isolated v7 Hermes `source=builtin` job on 2026-09-24 completed
+the full linear BPMN coding path: Jev selected `workspace-inspect`, then the
+checked one-way transitions proposed and applied an allowlisted `.mith` patch,
+ran Mithril `compile-web`, asserted `GET /hello` returned HTTP 200 with the
+changed body, recorded Git status and stopped. Seven scheduler executions
+completed with zero failed effects and zero direct executions. Independent
+primary verification matched all receipts, 15 causal blocks and the EDN
+projection at final CID
+`bafyreica3hxne32nk44cadv4ueke4yuiuwvkplq45pabwvxikiadpbl4we`.
+The one Jev request reported 789 input and 36 output tokens, cost
+$0.000033138. This canary used a fixed reviewed proposer, not a model-authored
+patch, and the `amu/compile` effect was bound to Mithril `compile-web`, not
+the Amu compiler. An initial isolated job refused a missing artifact directory
+before any effect; the successful job used a new ID rather than replaying the
+failed attempt. Both jobs were paused. This establishes one scheduler-driven
+closed loop, not fleet-wide Hermes parity or a speed advantage: its seven
+occurrences took 51.9 to 147.5 seconds each.
+
+The primary scheduler verifier now reuses its fully checked CID nodes within
+one verification call. It still rehashes every reachable block and reruns
+Mithril/OWL/SPARQL/SHACL validation on each new invocation; the reuse only
+removes redundant semantic decoding when matching the same blocks to Hermes
+receipts. On one 15-block isolated builtin history, the same verifier command
+returned identical results in 76.89 seconds before and 37.16 seconds after
+this change (2026-09-24, one local measurement each, approximately 2.07x).
+Tests assert one block read per invocation and rejection when an ancestor
+returns bytes for another CID on a later invocation. This is not a persistent
+trust cache or an IPQ completeness proof. A cross-tick cache would require an
+explicit versioned trust anchor, ref-head binding and tamper/upgrade tests.
 Before execution it rejects a prior unreceipted attempt, an in-flight effect,
 or a terminal state. A lost host receipt is held for explicit reconciliation,
 not retried by a later cron tick. This is a bounded scheduler execution
