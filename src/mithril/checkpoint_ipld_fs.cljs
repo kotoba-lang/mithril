@@ -4,10 +4,23 @@
   claim distributed CAS, publication, or crash-durable fsync semantics."
   (:require [clojure.string :as str]
             [ipld.core :as ipld]
-            [mithril.checkpoint-ipld :as checkpoint-ipld]))
+            [mithril.checkpoint-ipld :as checkpoint-ipld]
+            [multiformats.core :as multiformats]))
 
 (def fs (js/require "node:fs"))
 (def path (js/require "node:path"))
+(def crypto (js/require "node:crypto"))
+
+;; This adapter is Node-only. Prove the host digest against the portable
+;; implementation before using it for either CID creation or verification.
+(defonce ^:private installed-sha256
+  (multiformats/install-sha256!
+   (fn [bytes]
+     (-> (.createHash crypto "sha256")
+         (.update (if (instance? js/Uint8Array bytes)
+                    bytes
+                    (js/Uint8Array.from (into-array bytes))))
+         (.digest)))))
 
 (defn- refuse! [reason]
   (throw (ex-info "Mithril local IPLD store refused"
