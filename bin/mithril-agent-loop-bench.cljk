@@ -197,6 +197,9 @@
                     (remove str/blank?)
                     (map #(js->clj (.parse js/JSON %) :keywordize-keys true)) vec)
                [])
+        final-state (when (.existsSync fs state-file)
+                      (try (reader/read-string (.readFileSync fs state-file "utf8"))
+                           (catch :default _ nil)))
         decisions (filter #(and (= "model-observed" (:status %))
                                 (map? (get-in % [:model :usage]))) rows)
         usages (map #(get-in % [:model :usage]) decisions)
@@ -224,6 +227,7 @@
              :cost-usd (sum-usage :cost)}
      :wall-ms elapsed :turns (count decisions) :effect-count completed-effects
      :ontology-digest ontology
+     :profile-digest (:profile-digest final-state)
      :runner {:run-status (get-in result [:parsed :run-status])
               :tick-exit (.-status (:process result))
               :model-calls (count decisions)}}))
