@@ -188,6 +188,24 @@
       (checkpoint-ipld/verify-history! #(get-block store %) schema head)
       (create-ref-under-lock! store name head))))
 
+(defn create-byte-matched-ref!
+  "Publish a CAR-verified history without repeating its semantic verifier.
+  The caller must have checked every supplied CID/byte pair and the complete
+  history under the active schema. Under the store lock, compare every stored
+  block byte-for-byte with that proof before publishing a new ref. Later
+  verify-ref! calls still read and verify the current disk contents."
+  [store name head checked-blocks]
+  (with-write-lock store
+    (fn []
+      (when (.existsSync fs (ref-path store name)) (refuse! :ref-exists))
+      (when-not (some #(= head (:cid %)) checked-blocks)
+        (refuse! :missing-head-block))
+      (doseq [{:keys [cid bytes]} checked-blocks]
+        (let [stored (get-block store cid)]
+          (when-not (and stored (.equals stored bytes))
+            (refuse! :import-block-mismatch))))
+      (create-ref-under-lock! store name head))))
+
 (defn upgrade-ref-v7!
   "Re-encode a verified causal history as v7 under a new ref. The source ref
   remains untouched; every parent transition is checked again before publish."

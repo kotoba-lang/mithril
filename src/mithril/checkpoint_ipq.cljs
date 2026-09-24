@@ -73,8 +73,10 @@
 
 (defn import-history!
   "Verify a CAR against the caller's expected root, persist only its reached
-  CID-checked blocks, then publish a new ref after independently rechecking
-  the target store. An existing name is never changed. Partial block writes
+  CID-checked blocks, then compare every stored byte with the CAR-verified
+  bytes before publishing a new ref. The CAR's complete semantic proof is
+  reused within this call; later verifications still re-read the store.
+  An existing name is never changed. Partial block writes
   before a failure are harmless immutable data with no published ref."
   [store schema name expected-root car-bytes]
   (when (local/ref-exists? store name) (refuse! :ref-exists))
@@ -82,5 +84,5 @@
         (verify-history-car! schema expected-root car-bytes)]
     (doseq [{:keys [cid bytes]} loaded]
       (local/put-block! store cid bytes))
-    (local/create-verified-ref! store schema name expected-root)
+    (local/create-byte-matched-ref! store name expected-root loaded)
     (dissoc checked :loaded)))
