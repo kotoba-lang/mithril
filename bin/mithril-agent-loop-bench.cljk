@@ -201,8 +201,9 @@
                                 (map? (get-in % [:model :usage]))) rows)
         usages (map #(get-in % [:model :usage]) decisions)
         sum-usage (fn [key]
-                    (when (and (seq usages) (every? #(number? (get % key)) usages))
-                      (reduce + (map key usages))))
+                    (if (empty? usages) 0
+                        (when (every? #(number? (get % key)) usages)
+                          (reduce + (map key usages)))))
         status-row (first (filter #(= "git/status" (get-in % [:host :operation])) rows))
         host (when status-row (:host status-row))
         observed (when host (select-keys host [:clean? :modified-tracked :untracked]))
@@ -211,10 +212,11 @@
         completed-effects (count (filter #(and (= "completed" (:status %)) (:host %)) rows))
         terminal? (and (= "completed" (get-in result [:parsed :run-status]))
                        (= "completed" (:status (last (filter :host rows)))))
-        success? (and terminal? (map? observed) (= 1 (count model-ids)))]
+        success? (and terminal? (map? observed) (<= (count model-ids) 1))]
     {:run-id (:run-id run) :case-id (:case-id run) :lane :mithril
      :task-digest (:task-digest run) :requested-model (:requested-model run)
-     :model (first model-ids) :success? (boolean success?)
+     :model (or (first model-ids) "deterministic/ontology-bpmn")
+     :success? (boolean success?)
      :observed-outcome (or observed {:error :missing-git-status-effect})
      :usage {:input-tokens (sum-usage :input_tokens)
              :output-tokens (sum-usage :output_tokens)

@@ -2,6 +2,27 @@
   :id "https://mithril.fund/id/bot/hermes-readonly-canary"
   :goal "https://mithril.fund/id/goal/governed-coding-task"
   :ontology "3539fef6d1f26c012d4305a55a3782902ff8de47e56901e619ea0cde30ece918"
+  :process
+  (bpmn/process
+    :id "https://mithril.fund/id/bpmn/readonly-status/process"
+    :ontology "3539fef6d1f26c012d4305a55a3782902ff8de47e56901e619ea0cde30ece918"
+    :nodes
+    [(bpmn/start-event :id "https://mithril.fund/id/bpmn/readonly-status/start")
+     (bpmn/exclusive-gateway :id "https://mithril.fund/id/bpmn/readonly-status/g0")
+     (bpmn/service-task :id "https://mithril.fund/id/bpmn/readonly-status/inspect" :action "https://mithril.fund/id/action/workspace-inspect")
+     (bpmn/exclusive-gateway :id "https://mithril.fund/id/bpmn/readonly-status/g1")
+     (bpmn/service-task :id "https://mithril.fund/id/bpmn/readonly-status/status" :action "https://mithril.fund/id/action/git-status")
+     (bpmn/exclusive-gateway :id "https://mithril.fund/id/bpmn/readonly-status/g2")
+     (bpmn/service-task :id "https://mithril.fund/id/bpmn/readonly-status/stop" :action "https://mithril.fund/id/action/stop")
+     (bpmn/end-event :id "https://mithril.fund/id/bpmn/readonly-status/end")]
+    :flows
+    [(bpmn/sequence-flow :id "https://mithril.fund/id/bpmn/readonly-status/f0" :source "https://mithril.fund/id/bpmn/readonly-status/start" :target "https://mithril.fund/id/bpmn/readonly-status/g0" :condition "always")
+     (bpmn/sequence-flow :id "https://mithril.fund/id/bpmn/readonly-status/f1" :source "https://mithril.fund/id/bpmn/readonly-status/g0" :target "https://mithril.fund/id/bpmn/readonly-status/inspect" :condition "https://mithril.fund/id/action/workspace-inspect")
+     (bpmn/sequence-flow :id "https://mithril.fund/id/bpmn/readonly-status/f2" :source "https://mithril.fund/id/bpmn/readonly-status/inspect" :target "https://mithril.fund/id/bpmn/readonly-status/g1" :condition "always")
+     (bpmn/sequence-flow :id "https://mithril.fund/id/bpmn/readonly-status/f3" :source "https://mithril.fund/id/bpmn/readonly-status/g1" :target "https://mithril.fund/id/bpmn/readonly-status/status" :condition "https://mithril.fund/id/action/git-status")
+     (bpmn/sequence-flow :id "https://mithril.fund/id/bpmn/readonly-status/f4" :source "https://mithril.fund/id/bpmn/readonly-status/status" :target "https://mithril.fund/id/bpmn/readonly-status/g2" :condition "always")
+     (bpmn/sequence-flow :id "https://mithril.fund/id/bpmn/readonly-status/f5" :source "https://mithril.fund/id/bpmn/readonly-status/g2" :target "https://mithril.fund/id/bpmn/readonly-status/stop" :condition "https://mithril.fund/id/action/stop")
+     (bpmn/sequence-flow :id "https://mithril.fund/id/bpmn/readonly-status/f6" :source "https://mithril.fund/id/bpmn/readonly-status/stop" :target "https://mithril.fund/id/bpmn/readonly-status/end" :condition "always")])
   :policy
   (mithril/bot-policy
     :max-steps 3
