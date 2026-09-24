@@ -72,3 +72,12 @@
       (write-projection! state-path state)
       {:state state :stateCid id
        :semanticGraphDigest (:semantic-graph-digest saved)})))
+
+(defn decision-parent!
+  "Persist the exact state presented to a model before its proof is appended.
+  A resumed run renews its lease, so its decision state may differ from the
+  previously committed CID even when no effect has run yet."
+  [store schema state-path previous decision-state]
+  (if (= (:state previous) decision-state)
+    previous
+    (save! store schema state-path previous decision-state)))

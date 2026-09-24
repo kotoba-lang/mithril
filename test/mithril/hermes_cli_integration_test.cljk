@@ -124,6 +124,38 @@
               (is (.existsSync fs state-path))))))
       (finally (.rmSync fs dir #js {:recursive true :force true})))))
 
+(deftest primary-inflight-refusal-does-not-renew-the-cid-parent
+  (let [dir (.mkdtempSync fs "/tmp/mithril-primary-inflight-")
+        task {:id "inflight-cli" :workspace dir :goal "Inspect without replay"}
+        task-path (str dir "/task.json")
+        state-path (str dir "/state.edn")
+        store (local/open! (str dir "/ipld-checkpoints"))
+        schema (checkpoint/schema (.readFileSync fs checkpoint/ontology-path "utf8"))
+        artifact (bot/compile-text "examples/hermes-readonly-canary.mith"
+                                   (.readFileSync fs
+                                                    "examples/hermes-readonly-canary.mith"
+                                                    "utf8"))]
+    (try
+      (.writeFileSync fs task-path (.stringify js/JSON (clj->js task)) "utf8")
+      (let [initial (bot/start-run artifact task "inflight-cli" 1000)
+            requested (bot/request-effect
+                       initial {:action (get bot/action-by-label "workspace-inspect")
+                                :confidence 10000}
+                       #{:workspace/read} "inflight-cli" 1001)
+            before (ipld-session/save! store schema state-path nil (:state requested))
+            tick (.spawnSync cp "kbb"
+                            #js ["--backend" "sci" "bin/mithril-hermes.cljk" "tick"
+                                 "examples/hermes-readonly-canary.mith" task-path state-path
+                                 "inflight-cli" "workspace/read,git/status,agent/stop"
+                                 "ipld-execute"]
+                            #js {:cwd (.cwd js/process) :encoding "utf8"})
+            after (ipld-session/load! store schema state-path)]
+        (is (= 1 (.-status tick)))
+        (is (.includes (.-stdout tick) "REFUSE\teffect-in-flight\t"))
+        (is (= (:stateCid before) (:stateCid after)))
+        (is (= 1 (:blocks after))))
+      (finally (.rmSync fs dir #js {:recursive true :force true})))))
+
 (deftest primary-reconcile-consumes-an-existing-proposal-without-proposing-again
   (let [dir (.mkdtempSync fs "/tmp/mithril-primary-reconcile-")
         workspace (str dir "/workspace")

@@ -494,6 +494,29 @@ verified with the same final executable state and domain graph digest; the
 v7 output dataset contained one Jev decision and 13 RDF triples. This is
 local migration evidence, not a live-fleet cutover or distributed Unison sync.
 
+A separate direct `ipld-execute` v7 run exposed a continuation bug: after the
+first live Jev-selected `workspace/read`, resuming renewed the lease but used
+the previous CID as the parent of the next Jev proof. Parent replay correctly
+refused `invalid-decision-record` without advancing the effect. The adapter now
+commits that renewed decision state before asking Jev, so the proof refers to
+its exact CID parent. The same isolated run then completed two `git/status`
+effects. When its three-step budget was exhausted, it committed an effect-free
+`held` state; re-delivery returned `idempotent-terminal` with the same CID.
+Independent whole-history verification accepted all 12 v7 blocks and the
+decision-output RDF digest; its packed Dataset held 39 triples for three
+Jev decisions. This is direct CLI evidence, not Hermes
+`source=builtin` scheduler evidence or a completed coding workflow.
+
+The three successful model decisions recorded 2,441 input tokens, 112 output
+tokens and $0.000102522 in OpenRouter usage. Four diagnostic retries before
+the fix reached Jev but failed during proof validation and had no audit row,
+so total experimental cost is **unmeasured**, not the recorded subtotal. New
+calls append a `model-observed` audit row with request ID and usage immediately
+after the provider response, before proof construction or an effect. A fresh
+live v7 run verified that row precedes `effect-requested` and `completed` for
+the same request ID (844 input tokens, 44 output tokens, $0.000035448).
+This still does not establish a latency or cost advantage over Hermes.
+
 The verified seven-effect v5 Hermes final state was read under its historical
 CID and emitted as an in-memory v6 block: exact state equality, 93 domain
 quads, seven SPARQL receipt rows, eight fact rows, and a 109,082-byte block

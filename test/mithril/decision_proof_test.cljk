@@ -101,6 +101,48 @@
                                       :proof :request-id] "tampered")
                      [base]))))))
 
+(deftest resumed-lease-is-the-cid-parent-of-the-next-jev-proof
+  (let [directory (.mkdtempSync fs (.join path (.tmpdir os) "mithril-jev-resume-"))]
+    (try
+      (let [{:keys [state model-result]} (fixture)
+            state-path (.join path directory "run.edn")
+            store (local/open! (.join path directory "blocks"))
+            base (session/save! store schema state-path nil state)
+            resumed (:state (bot/resume-or-start artifact (:task state) state
+                                                 "proof-worker" 2000))
+            input (decision-input/build resumed (bot/available-actions resumed))
+            audit {:request-id "gen-dec-resumed-proof"
+                   :model (:model model-result)
+                   :decision-state-digest (:form-digest input)
+                   :domain-graph-digest (:graph-digest input)
+                   :domain-ontology-digest (:ontology-digest input)}
+            admitted (bot/admit-decision resumed model-result "proof-worker" 2002)
+            requested (proof/request-effect resumed admitted model-result audit
+                                            #{:workspace/read} "proof-worker" 2002 2003)]
+        (is (not= state resumed) "resuming renews the lease")
+        (is (= :invalid-decision-record
+               (reason #(session/save! store schema state-path base
+                                       (:state requested)))))
+        (let [parent (session/decision-parent! store schema state-path base resumed)
+              request (session/save! store schema state-path parent (:state requested))
+              applied (bot/apply-receipt
+                       (:state requested)
+                       {:format bot/receipt-format
+                        :effect-id (get-in requested [:effect :id])
+                        :status :completed
+                        :output-digest (execution/digest :observed)}
+                       "proof-worker" 2004)
+              result (session/save! store schema state-path request applied)]
+          (is (= (:stateCid parent)
+                 (:stateCid (session/decision-parent! store schema state-path
+                                                      parent resumed))))
+          (is (= [(:stateCid parent)]
+                 (:parents (ipld/read! #(local/get-block store %) schema
+                                        (:stateCid request)))))
+          (is (= 4 (:blocks (ipld/verify-history! #(local/get-block store %)
+                                                  schema (:stateCid result)))))))
+      (finally (.rmSync fs directory #js {:recursive true :force true})))))
+
 (deftest decision-output-is-declared-owl-shacl-and-rdf
   (let [{:keys [state model-result audit admitted]} (fixture)
         requested (proof/request-effect state admitted model-result audit

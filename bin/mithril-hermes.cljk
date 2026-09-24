@@ -222,9 +222,14 @@
                 :model {:kind :deterministic/ontology-workflow}}
      :audit {:source "deterministic-ontology-workflow"}}))
 
-(defn- decide! [state owner now coding? decision-mode]
+(defn- decide! [state owner now coding? decision-mode observe-model!]
   (let [actions (bot/available-actions state)]
     (cond
+      (>= (:step state) (get-in state [:policy :max-steps]))
+      (js/Promise.resolve
+       {:held (bot/hold-step-budget state owner now)
+        :reason :mithril.bot/step-budget})
+
       (empty? actions)
       (js/Promise.reject
        (ex-info "no action is available" {:mithril/error :mithril.hermes/no-action}))
@@ -240,13 +245,22 @@
       (let [plan (bot/prepare-request state owner (inc now))]
         (-> (jev/decide! plan (read-key))
             (.then (fn [{:keys [model-result audit]}]
+                     (observe-model! audit)
                      (assoc (bot/resolve-decision state model-result owner (+ now 2))
                             :audit audit :model-result model-result))))))))
 
 (defn- refuse! [error]
-  (println (str "REFUSE\t" (or (some-> error ex-data :mithril/error name) "hermes-error")
-                "\t" (.-message error)))
-  (set! (.-exitCode js/process) 1))
+  (let [data (loop [current error depth 0]
+               (when (and current (< depth 4))
+                 (let [value (or (ex-data current) (.-data current))]
+                   (if (and (map? value) (:mithril/error value))
+                     value
+                     (recur (.-cause current) (inc depth))))))]
+    (println (str "REFUSE\t" (or (some-> data :mithril/error name) "hermes-error")
+                  "\t" (.-message error)
+                  (when-let [reason (:reason data)]
+                    (str "\treason=" (name reason)))))
+    (set! (.-exitCode js/process) 1)))
 
 (defn- migrate-checkpoint! [profile-path task-path state-path owner]
   (let [lock (try (acquire-lock! state-path) (catch :default error (refuse! error) nil))]
@@ -486,19 +500,20 @@
                       (load-or-start artifact task state-path owner now))
                 state (:state run)
                 grants (set (map keyword (remove str/blank? (str/split grants-csv #","))))
+                _ (when (and (not= :terminal (:disposition run)) (:awaiting state))
+                    (throw (ex-info "in-flight effect requires explicit reconciliation"
+                                    {:mithril/error :mithril.bot/effect-in-flight
+                                     :effect-id (get-in state [:awaiting :id])})))
                 save! (fn [prior state]
                         (cond semantic? (semantic-save! state-path schema prior state)
                               primary? (ipld-session/save! store schema state-path prior state)
                               :else (do (write-state! state-path state) nil)))
                 decision-baseline
-                (when (and primary? (nil? previous)
+                (when (and primary?
                            (or (nil? tool-profile) (= "jev" decision-mode))
                            (> (count (bot/available-actions state)) 1))
-                  (save! previous state))]
-            (when (and (not= :terminal (:disposition run)) (:awaiting state))
-              (throw (ex-info "in-flight effect requires explicit reconciliation"
-                              {:mithril/error :mithril.bot/effect-in-flight
-                               :effect-id (get-in state [:awaiting :id])})))
+                  (ipld-session/decision-parent! store schema state-path
+                                                 previous state))]
             (if (= :terminal (:disposition run))
               (do
                 (append-audit! state-path {:at (.toISOString (js/Date.))
@@ -513,7 +528,17 @@
                                    :run-status (:status state)}
                             primary? (assoc :state-cid (:stateCid previous)))))
                 (release-lock! lock))
-              (-> (decide! state owner now (boolean tool-profile) decision-mode)
+              (-> (decide! state owner now (boolean tool-profile) decision-mode
+                           (fn [audit]
+                             (append-audit! state-path
+                                            {:at (.toISOString (js/Date.))
+                                             :mode mode :status :model-observed
+                                             :run-id (:run-id state) :step (:step state)
+                                             :model (select-keys audit
+                                                                 [:request-id :model :usage
+                                                                  :decision-state-digest
+                                                                  :domain-graph-digest
+                                                                  :domain-ontology-digest])})))
                 (.then
                  (fn [{:keys [admitted held reason audit model-result]}]
                    (if held
