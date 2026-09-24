@@ -1223,6 +1223,43 @@ The compiler output is ordinary deterministic build output. It is not source
 text proposed by the agent. The agent receives a Mithril-form request and the
 host executes each admitted transition mechanically.
 
+## Paired Hermes / Mithril efficiency index
+
+`bin/mithril-efficiency-index.cljk` compares run receipts from the
+ordinary Hermes loop and the Mithril-governed loop. Each case must use the same
+task digest and pinned model, and must produce the same canonical outcome
+digest with `:success? true` on both lanes before resource indices are
+published. A mismatch is a quality result; the tool withholds efficiency
+indices for that cohort.
+
+Index definition: **100 is the Hermes baseline; a lower value means the
+Mithril loop used fewer resources for an exactly equivalent result.** The
+report includes total input+output tokens, model-reported reasoning tokens,
+provider cost, wall time, agent turns, and external effects. Reasoning-token
+and cost indices remain unmeasured when either lane's provider does not report
+them. Receipts also bind the Mithril ontology digest so the measured loop can be
+reproduced against the same admitted semantic policy.
+
+Mithril audit usage can be summarized with the `usage` subcommand. It counts
+TypeSafe Jev and typed-proposer calls, marks an `llm/propose-patch` with no usage
+receipt as unmeasured, and explicitly excludes outer Hermes scheduler/session
+usage until that provider usage is attached to the same run receipt.
+
+The input is EDN containing exactly two receipts per case, one `:hermes` and
+one `:mithril`. Receipts carry `:case-id`, SHA-256 `:task-digest` and
+`:outcome-digest`, exact `:model`, `:usage` counts, `:wall-ms`, `:turns`, and
+`:effect-count`; Mithril receipts also require `:ontology-digest`.
+
+```sh
+kbb --backend sci bin/mithril-efficiency-index.cljk paired-runs.edn report.edn
+kbb --backend sci bin/mithril-efficiency-index.cljk usage path/to/run.edn.audit.jsonl
+```
+
+This index measures resource use only after exact result parity. Production
+qualification still needs a predeclared multi-case corpus, repeated paired
+runs, successful test/receipt validation, and live scheduler-originated
+receipts; one local run is not a fleet reliability claim.
+
 ## Source contract
 
 - `.mith` and `.mithril` are aliases. The suffix and surface syntax never enter

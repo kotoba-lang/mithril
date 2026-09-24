@@ -1,0 +1,31 @@
+#!/usr/bin/env kbb
+(ns mithril.efficiency-index-cli
+  (:require [cljs.reader :as reader]
+            [mithril.efficiency :as efficiency]))
+
+(def fs (js/require "node:fs"))
+
+(defn- usage! []
+  (binding [*print-fn* #(.error js/console %)]
+    (println "usage: mithril-efficiency-index <paired-runs.edn> [output.edn]")
+    (println "       mithril-efficiency-index usage <mithril-run.audit.jsonl>"))
+  (js/process.exit 2))
+
+(let [args (if (seq *command-line-args*)
+             *command-line-args*
+             (subvec (vec (js->clj (.-argv js/process))) 2))]
+  (if (= "usage" (first args))
+    (let [[_ audit-file & extra] args]
+      (when (or (nil? audit-file) (seq extra)) (usage!))
+      (let [rows (->> (.split (.readFileSync fs audit-file "utf8") "\n")
+                      (remove empty?)
+                      (mapv #(js->clj (js/JSON.parse %) :keywordize-keys true)))]
+        (println (pr-str (efficiency/usage-from-audit rows)))))
+    (let [[input output & extra] args]
+      (when (or (nil? input) (seq extra)) (usage!))
+      (let [runs (reader/read-string (.readFileSync fs input "utf8"))
+            report (efficiency/compare-runs runs)
+            encoded (str (pr-str report) "\n")]
+        (if output
+          (.writeFileSync fs output encoded "utf8")
+          (println encoded))))))
