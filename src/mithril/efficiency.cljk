@@ -184,7 +184,7 @@
                                          :cost-usd (get-in h [:usage :cost-usd])
                                          :wall-ms (:wall-ms h)
                                          :agent-turns (:turns h)
-                                         :effects (:effect-count h)))) pairs)
+                                         :effects (:effect-count h)))) equivalent)
                               mithril-totals
                               (map (fn [pair]
                                      (let [m (get-in pair [:raw :mithril])]
@@ -197,7 +197,7 @@
                                          :cost-usd (get-in m [:usage :cost-usd])
                                          :wall-ms (:wall-ms m)
                                          :agent-turns (:turns m)
-                                         :effects (:effect-count m)))) pairs)
+                                         :effects (:effect-count m)))) equivalent)
                               h (when (every? number? hermes-totals) (reduce + hermes-totals))
                               m (when (every? number? mithril-totals) (reduce + mithril-totals))]
                           (ratio-index m h)))))]
@@ -213,7 +213,8 @@
                              (/ (count equivalent) (count comparable)))
      :exact-outcome-parity (when (seq comparable)
                              (/ (count equivalent) (count comparable)))
-     :indices (when (seq equivalent)
+     :indices (when (and (seq pairs)
+                         (= (count equivalent) (count pairs)))
                 {:tokens (aggregate :tokens)
                  :reasoning-tokens (aggregate :reasoning-tokens)
                  :cost-usd (aggregate :cost-usd)

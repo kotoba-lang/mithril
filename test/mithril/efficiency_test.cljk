@@ -35,6 +35,25 @@
     (is (nil? (:indices report)))
     (is (false? (get-in report [:pairs 0 :outcome-equivalent?])))))
 
+(deftest partial-parity-never-publishes-a-cohort-efficiency-index
+  (let [first-pair [(run-receipt :hermes {:input-tokens 100 :output-tokens 10})
+                    (run-receipt :mithril {:input-tokens 20 :output-tokens 5})]
+        second-pair [(assoc (run-receipt :hermes
+                                                 {:input-tokens 1000 :output-tokens 10})
+                            :case-id "mismatch")
+                     (assoc (run-receipt :mithril
+                                                 {:input-tokens 1 :output-tokens 1})
+                            :case-id "mismatch"
+                            :outcome-digest (str "sha256:" (apply str (repeat 64 "d"))))]
+        report (efficiency/compare-runs (vec (concat first-pair second-pair)))
+        by-case (into {} (map (juxt :case-id identity) (:pairs report)))]
+    (is (= (/ 1 2) (:exact-outcome-parity report)))
+    (is (= 1 (:equivalent-cases report)))
+    (is (nil? (:indices report))
+        "a failed result cannot contaminate or justify the cohort index")
+    (is (number? (get-in by-case ["same-text-task-01" :indices :tokens])))
+    (is (nil? (get-in by-case ["mismatch" :indices])))))
+
 (deftest failed-result-cannot-earn-resource-efficiency
   (let [report (efficiency/compare-runs
                 [(run-receipt :hermes {:input-tokens 100 :output-tokens 10})
