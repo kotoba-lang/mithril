@@ -179,6 +179,82 @@
         (.rmSync fs source-dir #js {:recursive true :force true})
         (.rmSync fs target-dir #js {:recursive true :force true})))))
 
+(deftest exact-car-proof-cache-reuses-semantics-but-not-mutable-bytes
+  (let [source-dir (.mkdtempSync fs (.join path (.tmpdir os) "mithril-ipq-cache-source-"))
+        first-dir (.mkdtempSync fs (.join path (.tmpdir os) "mithril-ipq-cache-first-"))
+        second-dir (.mkdtempSync fs (.join path (.tmpdir os) "mithril-ipq-cache-second-"))
+        rejected-dir (.mkdtempSync fs (.join path (.tmpdir os) "mithril-ipq-cache-rejected-"))]
+    (try
+      (let [checked-schema (schema)
+            source (local/open! source-dir)
+            first-target (local/open! first-dir)
+            second-target (local/open! second-dir)
+            rejected-target (local/open! rejected-dir)
+            head (local/import-state! source checked-schema "source" (initial-state))
+            car-bytes (:bytes (checkpoint-ipq/export-history!
+                               source checked-schema head))
+            cache (checkpoint-ipq/verification-cache)
+            semantic-checks (atom 0)
+            semantic-check checkpoint-ipld/verify-history-nodes!]
+        (with-redefs [checkpoint-ipld/verify-history-nodes!
+                      (fn [& args]
+                        (swap! semantic-checks inc)
+                        (apply semantic-check args))]
+          (let [first-proof (checkpoint-ipq/verify-history-car-cached!
+                             cache checked-schema head car-bytes)
+                original-byte (aget (get-in first-proof [:loaded 0 :bytes]) 0)]
+            (aset (get-in first-proof [:loaded 0 :bytes]) 0
+                  (bit-xor original-byte 1))
+            (is (= original-byte
+                   (aget (get-in (checkpoint-ipq/verify-history-car-cached!
+                                  cache checked-schema head car-bytes)
+                                 [:loaded 0 :bytes]) 0))))
+          (is (= head (:root (checkpoint-ipq/import-history!
+                             first-target checked-schema "received" head car-bytes cache))))
+          (is (= head (:root (checkpoint-ipq/import-history!
+                             second-target checked-schema "received" head car-bytes cache))))
+          (is (= 1 @semantic-checks))
+          (is (= head (local/read-ref second-target "received")))
+          (let [altered (.from js/Buffer car-bytes)
+                offset (dec (.-length altered))]
+            (aset altered offset (bit-xor 1 (aget altered offset)))
+            (is (= :ipld/cid-mismatch
+                   (reason #(checkpoint-ipq/import-history!
+                             rejected-target checked-schema "altered" head altered cache))))
+            (is (false? (local/ref-exists? rejected-target "altered"))))
+          (is (= :invalid-verification-cache
+                 (reason #(checkpoint-ipq/verify-history-car-cached!
+                           (js/Object.) checked-schema head car-bytes))))
+          (let [put-block! local/put-block!
+                changed? (atom false)]
+            (is (= :import-block-mismatch
+                   (reason #(with-redefs [local/put-block!
+                                          (fn [store cid bytes]
+                                            (let [result (put-block! store cid bytes)]
+                                              (when (compare-and-set! changed? false true)
+                                                (let [tampered (.from js/Buffer bytes)]
+                                                  (aset tampered 0
+                                                        (bit-xor 1 (aget tampered 0)))
+                                                  (.writeFileSync fs
+                                                                  (.join path rejected-dir
+                                                                         "blocks" cid)
+                                                                  tampered)))
+                                              result))]
+                              (checkpoint-ipq/import-history!
+                               rejected-target checked-schema "disk-changed"
+                               head car-bytes cache)))))
+            (is @changed?)
+            (is (false? (local/ref-exists? rejected-target "disk-changed"))))
+          (is (= :invalid-node
+                 (reason #(checkpoint-ipq/verify-history-car-cached!
+                           cache (assoc checked-schema :ontology-digest "sha256:changed")
+                           head car-bytes))))))
+      (finally
+        (.rmSync fs source-dir #js {:recursive true :force true})
+        (.rmSync fs first-dir #js {:recursive true :force true})
+        (.rmSync fs second-dir #js {:recursive true :force true})
+        (.rmSync fs rejected-dir #js {:recursive true :force true})))))
+
 (deftest import-refuses-ontology-contract-change-before-publication
   (let [source-dir (.mkdtempSync fs (.join path (.tmpdir os) "mithril-ipq-ontology-source-"))
         target-dir (.mkdtempSync fs (.join path (.tmpdir os) "mithril-ipq-ontology-target-"))]
@@ -210,9 +286,12 @@
   (async done
     (let [source-dir (.mkdtempSync fs (.join path (.tmpdir os) "mithril-ipq-http-source-"))
           target-dir (.mkdtempSync fs (.join path (.tmpdir os) "mithril-ipq-http-target-"))
+          cached-dir (.mkdtempSync fs (.join path (.tmpdir os) "mithril-ipq-http-cached-"))
           source (local/open! source-dir)
           target (local/open! target-dir)
+          cached-target (local/open! cached-dir)
           checked-schema (schema)
+          cache (checkpoint-ipq/verification-cache)
           _ (local/import-state! source checked-schema "source" (initial-state))
           head (local/advance-fact! source checked-schema "source" :source/verified)
           mode (atom :normal)
@@ -282,19 +361,27 @@
                  (let [origin (str "http://127.0.0.1:"
                                    (.-port (.address server)))]
                    (-> (checkpoint-ipq/fetch-import-history!
-                        target checked-schema "received" origin head)
+                        js/fetch target checked-schema "received" origin head cache)
                        (.then
                         (fn [result]
                           (is (= head (:root result)))
                           (is (= head (local/read-ref target "received")))
+                          (checkpoint-ipq/fetch-import-history!
+                           js/fetch cached-target checked-schema
+                           "received" origin head cache))
+                        (fn [error] (throw error)))
+                       (.then (fn [cached]
+                                (is (= head (:root cached)))
+                                (is (= head (:head (local/verify-ref!
+                                                    cached-target checked-schema
+                                                    "received"))))
                           (is (= :invalid-ipq-origin
                                  (reason #(checkpoint-ipq/selection-url
                                            "http://example.com" head))))
                           (is (= :invalid-cid
                                  (reason #(checkpoint-ipq/selection-url origin "BAD"))))
                           (reset! mode :status)
-                          (refused origin "bad-status" head))
-                        (fn [error] (throw error)))
+                          (refused origin "bad-status" head)))
                        (.then (fn [outcome]
                                 (is (= :ipq-http-status outcome))
                                 (is (false? (local/ref-exists? target "bad-status")))
@@ -329,4 +416,5 @@
                                    (.close server)
                                    (.rmSync fs source-dir #js {:recursive true :force true})
                                    (.rmSync fs target-dir #js {:recursive true :force true})
+                                   (.rmSync fs cached-dir #js {:recursive true :force true})
                                    (done))))))))))
