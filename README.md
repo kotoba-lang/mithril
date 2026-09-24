@@ -1295,7 +1295,8 @@ Run the rows in `plan.edn` in `:sequence` order. Hermes runs use the row's
 `prompt.txt` and `workspace` with one-shot usage capture, for example:
 
 ```sh
-python -m hermes_cli.main --provider openrouter --model typesafe/jev-1.13 \
+HERMES_PYTHON=/Users/junkawasaki/.hermes/hermes-agent/venv/bin/python
+"$HERMES_PYTHON" -m hermes_cli.main --provider openrouter --model typesafe/jev-1.13 \
   --toolsets terminal --in <run-workspace> --usage-file <run>/hermes-usage.json \
   -z "$(cat <run>/prompt.txt)"
 ```
