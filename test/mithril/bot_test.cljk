@@ -73,11 +73,11 @@
         terminal (last states)]
     (is (= #{"workspace-inspect" "stop"}
            (set (map :label (bot/available-actions start)))))
-    (is (= :mithril.bpmn/gateway-cardinality
-           (error-code #(bpmn/compile-process
-                         (get source "process") bot/action-by-id
-                         (get-in artifact [:bot-ir :policy :actions]) false)))
-        "one-way gateways are only admitted in the coding profile")
+    (is (= bpmn/process-format
+           (:format (bpmn/compile-process
+                     (get source "process") bot/action-by-id
+                     (get-in artifact [:bot-ir :policy :actions]) false)))
+        "a one-way gateway is a deterministic BPMN transition in every profile")
     (is (= :mithril.bpmn/action-not-enabled
            (error-code #(bot/request-effect inspected
                                             {:action (get bot/action-by-label "stop")}
@@ -237,7 +237,7 @@
                  :actions ["git-status" "stop"]}
                 {:facts #{:semantic/prefix-valid :workspace/inspected :proposal/ready
                           :workspace/changed :artifact/compiled :tests/passed :git/observed}
-                 :actions ["git-status" "stop"]}
+                 :actions ["stop"]}
                 {:facts #{:semantic/prefix-valid :workspace/inspected :workspace/reset}
                  :actions ["code-propose" "git-status" "stop"]}]]
     (is (= ["sha256:c53e7a4cddfee776084a68bd926924f1554d60cb0888f2000a5672ba2de5136d"]
@@ -250,7 +250,8 @@
             migrated (:state result)]
         (is (= :migrated (:disposition result)))
         (is (= "https://mithril.fund/state/bot-run-v2" (:format migrated)))
-        (is (= actions (mapv :label (bot/available-actions migrated))))
+        (is (= actions (mapv :label (bot/available-actions migrated)))
+            (str "migration-stage=" index))
         (is (= index (:step migrated)))
         (is (= [{:legacy index}] (:receipts migrated)))
         (is (= {"legacy" index} (:retries migrated)))
@@ -322,8 +323,10 @@
 (deftest bpmn-token-is-the-process-authority-through-terminal-stop
   (let [advance (fn [state label now]
                   (complete state
-                            (bot/admit-decision state (model-result state label 0.9)
-                                                "worker-1" now)
+                            (if (= 1 (count (bot/available-actions state)))
+                              {:action (bot/deterministic-coding-action state)}
+                              (bot/admit-decision state (model-result state label 0.9)
+                                                  "worker-1" now))
                             (inc now)))
         s0 (bot/start-run (profile) (task) "worker-1" 1000)
         s1 (advance s0 "workspace-inspect" 1010)
@@ -345,8 +348,11 @@
            (mapv :label (bot/available-actions s4))))
     (is (= ["git-status" "stop"]
            (mapv :label (bot/available-actions s5))))
-    (is (= ["git-status" "stop"]
+    (is (= ["stop"]
            (mapv :label (bot/available-actions s6))))
+    (is (= :mithril.bot/insufficient-candidates
+           (error-code #(bot/prepare-request s6 "worker-1" 1070)))
+        "Jev is refused when the BPMN token admits only a mandatory stop")
     (is (= "git-status" (:label (bot/deterministic-coding-action s5))))
     (is (= "stop" (:label (bot/deterministic-coding-action s6)))
         "the reviewed gateway must terminate rather than loop on git/status")
