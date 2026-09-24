@@ -43,6 +43,34 @@
                                           checkpoint-ipq/limits)]
     (is (= 32 (count (:blocks selected))))))
 
+(deftest ipq-export-reuses-cid-semantics-but-not-selection-bytes
+  (let [directory (.mkdtempSync fs (.join path (.tmpdir os) "mithril-ipq-cid-cache-"))]
+    (try
+      (let [store (local/open! directory)
+            checked-schema (schema)
+            head (local/import-state! store checked-schema "run" (initial-state))
+            cache (checkpoint-ipld/history-verification-cache)
+            original-read checkpoint-ipld/read!
+            reads (atom 0)]
+        (with-redefs [checkpoint-ipld/read!
+                      (fn [& args]
+                        (swap! reads inc)
+                        (apply original-read args))]
+          (let [first-car (:bytes (checkpoint-ipq/export-history!
+                                   store checked-schema head cache))
+                second-car (:bytes (checkpoint-ipq/export-history!
+                                    store checked-schema head cache))]
+            (is (= 1 @reads))
+            (is (.equals (.from js/Buffer first-car) second-car))
+            (is (= head (:root (checkpoint-ipq/verify-history-car!
+                                checked-schema head second-car))))
+            (.writeFileSync fs (.join path directory "blocks" head)
+                            (.from js/Buffer "changed"))
+            (is (= :ipld/cid-mismatch
+                   (reason #(checkpoint-ipq/export-history!
+                             store checked-schema head cache)))))))
+      (finally (.rmSync fs directory #js {:recursive true :force true})))))
+
 (deftest checked-history-round-trips-through-trustless-car
   (let [directory (.mkdtempSync fs (.join path (.tmpdir os) "mithril-ipq-"))]
     (try

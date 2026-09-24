@@ -329,10 +329,7 @@
           :else (recur (into remaining (:parents (read! get-fn schema current)))
                        (conj seen current)))))))
 
-(defn verify-history-nodes!
-  "Verify every reachable IPLD block and return its checked nodes for this call.
-  The returned map is invocation-local, never a persisted trust cache."
-  [get-fn schema head]
+(defn- verify-history-with-reader! [read-block! head]
   (loop [queue [head] checked {}]
     (cond
       (> (count checked) 256) (refuse! :ancestry-limit)
@@ -355,7 +352,7 @@
             remaining (subvec (vec queue) 1)]
         (if (contains? checked current)
           (recur remaining checked)
-          (let [{:keys [state parents] :as block} (read! get-fn schema current)
+          (let [{:keys [state parents] :as block} (read-block! current)
                 binding {:parents parents
                          :run-id (:run-id state)
                          :profile-digest (:profile-digest state)
@@ -364,6 +361,63 @@
                          :state state
                          :block block}]
             (recur (into remaining parents) (assoc checked current binding))))))))
+
+(defn verify-history-nodes!
+  "Verify every reachable IPLD block and return its checked nodes for this call.
+  The returned map is invocation-local, never a persisted trust cache."
+  [get-fn schema head]
+  (verify-history-with-reader! #(read! get-fn schema %) head))
+
+#?(:cljs
+   (do
+     ;; A token is valid only in this loaded verifier module. Reloading code
+     ;; discards old proofs instead of carrying them across a changed verifier.
+     (def ^:private history-proof-caches (js/WeakMap.))
+
+     (defn history-verification-cache
+       "Bounded process-local cache for exact-byte checked IPLD nodes."
+       []
+       (let [token (js/Object.)]
+         (.set history-proof-caches token nil)
+         token))
+
+     (defn verify-history-nodes-cached!
+       "Re-read every reachable block and compare its bytes with a prior CID
+       proof; rerun semantic validation only for new or changed bytes. Causal
+       transitions are checked on every call. Mutable refs are never cached."
+       [cache get-fn schema head]
+       (when-not (.has history-proof-caches cache)
+         (refuse! :invalid-verification-cache))
+       (let [sources (ontology-source-contract)
+             previous (.get history-proof-caches cache)
+             entries (if (and (= schema (:schema previous))
+                              (= sources (:sources previous)))
+                       (:entries previous)
+                       {})
+             next-entries (atom entries)
+             read-block!
+             (fn [id]
+               (let [bytes (get-fn id)
+                     prior (get @next-entries id)]
+                 (if (and prior
+                          (instance? js/Uint8Array bytes)
+                          (.equals (:bytes prior) bytes))
+                   (:block prior)
+                   (let [checked (read! (fn [_] bytes) schema id)]
+                     (swap! next-entries assoc id
+                            {:bytes (.from js/Buffer bytes) :block checked})
+                     checked))))
+             result (verify-history-with-reader! read-block! head)]
+         (when-not (= sources (ontology-source-contract))
+           (refuse! :ontology-contract-changed))
+         ;; The verifier's ancestry ceiling is 256. Do not retain an
+         ;; unbounded set of unrelated histories in a long-lived process.
+         (.set history-proof-caches cache
+               {:schema schema :sources sources
+                :entries (if (<= (count @next-entries) 256)
+                           @next-entries
+                           (select-keys @next-entries (keys (:nodes result))))})
+         result))))
 
 (defn verify-history!
   "Verify every reachable IPLD block and its checked semantic projection."

@@ -1,0 +1,57 @@
+#!/usr/bin/env kbb
+(ns mithril.checkpoint-cid-cache-bench
+  "Measure one cold, warm, and independent local CID history verification."
+  (:require [mithril.checkpoint :as checkpoint]
+            [mithril.checkpoint-ipld :as checkpoint-ipld]
+            [mithril.checkpoint-ipld-fs :as local]))
+
+(def fs (js/require "node:fs"))
+(def path (js/require "node:path"))
+
+(let [[directory ref-name & extra] *command-line-args*]
+  (when-not (and (empty? extra)
+                 (string? directory) (.isAbsolute path directory)
+                 (string? ref-name))
+    (throw (ex-info "expected absolute checkpoint store and ref name"
+                    {:reason :invalid-arguments})))
+  (let [store (local/open! directory)
+        checked-schema (checkpoint/schema
+                        (.readFileSync fs checkpoint/ontology-path "utf8"))
+        cache (checkpoint-ipld/history-verification-cache)
+        reads (atom 0)
+        original-read checkpoint-ipld/read!
+        [cold cold-ms cold-reads warm warm-ms warm-reads independent independent-ms independent-reads]
+        (with-redefs [checkpoint-ipld/read!
+                      (fn [& args]
+                        (swap! reads inc)
+                        (apply original-read args))]
+          (let [start (.now js/Date)
+                cold (local/verify-ref-cached! store checked-schema ref-name cache)
+                cold-ms (- (.now js/Date) start)
+                cold-reads @reads
+                start (.now js/Date)
+                warm (local/verify-ref-cached! store checked-schema ref-name cache)
+                warm-ms (- (.now js/Date) start)
+                warm-reads (- @reads cold-reads)
+                start (.now js/Date)
+                independent (local/verify-ref! store checked-schema ref-name)
+                independent-ms (- (.now js/Date) start)
+                independent-reads (- @reads cold-reads warm-reads)]
+            [cold cold-ms cold-reads warm warm-ms warm-reads
+             independent independent-ms independent-reads]))]
+    (when-not (and (= cold warm independent)
+                   (= (:blocks cold) cold-reads independent-reads)
+                   (zero? warm-reads))
+      (throw (ex-info "CID cache benchmark proof mismatch"
+                      {:reason :cache-proof-mismatch})))
+    (println (.stringify
+              js/JSON
+              (clj->js {:status "verified"
+                        :head (:head cold)
+                        :blocks (:blocks cold)
+                        :coldMs cold-ms
+                        :warmMs warm-ms
+                        :independentMs independent-ms
+                        :coldSemanticReads cold-reads
+                        :warmSemanticReads warm-reads
+                        :independentSemanticReads independent-reads})))))
