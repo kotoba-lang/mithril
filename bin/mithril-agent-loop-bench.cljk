@@ -99,6 +99,22 @@
 (defn- run-dir-for [output-dir run]
   (.join path output-dir (str/replace (:run-id run) #"[^A-Za-z0-9_.-]" "--")))
 
+(defn- bind-profile-digests [receipts output-dir]
+  (mapv (fn [receipt]
+          (if (and (= :mithril (:lane receipt))
+                   (nil? (:ontology-digest receipt))
+                   (nil? (:profile-digest receipt)))
+            (let [state-file (.join path (run-dir-for output-dir receipt) "state.edn")
+                  state (when (.existsSync fs state-file)
+                          (reader/read-string (.readFileSync fs state-file "utf8")))
+                  digest (:profile-digest state)]
+              (when-not (and (string? digest) (re-matches #"sha256:[0-9a-f]{64}" digest))
+                (throw (ex-info "Mithril state is missing its profile digest"
+                                {:reason :missing-profile-digest :run-id (:run-id receipt)})))
+              (assoc receipt :profile-digest digest))
+            receipt))
+        receipts))
+
 (defn- parse-outcome [text]
   (when (string? text)
     (when-let [match (re-find #"(?s)\{[^{}]*:clean\?[^{}]*\}" text)]
@@ -289,11 +305,14 @@
                   (throw (ex-info "usage: mithril-agent-loop-bench pilot <plan.edn> <runs-dir> <receipts.edn>"
                                   {:reason :usage})))
                 (run-cohort! plan-path output-dir receipts-path true))
-      "report" (let [[_ plan-path receipts-path output-path] args]
+      "report" (let [[_ plan-path receipts-path output-path runs-dir] args]
                  (when-not (and plan-path receipts-path output-path)
-                   (throw (ex-info "usage: mithril-agent-loop-bench report <plan.edn> <receipts.edn> <report.edn>"
+                   (throw (ex-info "usage: mithril-agent-loop-bench report <plan.edn> <receipts.edn> <report.edn> [runs-dir]"
                                    {:reason :usage})))
-                 (let [report (bench/report (read-edn plan-path) (read-edn receipts-path))
+                 (let [receipts (read-edn receipts-path)
+                       receipts (if runs-dir (bind-profile-digests receipts runs-dir) receipts)
+                       _ (when runs-dir (write-edn! receipts-path receipts))
+                       report (bench/report (read-edn plan-path) receipts)
                        comparison (:paired-comparison report)]
                    (write-edn! output-path report)
                    (println "REPORT" (:corpus-id report)
