@@ -98,3 +98,43 @@
                          checked-schema head
                          (js/Uint8Array. (inc checkpoint-ipq/max-car-bytes)))))))
       (finally (.rmSync fs directory #js {:recursive true :force true})))))
+
+(deftest imported-history-keeps-cids-and-supports-local-fork-and-merge
+  (let [source-dir (.mkdtempSync fs (.join path (.tmpdir os) "mithril-ipq-source-"))
+        target-dir (.mkdtempSync fs (.join path (.tmpdir os) "mithril-ipq-target-"))]
+    (try
+      (let [checked-schema (schema)
+            source (local/open! source-dir)
+            target (local/open! target-dir)
+            _ (local/import-state! source checked-schema "source" (initial-state))
+            source-head (local/advance-fact! source checked-schema "source"
+                                             :source/verified)
+            car-bytes (:bytes (checkpoint-ipq/export-history!
+                               source checked-schema source-head))
+            imported (checkpoint-ipq/import-history!
+                      target checked-schema "received" source-head car-bytes)
+            _ (local/fork-ref! target "received" "left")
+            _ (local/fork-ref! target "received" "right")
+            left (local/advance-fact! target checked-schema "left"
+                                      :review/approved)
+            right (local/advance-fact! target checked-schema "right"
+                                       :source/independent)
+            merged (local/merge-refs! target checked-schema
+                                      "received" "left" "right" "merged")]
+        (is (= source-head (:root imported)))
+        (is (= source-head (local/read-ref target "received")))
+        (is (.equals (local/get-block source source-head)
+                     (local/get-block target source-head)))
+        (is (not= left right))
+        (is (not= merged source-head))
+        (is (= merged (:head (local/verify-ref! target checked-schema "merged"))))
+        (is (= :ref-exists
+               (reason #(checkpoint-ipq/import-history!
+                         target checked-schema "received" source-head car-bytes))))
+        (is (= :ipld/car-root-mismatch
+               (reason #(checkpoint-ipq/import-history!
+                         target checked-schema "invalid" left car-bytes))))
+        (is (false? (local/ref-exists? target "invalid"))))
+      (finally
+        (.rmSync fs source-dir #js {:recursive true :force true})
+        (.rmSync fs target-dir #js {:recursive true :force true})))))

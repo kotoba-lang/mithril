@@ -361,6 +361,10 @@ immutable checkpoint head. `export-history!` verifies the complete Mithril
 history, selects its parent CID links, and writes a root-first CARv1;
 `verify-history-car!` replays the selector against only the CAR bytes and then
 reruns Mithril's ontology, SHACL, graph-digest and causal-transition checks.
+`import-history!` writes the checked immutable blocks to a separate local
+store, re-verifies them from that store, and only then publishes a new ref.
+The imported ref can be forked and its additive fact branches merged locally;
+an existing ref is never overwritten by import.
 The caller supplies the expected root; the archive cannot choose it. The
 profile is limited to 32 blocks, 64 selector path components, 4 MiB of selected
 blocks and 4 MiB plus framing allowance for the input CAR. It rejects missing,
@@ -373,6 +377,8 @@ kbb --backend sci bin/mithril-checkpoint-ipq.cljk export \
   /absolute/checkpoint-store session-ref /absolute/history.car
 kbb --backend sci bin/mithril-checkpoint-ipq.cljk verify \
   /absolute/history.car bafy...expected-head
+kbb --backend sci bin/mithril-checkpoint-ipq.cljk import \
+  /absolute/other-checkpoint-store received /absolute/history.car bafy...expected-head
 ```
 
 On 2026-09-24 the isolated seven-occurrence model-authored scheduler canary
@@ -381,7 +387,9 @@ head `bafyreig6y3vrenugkkppy6kkkzx36lipx75nbfst5wnvwkgufd3z7iklty` and
 semantic graph digest `sha256:07ff91cd7cfbd749f1418352367cd411a96ccb7d2790cb5229da1f5e62034355`
 in 23.04 s on one local run. The test suite pins refusal reasons for a
 foreign root, missing ancestor, altered CID bytes, unused block and changed
-ontology digest. Transport does not make semantic verification free.
+ontology digest. Transport does not make semantic verification free. Import
+into a distinct store is a local immutable-history transfer, not distributed
+mutable-ref synchronization or a remote IPQ service.
 
 The Node-only IPLD store now installs Node SHA-256 through the existing
 `multiformats/install-sha256!` agreement gate before CID reads and writes.
