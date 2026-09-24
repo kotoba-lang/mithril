@@ -1,11 +1,11 @@
 (mithril/bot-profile
   :id "https://mithril.fund/id/bot/hermes-readonly-cron-v1"
   :goal "https://mithril.fund/id/goal/governed-coding-task"
-  :ontology "2a8e807877d14b6eb6d31352f79d2976cffc63eb346afd1734b68ed6825fd9f3"
+  :ontology "b3f864a5b1c627e628be9767f1a6936b55dea44c565a20e3e0c20049855e3e8b"
   :process
   (bpmn/process
     :id "https://mithril.fund/id/bpmn/hermes-readonly-cron-v1"
-    :ontology "2a8e807877d14b6eb6d31352f79d2976cffc63eb346afd1734b68ed6825fd9f3"
+    :ontology "b3f864a5b1c627e628be9767f1a6936b55dea44c565a20e3e0c20049855e3e8b"
     :nodes
     [(bpmn/start-event :id "start")
      (bpmn/exclusive-gateway :id "choose")

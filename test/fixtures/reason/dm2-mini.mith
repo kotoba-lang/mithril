@@ -1,0 +1,49 @@
+(mithril/ontology
+  :id "https://mithril.fund/ontology/test/dm2-mini"
+  :profile
+  ["https://www.w3.org/TR/rdf11-concepts/"
+   "https://www.w3.org/TR/owl2-profiles/#OWL_2_RL"
+   "https://www.w3.org/TR/shacl/"]
+  :graph
+  [(owl/class :id "https://example.org/dm2#IndividualType" :name "IndividualType")
+   (owl/class :id "https://example.org/dm2#Resource"
+              :rdfs/sub-class-of "https://example.org/dm2#IndividualType")
+   (owl/class :id "https://example.org/dm2#Performer"
+              :rdfs/sub-class-of "https://example.org/dm2#Resource")
+   (owl/class :id "https://example.org/dm2#System"
+              :rdfs/sub-class-of "https://example.org/dm2#Performer")
+   (owl/class :id "https://example.org/dm2#Capability"
+              :rdfs/sub-class-of "https://example.org/dm2#IndividualType")
+   (owl/class :id "https://example.org/dm2#Measure"
+              :rdfs/sub-class-of "https://example.org/dm2#IndividualType")
+   (owl/class :id "https://example.org/dm2#Location"
+              :rdfs/sub-class-of "https://example.org/dm2#IndividualType")
+   (owl/object-property
+     :id "https://example.org/dm2#capabilityOfPerformer"
+     :name "capabilityOfPerformer"
+     :rdfs/domain "https://example.org/dm2#Capability"
+     :rdfs/range "https://example.org/dm2#Performer")
+   (owl/object-property
+     :id "https://example.org/dm2#desiredCapabilityOfPerformer"
+     :rdfs/sub-property-of "https://example.org/dm2#capabilityOfPerformer")
+   (owl/object-property :id "https://example.org/dm2#measuredBy")
+   (owl/datatype-property :id "https://example.org/dm2#label")
+   (shacl/node-shape
+     :id "https://example.org/dm2#CapabilityShape"
+     :sh/target-class "https://example.org/dm2#Capability"
+     :sh/property
+     [(shacl/property-shape
+        :sh/path "https://example.org/dm2#capabilityOfPerformer"
+        :sh/class "https://example.org/dm2#Performer"
+        :sh/min-count 1)
+      (shacl/property-shape
+        :sh/path "https://example.org/dm2#measuredBy"
+        :sh/class "https://example.org/dm2#Measure")])
+   (shacl/node-shape
+     :id "https://example.org/dm2#PerformerShape"
+     :sh/target-class "https://example.org/dm2#Performer"
+     :sh/property
+     [(shacl/property-shape
+        :sh/path "https://example.org/dm2#label"
+        :sh/datatype "http://www.w3.org/2001/XMLSchema#string"
+        :sh/max-count 1)])])

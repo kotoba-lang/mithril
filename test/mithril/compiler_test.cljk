@@ -67,9 +67,9 @@
         library (compiler/compile-library-document "lib/web/v1.mith" library-doc)
         app (compiler/compile-web-document "examples/hello-web.mith" app-doc [library])]
     (is (= compiler/context-document published-context))
-    (is (= "sha256:8d0f7c9356a99d1b0ef2ea4ab02cce508e841502f5aea91278e92b7d21bdbc91"
+    (is (= "sha256:f8832c5ad63ae58852a87123befdc0299c7a236fe2dbfa98ab6749ababfa131e"
            (:graph-digest library)))
-    (is (= "sha256:fb682d0c687c9d1284015ebf469fbeb4d240c2d4fa7315b567c7fff3ef42b5c1"
+    (is (= "sha256:c5eea2869cf9d126719ad0ba956db449e1498591ebbe32c356e59a28291ab280"
            (:graph-digest app)))
     (is (= {:status 200
             :headers {"content-type" "text/plain; charset=utf-8"}
@@ -118,3 +118,49 @@
       (is (= :mithril/unknown-source-key
              (error-code #(compiler/compile-library-document
                             "x.mith" (dissoc library-doc "version"))))))))
+
+(def ^:private context-prefixes
+  (set (keep (fn [[k v]] (when (and (string? v) (re-find #"[#/]$" v)) k))
+             (get compiler/context-document "@context"))))
+
+(defn- unexpanded-predicates
+  "Quad predicates that are not absolute IRIs, or whose `scheme:` is really a
+  context prefix left unexpanded (\"rdfs:subClassOf\" passes a scheme check)."
+  [artifact]
+  (->> (compiler/ontology-quads artifact)
+       (map #(get-in % [:predicate :value]))
+       (filter (fn [p]
+                 (let [scheme (second (re-find #"^([A-Za-z][A-Za-z0-9+.\-]*):" (str p)))]
+                   (or (nil? scheme) (contains? context-prefixes scheme)))))
+       distinct sort vec))
+
+(deftest every-ontology-predicate-expands-to-an-absolute-iri
+  (testing "subClassOf / domain / range / sh:* / name all reach RDF as full IRIs.
+            Before org-w3-json-ld-api 70058cc they came out as the literal
+            strings \"rdfs:subClassOf\", \"sh:class\", ... whenever the context
+            walk reached the term before its prefix (hash order)."
+    (let [path "test/fixtures/reason/dm2-mini.mith"
+          artifact (compiler/compile-ontology-text path (read-text path))
+          predicates (set (map #(get-in % [:predicate :value])
+                               (compiler/ontology-quads artifact)))]
+      (is (= [] (unexpanded-predicates artifact)))
+      (doseq [iri ["http://www.w3.org/2000/01/rdf-schema#subClassOf"
+                   "http://www.w3.org/2000/01/rdf-schema#subPropertyOf"
+                   "http://www.w3.org/2000/01/rdf-schema#domain"
+                   "http://www.w3.org/2000/01/rdf-schema#range"
+                   "http://www.w3.org/ns/shacl#targetClass"
+                   "http://www.w3.org/ns/shacl#property"
+                   "http://www.w3.org/ns/shacl#path"
+                   "http://www.w3.org/ns/shacl#class"
+                   "http://www.w3.org/ns/shacl#datatype"
+                   "http://www.w3.org/ns/shacl#minCount"
+                   "http://www.w3.org/ns/shacl#maxCount"
+                   "https://mithril.fund/ns/v1#name"]]
+        (is (contains? predicates iri) iri))))
+  (testing "and so does every shipped ontology"
+    (doseq [f ["bot-checkpoint-v1" "bot-domain-v1" "bpmn-agent-v1" "edit-proposal-v1"
+               "growth-decision-v1" "jev-decision-v2" "semantic-core-v1" "state-graph-v1"]]
+      (let [path (str "ontology/" f ".mith")]
+        (is (= [] (unexpanded-predicates
+                   (compiler/compile-ontology-text path (read-text path))))
+            path)))))

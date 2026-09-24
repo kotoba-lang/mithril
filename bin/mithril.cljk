@@ -3,6 +3,7 @@
             [mithril.bot :as bot]
             [mithril.desktop :as desktop]
             [mithril.hermes-fleet :as fleet]
+            [mithril.reason-cli :as reason-cli]
             [mithril.web :as web]))
 
 (defn- usage! []
@@ -16,6 +17,7 @@
   (println "  mithril emit-desktop <app.mith|app.mithril>")
   (println "  mithril compile-web <app.mith|app.mithril> <library.mith>...")
   (println "  mithril request <app.mith|app.mithril> <library.mith> <METHOD> <PATH>")
+  (println "  mithril reason <ontology.mith> <data.(nq|nt|jsonld)> [--query-type <iri>] [--json]")
   (js/process.exit 2))
 
 (defn- keyword-string [x]
@@ -86,6 +88,9 @@
       (if (and path (seq args))
         (print-json (compile-web path args))
         (usage!))
+
+      "reason"
+      (reason-cli/run! path args)
 
       "request"
       (let [[library-path method request-path & extra] args]

@@ -1,7 +1,15 @@
 {:paths ["src" "resources" "lib" "examples" "ontology"]
  :deps {io.github.kotoba-lang/org-w3-json-ld-api
         {:git/url "https://github.com/kotoba-lang/org-w3-json-ld-api.git"
-         :git/sha "0d0a19df6d68a092df0cec5e5571a2b4a354ea27"}
+         :git/sha "70058ccb3a14a186f3db0b4ab5be57ce1953c943"}
+        ;; 70058cc above defines a term's prefix before expanding it (JSON-LD
+        ;; 1.1 §4.2.2). Earlier pins left rdfs:subClassOf / domain / range /
+        ;; sh:* / mith:name as literal compact strings in predicate position
+        ;; whenever the map walk reached the term before its prefix. Floor.
+        ;; nquads.core/parse, which mithril.reason uses for .nq/.nt data. Floor.
+        io.github.kotoba-lang/org-w3-nquads
+        {:git/url "https://github.com/kotoba-lang/org-w3-nquads.git"
+         :git/sha "81063f1c02963b8851eeabc88f5d7e22eebb75c4"}
         io.github.kotoba-lang/org-w3-rdf-canon
         {:git/url "https://github.com/kotoba-lang/org-w3-rdf-canon.git"
          :git/sha "e3e9223a48f162d07a1fcd8e2f01531b9c79d157"}

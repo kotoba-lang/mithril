@@ -7,7 +7,7 @@
   "imports": [
     {
       "library": "https://mithril.fund/lib/web/pipeline-v1",
-      "digest": "sha256:23c7e582b920f42e134f01a7fb86896684a825a23e0b440e03889c966a16428b"
+      "digest": "sha256:5210d72740899b5d444dab21cc79053ac038aaac327a17fc51687e7114e0d30d"
     }
   ],
   "routes": [

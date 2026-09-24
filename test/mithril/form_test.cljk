@@ -17,7 +17,7 @@
                         "examples/mithril-app-agent-form.mith"
                         (read-text "examples/mithril-app-agent-form.mith") [library])]
     (is (= json-artifact form-artifact))
-    (is (= "sha256:1c86338ecd2ef591cc62bb9d6d1dae850fcdbee54ad40b16faba4207dd77d66a"
+    (is (= "sha256:fea2302f51b8915e341197e59c76dcff15a8b80775545cbbb5684d428e693fb1"
            (:graph-digest form-artifact)))))
 
 (deftest owl-rdf-shacl-form-compiles-to-jsonld-rdf-dataset
@@ -35,7 +35,7 @@
                   "ontology/bpmn-agent-v1.mith"
                   (read-text "ontology/bpmn-agent-v1.mith"))]
     (is (= "https://mithril.fund/artifact/ontology-v1" (:format artifact)))
-    (is (= "sha256:2a8e807877d14b6eb6d31352f79d2976cffc63eb346afd1734b68ed6825fd9f3"
+    (is (= "sha256:b3f864a5b1c627e628be9767f1a6936b55dea44c565a20e3e0c20049855e3e8b"
            (:graph-digest artifact)))
     (is (= 6 (count (get-in artifact [:rdf-dataset "@graph"]))))))
 

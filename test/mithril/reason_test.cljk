@@ -1,0 +1,207 @@
+(ns mithril.reason-test
+  "Generic OWL 2 RL + SHACL over a DM2-style ontology. Every positive check has
+  a negative control that removes exactly the axiom (or data) it depends on
+  and asserts the result changes FOR THAT REASON."
+  (:require [cljs.test :refer [deftest is testing]]
+            [clojure.string :as str]
+            [mithril.compiler :as compiler]
+            [mithril.reason :as reason]
+            [mithril.reason-cli :as cli]))
+
+(defn- read-text [path] (.readFileSync (js/require "fs") path "utf8"))
+
+(def dir "test/fixtures/reason/")
+(def dm2 "https://example.org/dm2#")
+(def rdf-type "http://www.w3.org/1999/02/22-rdf-syntax-ns#type")
+
+(defn- ontology [f] (compiler/compile-ontology-text (str dir f) (read-text (str dir f))))
+(defn- data [f] (reason/parse-data (str dir f) (read-text (str dir f))))
+(defn- nq [text] (reason/parse-data "inline.nq" text))
+
+(defn- without
+  "The artifact with `k` removed from the graph node `id` -- one axiom gone."
+  [artifact id k]
+  (update-in artifact [:rdf-dataset "@graph"]
+             (fn [g] (mapv #(if (= id (get % "@id")) (dissoc % k) %) g))))
+
+(defn- types-of [result node]
+  (set (keep #(when (= node (:s %)) (:o %)) (:types result))))
+
+(defn- entailed? [result s p o]
+  (contains? (set (map #(select-keys % [:s :p :o]) (:entailed result))) {:s s :p p :o o}))
+
+(defn- constraints [result] (mapv :constraint (:violations result)))
+
+(deftest the-rule-list-is-exactly-what-owl-rules-implements
+  (is (= [:rdfs11 :rdfs5 :rdfs9 :rdfs7 :rdfs2 :rdfs3 :prp-trp :prp-symp :prp-inv]
+         reason/rules)))
+
+(deftest a-subclass-chain-is-climbed
+  (let [r (reason/reason (ontology "dm2-mini.mith") (data "conforming.nq") {})]
+    (is (= :conforms (:status r)))
+    (is (= #{(str dm2 "System") (str dm2 "Performer") (str dm2 "Resource")
+             (str dm2 "IndividualType")}
+           (types-of r "urn:x:edr"))))
+  (testing "control: without System subClassOf Performer, edr stops at System"
+    (let [r (reason/reason (without (ontology "dm2-mini.mith") (str dm2 "System") "subClassOf")
+                           (data "conforming.nq") {})]
+      (is (= #{(str dm2 "System")} (types-of r "urn:x:edr"))))))
+
+(deftest domain-and-range-type-both-ends-through-a-lifted-sub-property
+  (let [r (reason/reason (ontology "dm2-mini.mith") (data "conforming.nq") {})]
+    (testing "rdfs7: the sub-property triple is also the super-property's"
+      (is (entailed? r "urn:x:vm-cap" (str dm2 "capabilityOfPerformer") "urn:x:vm-svc")))
+    (testing "rdfs2 / rdfs3 on the super-property type the lifted triple's ends"
+      (is (contains? (types-of r "urn:x:vm-cap") (str dm2 "Capability")))
+      (is (contains? (types-of r "urn:x:vm-svc") (str dm2 "Performer"))))
+    (testing "and the lifted triple satisfies CapabilityShape's minCount 1"
+      (is (= [] (:violations r)))))
+  (testing "control: without subPropertyOf there is no lifted triple, so no typing"
+    (let [r (reason/reason (without (ontology "dm2-mini.mith")
+                                    (str dm2 "desiredCapabilityOfPerformer") "subPropertyOf")
+                           (data "conforming.nq") {})]
+      (is (not (entailed? r "urn:x:vm-cap" (str dm2 "capabilityOfPerformer") "urn:x:vm-svc")))
+      (is (= #{} (types-of r "urn:x:vm-cap")))))
+  (testing "control: without the domain, vm-cap is not a Capability; the range still types vm-svc"
+    (let [r (reason/reason (without (ontology "dm2-mini.mith")
+                                    (str dm2 "capabilityOfPerformer") "domain")
+                           (data "conforming.nq") {})]
+      (is (not (contains? (types-of r "urn:x:vm-cap") (str dm2 "Capability"))))
+      (is (contains? (types-of r "urn:x:vm-svc") (str dm2 "Performer")))))
+  (testing "control: without the range, vm-svc is untyped"
+    (let [r (reason/reason (without (ontology "dm2-mini.mith")
+                                    (str dm2 "capabilityOfPerformer") "range")
+                           (data "conforming.nq") {})]
+      (is (= #{} (types-of r "urn:x:vm-svc"))))))
+
+(deftest sh-class-is-checked-against-entailed-types
+  (let [r (reason/reason (ontology "dm2-mini.mith") (data "violating.nq") {})]
+    (is (= :violations (:status r)))
+    (is (= ["sh:class"] (constraints r)) "one violation, and it is sh:class")
+    (is (= {:focus "urn:x:cap-a" :path (str dm2 "measuredBy")
+            :expected (str dm2 "Measure") :value "urn:x:rock"}
+           (select-keys (first (:violations r)) [:focus :path :expected :value]))))
+  (testing "control: the same data once rock is ALSO a Measure conforms"
+    (let [r (reason/reason (ontology "dm2-mini.mith")
+                           (into (data "violating.nq")
+                                 (nq (str "<urn:x:rock> <" rdf-type "> <" dm2 "Measure> .")))
+                           {})]
+      (is (= :conforms (:status r)))))
+  (testing "an ENTAILED type satisfies sh:class: svc is a Performer only by rdfs:range"
+    (let [r (reason/reason (ontology "dm2-mini.mith") (data "violating.nq") {})]
+      (is (not-any? #(= (str dm2 "capabilityOfPerformer") (:path %)) (:violations r))))))
+
+(deftest min-max-count-and-datatype-fail-for-their-own-reason
+  (let [o (ontology "dm2-mini.mith")
+        cap (str "<urn:x:c> <" rdf-type "> <" dm2 "Capability> .\n")
+        perf (str "<urn:x:p> <" rdf-type "> <" dm2 "Performer> .\n")]
+    (testing "sh:minCount: a Capability with no capabilityOfPerformer"
+      (let [r (reason/reason o (nq cap) {})]
+        (is (= ["sh:minCount"] (constraints r)))
+        (is (= 0 (:count (first (:violations r)))))))
+    (testing "sh:maxCount: a Performer with two labels"
+      (let [r (reason/reason o (nq (str perf "<urn:x:p> <" dm2 "label> \"a\" .\n"
+                                        "<urn:x:p> <" dm2 "label> \"b\" .\n")) {})]
+        (is (= ["sh:maxCount"] (constraints r)))
+        (is (= 2 (:count (first (:violations r)))))))
+    (testing "sh:datatype: an integer label"
+      (let [r (reason/reason o (nq (str perf "<urn:x:p> <" dm2 "label> \"42\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n")) {})]
+        (is (= ["sh:datatype"] (constraints r)))))
+    (testing "control: one string label conforms"
+      (is (= :conforms (:status (reason/reason o (nq (str perf "<urn:x:p> <" dm2 "label> \"a\" .\n")) {})))))))
+
+(deftest unknown-constraints-and-axioms-refuse-by-name
+  (let [r (reason/reason (ontology "unknown-constraint.mith") (data "conforming.nq") {})]
+    (is (= :refused (:status r)))
+    (is (= :unsupported-shacl-constraint (get-in r [:refusal :reason])))
+    (is (= "http://www.w3.org/ns/shacl#pattern" (get-in r [:refusal :detail :constraint]))))
+  (testing "control: the same shape without sh:pattern is evaluated"
+    (let [o (update-in (ontology "unknown-constraint.mith") [:rdf-dataset "@graph" 1 "property" 0]
+                       dissoc "sh:pattern")]
+      (is (= :conforms (:status (reason/reason o (data "conforming.nq") {}))))))
+  (let [r (reason/reason (ontology "unsupported-axiom.mith") (data "conforming.nq") {})]
+    (is (= :unsupported-owl-axiom (get-in r [:refusal :reason])))
+    (is (= "http://www.w3.org/2002/07/owl#disjointWith" (get-in r [:refusal :detail :predicate]))))
+  (testing "control: without owl:disjointWith the ontology is accepted"
+    (let [o (without (ontology "unsupported-axiom.mith") (str dm2 "Performer") "owl:disjointWith")]
+      (is (= :conforms (:status (reason/reason o (data "conforming.nq") {})))))))
+
+(deftest zero-data-is-refused-not-conforming
+  (let [r (reason/reason (ontology "dm2-mini.mith") (data "empty.nq") {})]
+    (is (= :refused (:status r)))
+    (is (= :no-data-triples (get-in r [:refusal :reason]))))
+  (testing "control: one triple is measured"
+    (is (= :conforms (:status (reason/reason (ontology "dm2-mini.mith")
+                                             (nq "<urn:x:a> <urn:x:p> <urn:x:b> .") {}))))))
+
+(deftest an-unexpanded-compact-predicate-is-refused
+  (let [bad [{:subject {:type :iri :value "urn:x:a"}
+              :predicate {:type :iri :value "rdfs:subClassOf"}
+              :object {:type :iri :value "urn:x:b"}}]]
+    (is (= :non-iri-predicate
+           (get-in (reason/reason (ontology "dm2-mini.mith") bad {}) [:refusal :reason])))
+    (testing "control: the expanded IRI is accepted"
+      (is (= :conforms
+             (:status (reason/reason (ontology "dm2-mini.mith")
+                                     (assoc-in bad [0 :predicate :value]
+                                               "http://www.w3.org/2000/01/rdf-schema#subClassOf")
+                                     {})))))))
+
+(deftest json-ld-data-reasons-like-n-quads
+  (let [o (ontology "dm2-mini.mith")
+        a (reason/reason o (data "data.jsonld") {})
+        b (reason/reason o (data "conforming.nq") {})]
+    (is (= :conforms (:status a)))
+    (is (= (types-of b "urn:x:vm-cap") (types-of a "urn:x:vm-cap")))
+    (is (= (types-of b "urn:x:edr") (types-of a "urn:x:edr")))))
+
+(deftest owl-property-rules-and-equivalent-class
+  (let [doc {"@context" compiler/context-uri
+             "@id" "https://mithril.fund/ontology/test/owl-props"
+             "@type" "Ontology"
+             "profile" ["https://www.w3.org/TR/rdf11-concepts/"
+                        "https://www.w3.org/TR/owl2-profiles/#OWL_2_RL"
+                        "https://www.w3.org/TR/shacl/"]
+             "@graph" [{"@id" "urn:x:partOf" "@type" ["owl:ObjectProperty" "owl:TransitiveProperty"]}
+                       {"@id" "urn:x:hasPart" "@type" "owl:ObjectProperty" "inverseOf" "urn:x:partOf"}
+                       {"@id" "urn:x:adjacent" "@type" ["owl:ObjectProperty" "owl:SymmetricProperty"]}
+                       {"@id" "urn:x:Machine" "@type" "owl:Class" "equivalentClass" "urn:x:System"}]}
+        o (compiler/compile-ontology-document "props.mith" doc)
+        r (reason/reason o (nq (str "<urn:x:a> <urn:x:partOf> <urn:x:b> .\n"
+                                    "<urn:x:b> <urn:x:partOf> <urn:x:c> .\n"
+                                    "<urn:x:a> <urn:x:adjacent> <urn:x:d> .\n"
+                                    "<urn:x:m> <" rdf-type "> <urn:x:Machine> .\n"))
+                         {})]
+    (is (entailed? r "urn:x:a" "urn:x:partOf" "urn:x:c") "prp-trp")
+    (is (entailed? r "urn:x:c" "urn:x:hasPart" "urn:x:a") "prp-inv over a transitive derivation")
+    (is (entailed? r "urn:x:d" "urn:x:adjacent" "urn:x:a") "prp-symp")
+    (is (contains? (types-of r "urn:x:m") "urn:x:System") "equivalentClass as subsumption")
+    (testing "control: without owl:inverseOf there is no hasPart"
+      (let [r (reason/reason (update-in o [:rdf-dataset "@graph" 1] dissoc "inverseOf")
+                             (nq "<urn:x:a> <urn:x:partOf> <urn:x:b> .") {})]
+        (is (not (entailed? r "urn:x:b" "urn:x:hasPart" "urn:x:a")))))))
+
+(deftest cli-exit-codes-and-evidence-floor
+  (let [run #(cli/run read-text (str dir "dm2-mini.mith") %)]
+    (let [{:keys [exit out]} (run [(str dir "conforming.nq")])]
+      (is (= 0 exit))
+      (is (some #{"SCANNED\tdata-triples\t3\tdata-nodes\t4"} out))
+      (is (= "CONFORMS" (last out))))
+    (let [{:keys [exit out]} (run [(str dir "violating.nq")])]
+      (is (= 1 exit))
+      (is (= "VIOLATIONS\t1" (last out)))
+      (is (some #(str/starts-with? % "VIOLATION\turn:x:cap-a\tsh:class\t") out)))
+    (let [{:keys [exit out]} (run [(str dir "empty.nq")])]
+      (is (= 2 exit))
+      (is (str/starts-with? (first out) "REFUSE\tno-data-triples\t")))
+    (let [{:keys [exit out]} (run [(str dir "conforming.ttl")])]
+      (is (= 2 exit))
+      (is (str/starts-with? (first out) "REFUSE\tunknown-data-format\t")))
+    (let [{:keys [exit out]} (run [(str dir "conforming.nq") "--query-type" (str dm2 "Performer")])
+          types (filter #(str/starts-with? % "TYPE\t") out)]
+      (is (= 0 exit))
+      (is (= 2 (count types)) "edr and vm-svc, nothing else")
+      (is (every? #(str/includes? % (str dm2 "Performer")) types)))
+    (let [{:keys [exit out]} (run [(str dir "conforming.nq") "--bogus"])]
+      (is (= 2 exit))
+      (is (str/starts-with? (first out) "REFUSE\tusage\t")))))

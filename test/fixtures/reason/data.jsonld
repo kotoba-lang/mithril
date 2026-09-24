@@ -1,0 +1,4 @@
+{"@context": {"dm2": "https://example.org/dm2#",
+              "desired": {"@id": "dm2:desiredCapabilityOfPerformer", "@type": "@id"}},
+ "@graph": [{"@id": "urn:x:edr", "@type": "dm2:System"},
+            {"@id": "urn:x:vm-cap", "desired": "urn:x:vm-svc"}]}

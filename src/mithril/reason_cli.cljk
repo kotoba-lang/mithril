@@ -1,0 +1,117 @@
+(ns mithril.reason-cli
+  "`mithril reason <ontology.mith> <data.(nq|nt|jsonld)> [--query-type <iri>] [--json]`
+
+  Exit 0: the data conforms to the ontology's shapes after entailment.
+  Exit 1: SHACL violations.
+  Exit 2: refused or unmeasurable (REFUSE line names the reason) -- including
+          zero data triples, an unknown data format, an unparseable file, and
+          any OWL axiom or SHACL constraint this reasoner does not evaluate."
+  (:require [clojure.string :as str]
+            [mithril.compiler :as compiler]
+            [mithril.reason :as reason]))
+
+(defn- parse-args [args]
+  (loop [[a & more] args opts {}]
+    (cond
+      (nil? a) opts
+      (= "--json" a) (recur more (assoc opts :json? true))
+      (= "--query-type" a) (if (and (first more) (not (str/starts-with? (first more) "--")))
+                             (recur (rest more) (assoc opts :query-type (first more)))
+                             (assoc opts :bad-arg a))
+      :else (assoc opts :bad-arg a))))
+
+(defn- literal-str [v]
+  (if (map? v)
+    (str "\"" (:literal v) "\""
+         (if (:language v) (str "@" (:language v)) (str "^^<" (:datatype v) ">")))
+    (str v)))
+
+(defn- error-reason
+  "A parse / compile failure from a dependency, as a refusal reason."
+  [e]
+  (let [d (ex-data e)]
+    (or (some-> (:mithril/error d) name)
+        (some-> (:json-ld/error d) (str/replace " " "-") (->> (str "json-ld-")))
+        (some-> (:nquads/error d) name)
+        (some (fn [[k v]] (when (and (keyword? v) (= "nquads" (namespace v))) (name v))) d)
+        "unreadable-input")))
+
+(defn- text-lines [result]
+  (let [c (:counts result)]
+    (concat
+     [(str "SCANNED\tontology-triples\t" (:ontology-triples c))
+      (str "SCANNED\taxioms\t" (:axioms c))
+      (str "SCANNED\tnode-shapes\t" (:node-shapes c)
+           "\tproperty-shapes\t" (:property-shapes c)
+           "\tuntargeted-node-shapes\t" (:untargeted-node-shapes c))
+      (str "SCANNED\tdata-triples\t" (:data-triples c) "\tdata-nodes\t" (:data-nodes c))
+      (str "ENTAILED\t" (:entailed c) "\tinferred\t" (:inferred c))
+      (str "RULES\t" (str/join "," (map name (:rules result))))]
+     (for [{:keys [s o inferred?]} (:types result)]
+       (str "TYPE\t" s "\t" o "\t" (if inferred? "inferred" "asserted")))
+     [(str "CHECKED\tfocus-nodes\t" (:focus-nodes c) "\tchecks\t" (:checks c))]
+     (for [{:keys [focus constraint path expected count value shape]} (:violations result)]
+       (str "VIOLATION\t" focus "\t" constraint "\t" path
+            "\texpected\t" (literal-str expected)
+            (when (some? count) (str "\tcount\t" count))
+            (when (some? value) (str "\tvalue\t" (literal-str value)))
+            "\tshape\t" shape))
+     [(if (= :conforms (:status result))
+        "CONFORMS"
+        (str "VIOLATIONS\t" (:violations c)))])))
+
+(defn run
+  "Pure core of the CLI. `read-text` reads a path. Returns {:exit n :out [lines]}."
+  [read-text ontology-path args]
+  (let [[data-path & flags] args
+        opts (parse-args flags)
+        usage "usage: mithril reason <ontology.mith> <data.(nq|nt|jsonld)> [--query-type <iri>] [--json]"]
+    (cond
+      (or (nil? ontology-path) (nil? data-path) (:bad-arg opts))
+      {:exit 2 :out [(str "REFUSE\tusage\t" usage)]}
+
+      (nil? (reason/data-format data-path))
+      {:exit 2 :out [(str "REFUSE\tunknown-data-format\t"
+                          (pr-str {:path data-path :supported [".nq" ".nt" ".jsonld" ".json"]}))]}
+
+      :else
+      (let [result (try
+                     (let [artifact (compiler/compile-ontology-text ontology-path
+                                                                    (read-text ontology-path))
+                           data (reason/parse-data data-path (read-text data-path))]
+                       (reason/reason artifact data (select-keys opts [:query-type])))
+                     (catch :default e
+                       {:status :refused
+                        :refusal {:reason (error-reason e) :detail (ex-message e)}}))]
+        (case (:status result)
+          :refused
+          {:exit 2
+           :result result
+           :out [(str "REFUSE\t" (name (get-in result [:refusal :reason]))
+                      "\t" (pr-str (get-in result [:refusal :detail])))]}
+          {:exit (if (= :conforms (:status result)) 0 1)
+           :result result
+           :out (vec (text-lines result))})))))
+
+(defn- json-safe [x]
+  (cond
+    (keyword? x) (if-let [n (namespace x)] (str n "/" (name x)) (name x))
+    (map? x) (into {} (map (fn [[k v]] [(json-safe k) (json-safe v)]) x))
+    (or (vector? x) (seq? x)) (mapv json-safe x)
+    (set? x) (mapv json-safe (sort-by pr-str x))
+    :else x))
+
+(defn run!
+  "Entry for bin/mithril.cljk: prints and exits."
+  [ontology-path args]
+  (let [read-text #(.readFileSync (js/require "fs") % "utf8")
+        {:keys [exit out result]} (run read-text ontology-path args)
+        json? (some #{"--json"} args)]
+    (if (and json? result)
+      (println (.stringify js/JSON
+                           (clj->js (json-safe (-> result
+                                                   (dissoc :entailed)
+                                                   (assoc :exit exit))))
+                           nil 2))
+      (doseq [line out] (println line)))
+    (js/process.exit exit)))
