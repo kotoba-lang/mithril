@@ -444,6 +444,25 @@ measurement; CAR export and the two reverifications are outside those import
 timings. The warm path still performs full CAR byte comparison and destination
 block byte matching before publishing a ref.
 
+For repeated local-ref verification as an immutable history grows,
+`checkpoint-ipld/history-verification-cache` and
+`checkpoint-ipld-fs/verify-ref-cached!` reuse per-CID ontology/SHACL node checks.
+Every invocation rereads every reachable stored block, compares its complete
+bytes with the previously checked copy, and rechecks causal transitions. A new
+child needs semantic validation while unchanged ancestors do not. The cache is
+process-local, bounded, and bound to the schema and local ontology sources;
+it does not certify mutable refs or replace an independent `verify-ref!` audit.
+Its benefit is semantic CPU time, not constant-time I/O or a transferable proof.
+`checkpoint-ipq/export-history!` accepts the same cache as an optional fourth
+argument; CAR selection still rechecks its block bytes. To measure one local
+history without creating a new fixture:
+
+```sh
+kbb --backend sci --classpath "$(kbb -Spath)" \
+  bin/mithril-checkpoint-cid-cache-bench.cljk \
+  /absolute/checkpoint-store ref-name
+```
+
 Run that pair with:
 
 ```sh

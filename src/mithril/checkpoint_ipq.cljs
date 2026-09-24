@@ -31,22 +31,30 @@
 
 (defn export-history!
   "Export a fully checked, immutable history rooted at head as a bounded CAR.
-  The selector must touch exactly the nodes the semantic verifier reached."
-  [store schema head]
-  (let [history (checkpoint-ipld/verify-history-nodes!
-                 #(local/get-block store %) schema head)]
-    (when (> (:blocks history) (:max-blocks limits))
-      (refuse! :history-over-ipq-limit))
-    (let [selected (trustless/selection-car
-                    #(local/get-block store %) head history-selector limits)
-          expected (set (keys (:nodes history)))
-          actual (set (map :cid (:blocks selected)))]
-      (when-not (= expected actual)
-        (refuse! :selector-incomplete-history))
-      (let [bytes (get-in selected [:car :bytes])]
-        (when (> (.-length bytes) max-car-bytes)
-          (refuse! :car-over-limit))
-        {:root head :blocks (:blocks history) :bytes bytes}))))
+  The selector must touch exactly the nodes the semantic verifier reached.
+  An optional process-local CID cache avoids rechecking unchanged node
+  semantics; selection still rereads and verifies the complete CAR."
+  ([store schema head]
+   (export-history! store schema head nil))
+  ([store schema head cache]
+   (let [get-fn #(local/get-block store %)
+         history (if cache
+                   (checkpoint-ipld/verify-history-nodes-cached!
+                    cache get-fn schema head)
+                   (checkpoint-ipld/verify-history-nodes!
+                    get-fn schema head))]
+     (when (> (:blocks history) (:max-blocks limits))
+       (refuse! :history-over-ipq-limit))
+     (let [selected (trustless/selection-car
+                     get-fn head history-selector limits)
+           expected (set (keys (:nodes history)))
+           actual (set (map :cid (:blocks selected)))]
+       (when-not (= expected actual)
+         (refuse! :selector-incomplete-history))
+       (let [bytes (get-in selected [:car :bytes])]
+         (when (> (.-length bytes) max-car-bytes)
+           (refuse! :car-over-limit))
+         {:root head :blocks (:blocks history) :bytes bytes})))))
 
 (defn verify-history-car!
   "Replay a CAR against the caller's root, then rerun Mithril's complete

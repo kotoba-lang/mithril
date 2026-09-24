@@ -177,6 +177,16 @@
   (checkpoint-ipld/verify-history-nodes!
    #(get-block store %) schema (read-ref store name)))
 
+(defn verify-ref-cached!
+  "Verify the current ref with a process-local CID proof cache. The ref and
+  every reachable stored block are read again; only unchanged node semantics
+  are reused. Use verify-ref! for an independent uncached check."
+  [store schema name cache]
+  (dissoc
+   (checkpoint-ipld/verify-history-nodes-cached!
+    cache #(get-block store %) schema (read-ref store name))
+   :nodes))
+
 (defn create-verified-ref!
   "Publish a previously imported immutable head under a new local name only
   after rechecking every stored block and causal transition. No existing ref

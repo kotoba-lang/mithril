@@ -16,7 +16,8 @@
                  {:id "local-ipld" :workspace "/tmp" :goal "merge two facts"}
                  "local-ipld" 1000))
 (defn reason [f]
-  (try (f) nil (catch :default error (:reason (ex-data error)))))
+  (try (f) nil (catch :default error
+                 (or (:reason (ex-data error)) (:type (ex-data error))))))
 
 (deftest private-blocks-and-branch-refs-survive-reopen-and-reject-stale-cas
   (let [dir (.mkdtempSync fs (.join path (.tmpdir os) "mithril-ipld-fs-"))]
@@ -52,6 +53,52 @@
             "reasserting one fact is idempotent")
         (is (= left (local/read-ref reopened "left")))
         (is (= right (local/read-ref reopened "right"))))
+      (finally (.rmSync fs dir #js {:recursive true :force true})))))
+
+(deftest cid-proof-cache-reuses-unchanged-ancestors-but-rechecks-stored-bytes
+  (let [dir (.mkdtempSync fs (.join path (.tmpdir os) "mithril-ipld-proof-cache-"))]
+    (try
+      (let [checked-schema (schema)
+            store (local/open! dir)
+            cache (ipld-checkpoint/history-verification-cache)
+            base (local/import-state! store checked-schema "main" (state))
+            semantic-reads (atom 0)
+            original-read ipld-checkpoint/read!]
+        (with-redefs [ipld-checkpoint/read!
+                      (fn [& args]
+                        (swap! semantic-reads inc)
+                        (apply original-read args))]
+          (is (= 1 (:blocks (local/verify-ref-cached!
+                             store checked-schema "main" cache))))
+          (is (= 1 @semantic-reads))
+          (is (= 1 (:blocks (local/verify-ref-cached!
+                             store checked-schema "main" cache))))
+          (is (= 1 @semantic-reads)
+              "an exact stored-byte match does not repeat OWL/SHACL parsing")
+          (let [child (local/advance-fact! store checked-schema "main"
+                                           :review/approved)
+                before @semantic-reads]
+            (is (= 2 (:blocks (local/verify-ref-cached!
+                               store checked-schema "main" cache))))
+            (is (= (inc before) @semantic-reads)
+                "only the new child needs semantic validation")
+            (is (= 2 (:blocks (local/verify-ref!
+                               store checked-schema "main"))))
+            (is (= :invalid-verification-cache
+                   (reason #(local/verify-ref-cached!
+                             store checked-schema "main" (js/Object.)))))
+            (is (= :invalid-node
+                   (reason #(local/verify-ref-cached!
+                             store (assoc checked-schema
+                                          :ontology-digest "sha256:changed")
+                             "main" cache))))
+            (.writeFileSync fs (.join path dir "blocks" base)
+                            (local/get-block store child))
+            (is (= :ipld/cid-mismatch
+                   (reason #(local/verify-ref-cached!
+                             store checked-schema "main" cache))))
+            (is (= :ipld/cid-mismatch
+                   (reason #(local/verify-ref! store checked-schema "main")))))))
       (finally (.rmSync fs dir #js {:recursive true :force true})))))
 
 (deftest upgrade-ref-refuses-a-source-head-that-advanced-during-reencoding
