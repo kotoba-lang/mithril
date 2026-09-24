@@ -1274,6 +1274,56 @@ qualification still needs a predeclared multi-case corpus, repeated paired
 runs, successful test/receipt validation, and live scheduler-originated
 receipts; one local run is not a fleet reliability claim.
 
+### Reproducible Hermes / Mithril loop bench
+
+`bench/agent-loops/corpus.edn` predeclares three read-only Git-status cases and
+five repetitions per case. `mithril-agent-loop-bench plan` binds each task and
+fixture to a SHA-256 digest, pins each lane's requested model, and
+counterbalances Hermes-first and Mithril-first order. TypeSafe Jev is a
+decisions-only model, so ordinary Hermes chat completions cannot use it. The
+corpus defaults to `:stack` comparison using the configured Hermes chat model
+and Mithril's Jev model. Stack indices compare complete model+loop
+configurations; they do not isolate a causal loop-only effect. Use
+`:same-model` only when both runners can call the same endpoint and report the
+same resolved model identity. `prepare` creates a fresh
+throwaway Git workspace for every lane/run pair, so each run starts with the
+same committed fixture plus the case's declared changes. Oracle outputs stay
+outside each workspace.
+
+```sh
+kbb --backend sci bin/mithril-agent-loop-bench.cljk plan \
+  bench/agent-loops/corpus.edn /tmp/agent-loop-plan.edn
+kbb --backend sci bin/mithril-agent-loop-bench.cljk prepare \
+  /tmp/agent-loop-plan.edn /tmp/agent-loop-runs
+```
+
+`pilot` runs the first paired case before the full cohort. It requires the
+Hermes runner to invoke a host-generated read-only status command and its final
+EDN answer to match that command's receipt. It also requires Mithril to finish
+its governed loop at the terminal stop action. `run` resumes from receipts and
+executes the remaining rows in counterbalanced order:
+
+```sh
+kbb --backend sci bin/mithril-agent-loop-bench.cljk pilot \
+  /tmp/agent-loop-plan.edn /tmp/agent-loop-runs /tmp/agent-loop-receipts.edn
+kbb --backend sci bin/mithril-agent-loop-bench.cljk run \
+  /tmp/agent-loop-plan.edn /tmp/agent-loop-runs /tmp/agent-loop-receipts.edn
+kbb --backend sci bin/mithril-agent-loop-bench.cljk report \
+  /tmp/agent-loop-plan.edn /tmp/agent-loop-receipts.edn /tmp/agent-loop-report.edn
+```
+
+The token index is emitted only for pairs with the same task digest and exact
+expected result. `:same-model` additionally requires identical resolved model
+identity. `:stack` allows lane-specific models, labels model inequality, and
+must be interpreted as a deployed-stack comparison. The corpus measures a
+bounded read-only tool loop; it is not a benchmark of arbitrary coding tasks or
+proof of scheduler reliability. Each lane's system/ontology context is included
+in its provider-reported usage. Hermes input tokens include provider-reported
+cache-read tokens; missing usage remains unmeasured. Mithril removes a
+completed `git-status` action from its candidate set, so it cannot spend the
+step budget repeating the same status effect; when only `stop` remains, that
+singleton is resolved deterministically.
+
 ## Source contract
 
 - `.mith` and `.mithril` are aliases. The suffix and surface syntax never enter

@@ -49,7 +49,6 @@
    {:id "https://mithril.fund/id/action/git-status"
     :label "git-status" :effect :git/status
     :confidence-floor 3000
-    :repeatable? true
     :requires #{:semantic/prefix-valid} :produces #{:git/observed}}
    {:id "https://mithril.fund/id/action/stop"
     :label "stop" :effect :agent/stop

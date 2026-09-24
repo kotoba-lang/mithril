@@ -1,0 +1,306 @@
+#!/usr/bin/env kbb
+(ns mithril.agent-loop-bench-cli
+  (:require [cljs.reader :as reader]
+            [clojure.string :as str]
+            [mithril.agent-loop-bench :as bench]))
+
+(def fs (js/require "node:fs"))
+(def path (js/require "node:path"))
+(def child-process (js/require "node:child_process"))
+
+(defn- read-edn [file]
+  (reader/read-string (.readFileSync fs file "utf8")))
+
+(defn- write-edn! [file value]
+  (.mkdirSync fs (.dirname path file) #js {:recursive true})
+  (.writeFileSync fs file (str (pr-str value) "\n") "utf8"))
+
+(defn- safe-file-path [root relative]
+  (when-not (and (string? relative) (not (.isAbsolute path relative)))
+    (throw (ex-info "fixture paths must be relative" {:reason :unsafe-fixture-path})))
+  (let [base (.resolve path root)
+        target (.resolve path base relative)
+        rel (.relative path base target)]
+    (when (or (= rel "..") (str/starts-with? rel (str ".." (.-sep path))))
+      (throw (ex-info "fixture path escapes its run directory" {:reason :unsafe-fixture-path})))
+    target))
+
+(defn- write-files! [root files]
+  (doseq [[relative content] files]
+    (when-not (string? content)
+      (throw (ex-info "fixture file content must be text" {:reason :invalid-fixture})))
+    (let [target (safe-file-path root relative)]
+      (.mkdirSync fs (.dirname path target) #js {:recursive true})
+      (.writeFileSync fs target content "utf8"))))
+
+(defn- shell-quote [value]
+  (str "'" (str/replace (str value) "'" "'\\''") "'"))
+
+(defn- write-status-command! [run-dir workspace]
+  (let [porcelain (.join path run-dir "git-status-porcelain.txt")
+        receipt (.join path run-dir "git-status-result.edn")
+        temp (str receipt ".tmp")
+        command (.join path run-dir "read-git-status.sh")
+        script (str "#!/bin/sh\nset -eu\n"
+                    "/usr/bin/git -C " (shell-quote workspace)
+                    " status --porcelain=v1 > " (shell-quote porcelain) "\n"
+                    "/usr/bin/awk 'BEGIN { tracked=0; untracked=0 } substr($0,1,2)==\"??\" { untracked++; next } NF { tracked++ } END { clean=\"false\"; if (tracked+untracked==0) clean=\"true\"; printf \"{:clean? %s :modified-tracked %d :untracked %d}\\n\", clean, tracked, untracked }' "
+                    (shell-quote porcelain) " > " (shell-quote temp) "\n"
+                    "mv " (shell-quote temp) " " (shell-quote receipt) "\n"
+                    "cat " (shell-quote receipt) "\n")]
+    (.writeFileSync fs command script "utf8")
+    (.chmodSync fs command 493)
+    command))
+
+(defn- run-git! [dir args]
+  (let [result (.spawnSync child-process "git" (clj->js (into ["-C" dir] args))
+                           #js {:encoding "utf8" :stdio "pipe"})]
+    (when (or (.-error result) (not (zero? (.-status result))))
+      (throw (ex-info (str "fixture git setup failed: " (or (some-> result .-stderr str/trim)
+                                                            (some-> result .-error .-message)))
+                      {:reason :fixture-git-failed})))
+    (.-stdout result)))
+
+(defn- materialize! [plan output-dir]
+  (when (.existsSync fs output-dir)
+    (throw (ex-info "output directory already exists; choose a fresh path"
+                    {:reason :output-exists})))
+  (.mkdirSync fs output-dir #js {:recursive true})
+  (doseq [run (:runs plan)]
+    (let [run-dir (.join path output-dir (str/replace (:run-id run) #"[^A-Za-z0-9_.-]" "--"))
+          workspace (.join path run-dir "workspace")
+          {:keys [tracked-files modified-files untracked-files]} (:workspace-state run)
+          task {:id (:run-id run) :workspace workspace :goal (:prompt run)}]
+      (.mkdirSync fs workspace #js {:recursive true})
+      (write-files! workspace tracked-files)
+      (run-git! workspace ["init" "--quiet" "--initial-branch=main"])
+      (run-git! workspace ["-c" "user.name=Agent Loop Bench"
+                           "-c" "user.email=bench@localhost" "add" "--all"])
+      (run-git! workspace ["-c" "user.name=Agent Loop Bench"
+                           "-c" "user.email=bench@localhost"
+                           "commit" "--quiet" "-m" "benchmark fixture"])
+      (write-files! workspace modified-files)
+      (write-files! workspace untracked-files)
+      (.writeFileSync fs (.join path run-dir "prompt.txt")
+                      (str (-> (:prompt run)
+                               (str/replace "{workspace}" workspace)
+                               (str/replace "{status-command}"
+                                            (write-status-command! run-dir workspace)))
+                           "\n") "utf8")
+      (.writeFileSync fs (.join path run-dir "task.json")
+                      (str (js/JSON.stringify (clj->js task) nil 2) "\n") "utf8")
+      (write-edn! (.join path run-dir "expected-outcome.edn") (:expected-outcome run))
+      (write-edn! (.join path run-dir "run.edn")
+                  (dissoc run :workspace-state :expected-outcome))))
+  (write-edn! (.join path output-dir "plan.edn") plan)
+  (println "PREPARED" (:pair-count plan) "PAIRS" "RUNS" (count (:runs plan))
+           "UNDER" (.resolve path output-dir)))
+
+(defn- run-dir-for [output-dir run]
+  (.join path output-dir (str/replace (:run-id run) #"[^A-Za-z0-9_.-]" "--")))
+
+(defn- parse-outcome [text]
+  (when (string? text)
+    (when-let [match (re-find #"(?s)\{[^{}]*:clean\?[^{}]*\}" text)]
+      (try (reader/read-string match) (catch :default _ nil)))))
+
+(defn- run-process [program args cwd timeout-ms]
+  (.spawnSync child-process program (clj->js args)
+              #js {:cwd cwd :encoding "utf8" :timeout timeout-ms
+                   :maxBuffer 4194304 :stdio #js ["ignore" "pipe" "pipe"]}))
+
+(defn- number-or-nil [value]
+  (when (and (number? value) (js/Number.isFinite value) (not (neg? value))) value))
+
+(defn- hermes-receipt [plan run output-dir]
+  (let [run-dir (run-dir-for output-dir run)
+        workspace (.join path run-dir "workspace")
+        prompt-file (.join path run-dir "prompt.txt")
+        usage-file (.join path run-dir "hermes-usage.json")
+        status-file (.join path run-dir "git-status-result.edn")
+        python (or (.-HERMES_PYTHON (.-env js/process))
+                   "/Users/junkawasaki/.hermes/hermes-agent/venv/bin/python")
+        started (.now js/Date)
+        result (run-process python
+                            ["-m" "hermes_cli.main" "--provider" "openrouter"
+                             "--model" (:requested-model run) "--toolsets" "terminal"
+                             "--in" workspace "--usage-file" usage-file
+                             "-z" (.readFileSync fs prompt-file "utf8")]
+                            (.cwd js/process) 300000)
+        elapsed (max 1 (- (.now js/Date) started))
+        usage (if (.existsSync fs usage-file)
+                (js->clj (.parse js/JSON (.readFileSync fs usage-file "utf8"))
+                         :keywordize-keys true)
+                {})
+        stdout (.-stdout result)
+        stated (parse-outcome stdout)
+        observed (when (.existsSync fs status-file)
+                   (try (reader/read-string (.readFileSync fs status-file "utf8"))
+                        (catch :default _ nil)))
+        model (:model usage)
+        input (when (and (number? (:input_tokens usage))
+                         (number? (or (:cache_read_tokens usage) 0)))
+                (+ (:input_tokens usage) (or (:cache_read_tokens usage) 0)))
+        output (:output_tokens usage)
+        success? (and (zero? (or (.-status result) -1))
+                      (not (.-error result))
+                      (true? (:completed usage))
+                      (map? observed)
+                      (= stated observed))]
+    {:run-id (:run-id run) :case-id (:case-id run) :lane :hermes
+     :task-digest (:task-digest run) :requested-model (:requested-model run)
+     :model model :success? (boolean success?)
+     :observed-outcome (or observed {:error :missing-git-command-receipt})
+     :reported-outcome stated
+     :usage {:input-tokens (number-or-nil input)
+             :output-tokens (number-or-nil output)
+             :reasoning-tokens (number-or-nil (:reasoning_tokens usage))
+             :cost-usd (number-or-nil (:estimated_cost_usd usage))}
+     :wall-ms elapsed :turns (number-or-nil (:api_calls usage))
+     :effect-count nil
+     :runner {:exit-code (.-status result)
+              :completed (:completed usage)
+              :failed (:failed usage)
+               :stdout-digest (bench/digest stdout)
+              :git-command-receipt? (boolean observed)}}))
+
+(defn- mithril-receipt [run output-dir]
+  (let [run-dir (run-dir-for output-dir run)
+        workspace (.join path run-dir "workspace")
+        task-file (.join path run-dir "task.json")
+        state-file (.join path run-dir "state.edn")
+        audit-file (str state-file ".audit.jsonl")
+        started (.now js/Date)
+        command (str (.join path (.cwd js/process) "bin/mithril-hermes.cljk"))
+        tick (fn []
+               (run-process "kbb"
+                            ["--backend" "sci" command "tick"
+                             (:mithril-profile run) task-file state-file
+                             "agent-loop-bench" (:mithril-grants run) "execute"]
+                            (.cwd js/process) 120000))
+        result (loop [n 0 last-result nil]
+                 (if (>= n 8)
+                   last-result
+                   (let [current (tick)
+                         output (str/trim (.-stdout current))
+                         parsed (try (js->clj (.parse js/JSON output)
+                                              :keywordize-keys true)
+                                     (catch :default _ {}))]
+                     (if (or (.-error current) (not (zero? (or (.-status current) -1)))
+                             (contains? #{"completed" "held" "idempotent-terminal"}
+                                        (:run-status parsed)))
+                       {:process current :parsed parsed}
+                       (recur (inc n) {:process current :parsed parsed})))))
+        elapsed (max 1 (- (.now js/Date) started))
+        rows (if (.existsSync fs audit-file)
+               (->> (str/split-lines (.readFileSync fs audit-file "utf8"))
+                    (remove str/blank?)
+                    (map #(js->clj (.parse js/JSON %) :keywordize-keys true)) vec)
+               [])
+        decisions (filter #(and (= "model-observed" (:status %))
+                                (map? (get-in % [:model :usage]))) rows)
+        usages (map #(get-in % [:model :usage]) decisions)
+        sum-usage (fn [key]
+                    (when (and (seq usages) (every? #(number? (get % key)) usages))
+                      (reduce + (map key usages))))
+        status-row (first (filter #(= "git/status" (get-in % [:host :operation])) rows))
+        host (when status-row (:host status-row))
+        observed (when host (select-keys host [:clean? :modified-tracked :untracked]))
+        model-ids (vec (distinct (keep #(get-in % [:model :model]) decisions)))
+        ontology (some #(get-in % [:model :domain-ontology-digest]) rows)
+        completed-effects (count (filter #(and (= "completed" (:status %)) (:host %)) rows))
+        terminal? (and (= "completed" (get-in result [:parsed :run-status]))
+                       (= "completed" (:status (last (filter :host rows)))))
+        success? (and terminal? (map? observed) (= 1 (count model-ids)))]
+    {:run-id (:run-id run) :case-id (:case-id run) :lane :mithril
+     :task-digest (:task-digest run) :requested-model (:requested-model run)
+     :model (first model-ids) :success? (boolean success?)
+     :observed-outcome (or observed {:error :missing-git-status-effect})
+     :usage {:input-tokens (sum-usage :input_tokens)
+             :output-tokens (sum-usage :output_tokens)
+             :reasoning-tokens (sum-usage :reasoning_tokens)
+             :cost-usd (sum-usage :cost)}
+     :wall-ms elapsed :turns (count decisions) :effect-count completed-effects
+     :ontology-digest ontology
+     :runner {:run-status (get-in result [:parsed :run-status])
+              :tick-exit (.-status (:process result))
+              :model-calls (count decisions)}}))
+
+(defn- run-cohort! [plan-path output-dir receipts-path pilot?]
+  (let [plan (read-edn plan-path)
+        receipts (atom (if (.existsSync fs receipts-path) (read-edn receipts-path) []))
+        runs (if pilot? (take 2 (:runs plan)) (:runs plan))]
+    (doseq [run (:runs plan)
+            :when (or (not pilot?) (some #(= (:run-id run) (:run-id %)) runs))
+            :when (not (some #(= (:run-id run) (:run-id %)) @receipts))]
+      (println "RUN" (:sequence run) (:run-id run) (:lane run))
+      (let [receipt (case (:lane run)
+                      :hermes (hermes-receipt plan run output-dir)
+                      :mithril (mithril-receipt run output-dir))]
+        (swap! receipts conj receipt)
+        (write-edn! receipts-path @receipts)
+      (println "RECEIPT" (:run-id run)
+                 "SUCCESS" (:success? receipt)
+                 "TOKENS" (get-in receipt [:usage :input-tokens])
+                 "+" (get-in receipt [:usage :output-tokens]))
+        (flush)))))
+
+(defn- fail! [error]
+  (let [data (ex-data error)
+        reason (:reason data)
+        detail (or (:detail data) (.-message error))]
+    (binding [*out* *err*]
+      (println "REFUSE" (or (some-> reason name) "invalid-input") detail))
+    (set! (.-exitCode js/process) 2)))
+
+(defn -main [& args]
+  (try
+    (case (first args)
+      "plan" (let [[_ corpus-path output-path] args]
+               (when-not (and corpus-path output-path)
+                 (throw (ex-info "usage: mithril-agent-loop-bench plan <corpus.edn> <plan.edn>"
+                                 {:reason :usage})))
+               (let [plan (bench/make-plan (read-edn corpus-path))]
+                 (write-edn! output-path plan)
+                 (println "PLAN" (:corpus-id plan)
+                          "CASES" (:case-count plan)
+                          "PAIRS" (:pair-count plan)
+                          "RUNS" (count (:runs plan))
+                          "MODELS" (:models plan)
+                          "MODE" (:comparison-mode plan))))
+      "prepare" (let [[_ plan-path output-dir] args]
+                  (when-not (and plan-path output-dir)
+                    (throw (ex-info "usage: mithril-agent-loop-bench prepare <plan.edn> <fresh-output-dir>"
+                                    {:reason :usage})))
+                  (materialize! (read-edn plan-path) output-dir))
+      "run" (let [[_ plan-path output-dir receipts-path] args]
+              (when-not (and plan-path output-dir receipts-path)
+                (throw (ex-info "usage: mithril-agent-loop-bench run <plan.edn> <runs-dir> <receipts.edn>"
+                                {:reason :usage})))
+              (run-cohort! plan-path output-dir receipts-path false))
+      "pilot" (let [[_ plan-path output-dir receipts-path] args]
+                (when-not (and plan-path output-dir receipts-path)
+                  (throw (ex-info "usage: mithril-agent-loop-bench pilot <plan.edn> <runs-dir> <receipts.edn>"
+                                  {:reason :usage})))
+                (run-cohort! plan-path output-dir receipts-path true))
+      "report" (let [[_ plan-path receipts-path output-path] args]
+                 (when-not (and plan-path receipts-path output-path)
+                   (throw (ex-info "usage: mithril-agent-loop-bench report <plan.edn> <receipts.edn> <report.edn>"
+                                   {:reason :usage})))
+                 (let [report (bench/report (read-edn plan-path) (read-edn receipts-path))
+                       comparison (:paired-comparison report)]
+                   (write-edn! output-path report)
+                   (println "REPORT" (:corpus-id report)
+                            "PAIRS" (get-in comparison [:cases])
+                            "PARITY" (get-in comparison [:exact-outcome-parity])
+                            "TOKEN_INDEX" (get-in comparison [:indices :tokens])
+                            "WALL_INDEX" (get-in comparison [:indices :wall-ms]))))
+      (throw (ex-info "usage: mithril-agent-loop-bench <plan|prepare|pilot|run|report> ..."
+                      {:reason :usage})))
+    (catch :default error
+      (fail! error))))
+
+(let [args (if (seq *command-line-args*)
+             *command-line-args*
+             (subvec (vec (js->clj (.-argv js/process))) 2))]
+  (apply -main args))
