@@ -1,0 +1,6 @@
+# A System is asserted; Performer, Resource and IndividualType must be entailed.
+<urn:x:edr> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://example.org/dm2#System> .
+<urn:x:edr> <https://example.org/dm2#label> "EDR sensor" .
+# Only the SUB-property is asserted: the domain/range of the super-property must
+# still type both ends, and the CapabilityShape minCount must count the lifted triple.
+<urn:x:vm-cap> <https://example.org/dm2#desiredCapabilityOfPerformer> <urn:x:vm-svc> <urn:x:graph1> .

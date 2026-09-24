@@ -473,3 +473,10 @@
 
 (defn semantic-projection [artifact]
   (select-keys artifact [:format :media-type :graph-digest :transaction]))
+
+(defn ontology-quads
+  "The compiled ontology's JSON-LD expanded to RDF quads -- the same dataset
+  `graph-digest` hashes."
+  [artifact]
+  (to-rdf/to-rdf (jsonld/expand (:rdf-dataset artifact)
+                                {:contexts {context-uri context-document}})))

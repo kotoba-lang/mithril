@@ -5,7 +5,7 @@
   :imports
   [(mithril/import
      :library "https://mithril.fund/lib/app/agent-loop-v1"
-     :digest "sha256:a8ceb6dd2a13217028bd84e35fd8eec6d6873290a3733e9a10dce714038ced73")]
+     :digest "sha256:b7d1290a2fe8d8f6f0a17c49d2774b9396e9389fb5d070e98335d8d5517266ce")]
   :loop
   (mithril/loop
     :max-steps 6

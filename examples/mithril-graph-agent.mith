@@ -4,7 +4,7 @@
   "@type": "GraphAgentApplication",
   "goal": "https://mithril.fund/id/goal/collect-analyze-preserve-graph",
   "ontology": "f6371c58ffa5d9587867f9f7ae33aa62fabf99b354070c2ad6da5323d5c85ceb",
-  "imports": [{"library": "https://mithril.fund/lib/graph/agent-loop-v1", "digest": "sha256:5111889b429981b466e2530cb77bdeef6768e57e19c4be1c1c5d0cd16edd7a1a"}],
+  "imports": [{"library": "https://mithril.fund/lib/graph/agent-loop-v1", "digest": "sha256:f97dc0bd4f4dafd140a7217b1a766c08e7a79b36107a2f951fd0e65a2530fb2f"}],
   "loop": {
     "maxSources": 4,
     "maxBytesPerSource": 262144,

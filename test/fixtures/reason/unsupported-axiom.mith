@@ -1,0 +1,9 @@
+{"@context": "https://mithril.fund/context/v1",
+ "@id": "https://mithril.fund/ontology/test/unsupported-axiom",
+ "@type": "Ontology",
+ "profile": ["https://www.w3.org/TR/rdf11-concepts/",
+             "https://www.w3.org/TR/owl2-profiles/#OWL_2_RL",
+             "https://www.w3.org/TR/shacl/"],
+ "@graph": [{"@id": "https://example.org/dm2#Performer", "@type": "owl:Class",
+             "owl:disjointWith": {"@id": "https://example.org/dm2#Location"}},
+            {"@id": "https://example.org/dm2#Location", "@type": "owl:Class"}]}

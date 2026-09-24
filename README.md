@@ -67,6 +67,92 @@ rewrites the complete graph and never needs to emit prose. A Jev-like policy
 may eventually select the operation and arguments directly; the same action
 schema remains valid without a text decoder.
 
+## Generic reasoning: `mithril reason`
+
+`mithril.reason` reasons over ANY compiled ontology, not only the fixed
+ontologies the domain modules (checkpoint, decision, growth, state) accept:
+
+```sh
+kbb --backend sci bin/mithril.cljk reason <ontology.mith> <data.(nq|nt|jsonld|json)> \
+  [--query-type <class IRI>] [--json]
+```
+
+```clojure
+(require '[mithril.compiler :as compiler] '[mithril.reason :as reason])
+(reason/reason (compiler/compile-ontology-text path text)   ; ontology artifact
+               (reason/parse-data data-path data-text)       ; quads, or oak {:s :p :o} triples
+               {:query-type "https://…#Performer"})          ; optional
+;; => {:status :conforms | :violations | :refused
+;;     :refusal {:reason kw :detail {…}}                    ; only when refused
+;;     :rules [...] :entailed [{:s :p :o}] :inferred [...]
+;;     :types [{:s :p :o :inferred?}] :violations [{:focus :shape :path :constraint …}]
+;;     :counts {:ontology-triples :axioms :node-shapes :property-shapes
+;;              :data-triples :data-nodes :entailed :inferred :focus-nodes :checks :violations …}}
+```
+
+Exit codes: `0` conforms, `1` SHACL violations, `2` refused or unmeasurable
+(one `REFUSE<TAB>reason<TAB>detail` line). Zero data triples is exit 2
+(`no-data-triples`), never 0. Text output starts with `SCANNED` lines (ontology
+triples, axioms, shapes, data triples) so an empty or unread input is visible;
+`--json` prints the result map without the full `:entailed` list.
+
+**Axioms** are read from the ontology's RDF (its JSON-LD expanded to quads), so
+any context term that expands to one of these predicates counts. The rules are
+exactly `owl.rules/triple-rules` from `org-w3-owl2`, run to a fixpoint by
+`oak.semantic/materialize :owl2-rl`:
+
+| rule | axiom | entails |
+|---|---|---|
+| rdfs11 | `rdfs:subClassOf` (and `owl:equivalentClass`, as subsumption both ways) | transitive subclass |
+| rdfs5 | `rdfs:subPropertyOf` | transitive subproperty |
+| rdfs9 | `rdf:type` + subclass | types climb the hierarchy, from asserted and derived types |
+| rdfs7 | `rdfs:subPropertyOf` | a sub-property's triple is the super-property's |
+| rdfs2 | `rdfs:domain` | the subject's type |
+| rdfs3 | `rdfs:range` | the object's type |
+| prp-trp | `owl:TransitiveProperty` | transitive closure over derived triples |
+| prp-symp | `owl:SymmetricProperty` | the reversed triple |
+| prp-inv | `owl:inverseOf` | the inverse triple, both directions |
+
+Any other `owl:` / `rdfs:` axiom (`owl:disjointWith`, `owl:FunctionalProperty`,
+restrictions, …) refuses with `unsupported-owl-axiom`: answering without it
+would be a silent subset. A sub-property of `rdf:type` is not lifted (a stated
+gap in `owl.rules`).
+
+**SHACL subset.** Node shapes select focus nodes with `sh:targetClass` over
+ENTAILED types. Property shapes need an IRI `sh:path` (predicate paths only)
+and may carry `sh:class` (checked against entailed types), `sh:datatype`,
+`sh:minCount`, `sh:maxCount`. Values are read from the entailed graph, so a
+triple asserted on a sub-property counts for its super-property's path. Any
+other `sh:` term on a shape refuses with `unsupported-shacl-constraint`, naming
+the term; complex paths refuse with `unsupported-shacl-path`.
+
+**Limits.** Default and named graphs are reasoned over as one graph. Data
+JSON-LD may use only inline contexts or the pinned Mithril context; any other
+remote context is refused, never fetched. A predicate that is a compact IRI
+whose prefix is a Mithril context prefix (`rdfs:subClassOf` as a literal
+string) refuses with `non-iri-predicate`. Full OWL 2 DL is not approximated.
+Under RL entailment an `sh:class` constraint that restates the same property's
+`rdfs:range` can never fail: `rdfs3` already typed the value. All 62 shapes of
+the DoDAF DM2 2.02 Form ontology at `https://mithril.fund/ontology/dm2/2.02`
+are of that kind (shape class = property range, target = property domain), so
+on DM2 the SHACL pass checks focus-node selection but cannot report a
+`sh:class` violation.
+
+Measured 2026-09-25 on that DM2 ontology (173 classes, 81 properties) with
+three data triples (`edr a System`, `vm-cap capabilityOfPerformer vm-svc`,
+`edr activityPerformedByPerformer scan`): 1,658 ontology triples, 396 axioms,
+62 node shapes, 423 entailed / 24 inferred triples, 4 focus nodes, 53 checks,
+CONFORMS, in about 5 s wall on one local run. `edr` was entailed
+Performer / Resource / IndividualType / Type / Thing, `vm-cap` Capability,
+`vm-svc` Performer, `scan` Activity.
+
+Before org-w3-json-ld-api `70058cc`, the compiled ontology's RDF carried
+`rdfs:subClassOf`, `rdfs:domain`, `rdfs:range`, `sh:*` and `mith:name` as
+literal compact strings in predicate position (the context walk reached a term
+before its prefix). That pin changes every graph digest computed from such a
+term; the digests pinned in `examples/`, `lib/` consumers and tests were
+re-derived at the same time.
+
 ## Hermes coding workspace
 
 `mithril.desktop` compiles a `DesktopApplication` into a one-file Hermes
@@ -1470,6 +1556,7 @@ kbb --backend sci --classpath "$CP" bin/mithril.cljk compile-library lib/web/v1.
 kbb --backend sci --classpath "$CP" bin/mithril.cljk compile-web examples/hello-web.mith lib/web/v1.mith
 kbb --backend sci bin/mithril.cljk emit-desktop examples/mithril-desktop.mith
 kbb --backend sci --classpath "$CP" bin/mithril.cljk request examples/hello-web.mith lib/web/v1.mith GET /hello
+kbb --backend sci bin/mithril.cljk reason test/fixtures/reason/dm2-mini.mith test/fixtures/reason/conforming.nq
 kbb --backend sci --classpath "$(kbb -Spath):test" test/run.cljk
 kbb --backend sci --classpath "$CP":test test/run_synthesis.cljk
 amu check src/mithril/runtime.kotoba --jvm-free
