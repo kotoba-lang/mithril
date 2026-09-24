@@ -397,6 +397,20 @@ semantic graph digest. One local run measured 38,322 ms for fetch plus guarded
 import and 65,318 ms through independent verification. This is one loopback
 sample, not a network throughput or cache speedup claim.
 
+Closing evidence for the IPQ/1 HTTP slice: Mithril main merge
+`62c76493fb75b23b02ec570cf19898544b621009` contains the implementation,
+and root manifest commit `854cc5691322911494c565f4fc3b050353faf044`
+pins it. The focused test run on the earlier base passed 6 tests / 45
+assertions. A combined latest-base run executed 27 tests / 144 assertions with
+2 failures in the agent-loop benchmark and Hermes audit expectations; both
+failures were reproduced on the unmodified pre-IPQ main. A separate
+latest-base IPQ-only run was stopped after more than 16 minutes without a
+result, so it is **not** counted as green. The next verification is an IPQ-only
+run on current main, followed by a cold/warm comparison that counts block
+reads and hashes as well as wall time. A cross-invocation cache remains
+unimplemented; it must bind root CID, ontology/schema/verifier versions and
+the integrity of the backing bytes before skipping any verification.
+
 ```sh
 kbb --backend sci bin/mithril-checkpoint-ipq.cljk export \
   /absolute/checkpoint-store session-ref /absolute/history.car
