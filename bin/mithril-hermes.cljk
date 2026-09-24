@@ -422,9 +422,15 @@
         (catch :default error (refuse! error))
         (finally (release-lock! lock))))))
 
-(let [[command profile-path task-path state-path owner grants-csv mode tool-profile-path
-       decision-mode & extra]
-      *command-line-args*]
+(let [[command profile-path task-path state-path owner grants-csv mode option-1
+       option-2 & extra]
+      *command-line-args*
+      ;; A read-only Jev run has no coding tool profile. The single optional
+      ;; `jev` argument denotes the decision mode, not a JSON file path.
+      [tool-profile-path decision-mode]
+      (if (and (= "jev" option-1) (nil? option-2))
+        [nil "jev"]
+        [option-1 option-2])]
   (cond
     (= "profile-digest" command)
     (if (and profile-path (nil? task-path))
@@ -465,7 +471,7 @@
                  (contains? #{"shadow" "execute" "semantic-execute" "ipld-execute"} mode)
                  (empty? extra)
                  (or (nil? decision-mode)
-                     (and (= "jev" decision-mode) tool-profile-path
+                     (and (= "jev" decision-mode)
                           (= "ipld-execute" mode))))
     (usage!)
     (let [lock (try (acquire-lock! state-path) (catch :default error (refuse! error) nil))]

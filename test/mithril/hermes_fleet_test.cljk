@@ -39,6 +39,27 @@
                           "itonami.mith"
                           (assoc base "jobs" [(assoc job "effects" ["llm/agent-turn"])])))))))
 
+(deftest profile-identity-excludes-scheduler-telemetry-but-binds-declaration
+  (let [job {"jobId" "job-1" "name" "inspect" "enabled" true "noAgent" true
+             "promptDigest" "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+             "scriptDigest" "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+             "scriptPresent" true
+             "scheduleDigest" "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+             "workdir" "/tmp/work" "effects" ["scheduler/tick" "host/script-run"]}
+        source (assoc base "jobsDigest" (str "sha256:" (apply str (repeat 64 "d")))
+                           "jobs" [job])
+        digest #(:graph-digest (fleet/compile-document "itonami.mith" %))]
+    (is (= (digest source)
+           (digest (-> source
+                       (assoc "jobsDigest" (str "sha256:" (apply str (repeat 64 "e"))))
+                       (assoc-in ["jobs" 0 "enabled"] false)))))
+    (is (not= (digest source)
+              (digest (assoc-in source ["jobs" 0 "scriptDigest"]
+                                (str "sha256:" (apply str (repeat 64 "f")))))))
+    (is (not= (digest source)
+              (digest (assoc-in source ["jobs" 0 "scheduleDigest"]
+                                (str "sha256:" (apply str (repeat 64 "f")))))))))
+
 (deftest coding-admission-fails-closed
   (let [job {:effects [:scheduler/tick :agent/workspace-turn] :workdir "/tmp/work"}]
     (is (= :missing-workspace

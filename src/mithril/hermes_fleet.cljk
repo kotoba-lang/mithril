@@ -92,6 +92,15 @@
     (not (get job "noAgent"))
     (conj (if (some? (get job "workdir")) "agent/workspace-turn" "llm/agent-turn"))))
 
+(defn declaration-digest [doc]
+  ;; Hermes mutates enabled/repeat state while dispatching a finite job.
+  ;; Bind the executable declaration, and check current run authority against
+  ;; the scheduler's builtin claim separately.
+  (execution/digest
+   (-> doc
+       (dissoc "jobsDigest")
+       (update "jobs" (fn [jobs] (mapv #(dissoc % "enabled") jobs))))))
+
 (defn compile-document [path doc]
   (when-not (compiler/source-path? path)
     (fail! :mithril/unsupported-extension "Hermes profile must end in .mith or .mithril" {}))
@@ -139,7 +148,7 @@
         (fail! :mithril.fleet/unknown-effect "job requested an effect outside the closed catalog" {:job (get job "jobId")})))
     {:format artifact-format
      :media-type compiler/form-media-type
-     :graph-digest (execution/digest doc)
+     :graph-digest (declaration-digest doc)
      :profile-ir {:version :mithril.hermes-profile/v1
                   :id (get doc "@id")
                   :name profile-name

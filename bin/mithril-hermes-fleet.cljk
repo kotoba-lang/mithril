@@ -376,7 +376,8 @@
                         (parse-json (read-text (.join path output "index.json"))))
                 indexed (first (filter #(= registry-path (:profile %)) (:profiles index)))]
             (when-not (and entry target (exists? target)
-                           (= (:source entry) (read-text target))
+                           (= (:graph-digest entry)
+                              (:graph-digest (fleet/compile-text target (read-text target))))
                            (= (:graph-digest entry) (:graph-digest indexed)))
               (throw (ex-info "Hermes profile differs from compiled Mith manifest"
                               {:mithril/error :mithril.fleet/profile-drift

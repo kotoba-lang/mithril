@@ -177,6 +177,13 @@ automatic replay. Direct CLI calls with no scheduler claim are refused.
 profiles may change independently). V1 admits only `workspace/read`,
 `git/status`, and `agent/stop`; write, compile, test, and other coding effects
 need separate idempotency or reconciliation contracts before migration.
+The profile's `graph-digest`/contract `profileDigest` now binds the executable
+declaration, not Hermes's mutable `enabled` state or its derived `jobsDigest`.
+`verify-profile` still parses and checks the stored Mith declaration and
+refuses changed script, schedule, prompt, workdir, or effects. The scheduler
+separately requires a live builtin claim and checks the current job before
+execution. Existing contracts must be regenerated against a freshly synced
+fleet manifest when upgrading this identity rule.
 The read-only contract may opt into `checkpointMode=ipld-primary` only when
 the Hermes job has `repeat.times=1`. Its single builtin occurrence can take
 a Jev decision, commit the v2 ontology-validated decision output before the
@@ -195,6 +202,24 @@ $0.000032802; the two audit rows share the same request ID. The repeat-limited
 job disabled itself after completion. This proves one scheduler-originated
 read-only loop, not Jev-authored coding, fleet parity, token-free inference,
 or distributed mutable refs.
+
+A separate isolated v7 canary on 2026-09-24 exposed two adapter faults:
+read-only Jev was passed as the first optional CLI argument and interpreted as
+a tool-profile filename (`open 'jev'`), while runtime job state could drift
+from a stored profile snapshot. The corrected canary `e49cb6abfe41` completed
+one `source=builtin` execution (`f6904aa038374a9ebb63e5332d998227`).
+OpenRouter Jev selected `workspace-inspect` at confidence 9900; the governor
+admitted one `workspace/read` effect. The scheduler/IPLD verifier reported
+one completed effect, zero direct executions, three causal blocks, and a
+matched projection at CID
+`bafyreicailevwd6pngwjl7uh6jkwryd7vvnedtk64yjuhoz25pjgz4jx4q`.
+Independent v7 checkpoint verification found the Jev-output RDF Dataset with
+13 triples. Its provider usage was 776 input and 36 output tokens, cost
+$0.000032592. This is one read-only scheduler step, not a coding-workflow or
+fleet-equivalence qualification; the failed one-shot diagnostics were retained
+and never replayed. Focused fleet/scheduler and Jev tests passed; the full
+test runner was interrupted during `checkpoint-ipld-test` after several
+minutes without a result, so it is not reported as green.
 
 The coding executor now persists the `:awaiting` BPMN checkpoint and an
 `effect-requested` audit record **before** calling the host. A restarted tick
