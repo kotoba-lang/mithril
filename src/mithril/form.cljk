@@ -228,19 +228,13 @@
     :else (fail! :mithril.form/unsupported-value
                  (str "unsupported Mithril form value: " (pr-str value)))))
 
-(def ^:private mixed-value-terms
-  "IRI-coerced terms whose values may also be integer or boolean literals
-  (sh:targetNode 7, sh:in [1 2], sh:hasValue true). The pinned JSON-LD
-  expander coerces a native number under \"@type\" \"@id\" to a relative IRI;
-  JSON-LD 1.1 applies that coercion to strings only, so these are lowered as
-  explicit value objects."
-  #{"shTargetNode" "shHasValue" "shIn" "owlHasValue" "owlOneOf"})
-
-(defn- native->value-object [v]
-  (cond
-    (vector? v) (mapv native->value-object v)
-    (or (integer? v) (boolean? v)) {"@value" v}
-    :else v))
+;; IRI-coerced terms whose values may also be integer or boolean literals
+;; (sh:targetNode 7, sh:in [1 2], sh:hasValue true) are lowered as plain
+;; native values: org-w3-json-ld-api ef6a81a coerces only STRINGS under
+;; "@type" "@id" (JSON-LD 1.1 §5.3.2), so 7 expands to the literal it is.
+;; (Earlier pins made it a relative IRI and the Form wrapped such values in
+;; explicit value objects; the RDF -- and so every graph digest -- is the
+;; same either way at this pin, checked by form_test.)
 
 (defn- fields [xs]
   (when (odd? (count xs))
@@ -250,9 +244,7 @@
     (when-not (= (count names) (count (set names)))
       (fail! :mithril.form/duplicate-field "Mithril form fields must be unique"))
     (into {} (map (fn [[k v]]
-                    (let [n (key-name k)]
-                      [n (cond-> (lower-value v)
-                           (contains? mixed-value-terms n) native->value-object)]))
+                    [(key-name k) (lower-value v)])
                   pairs))))
 
 (def ^:private path-tags

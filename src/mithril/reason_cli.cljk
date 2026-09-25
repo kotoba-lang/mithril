@@ -2,7 +2,11 @@
   "`mithril reason <ontology.mith> <data.(nq|nt|jsonld)> [--query-type <iri>] [--json]`
 
   Exit 0: the data conforms to the ontology's shapes after entailment.
-  Exit 1: the SHACL Core validation report does not conform (any severity).
+  Exit 1: the SHACL Core validation report does not conform (any severity),
+          or the ontology plus data are INCONSISTENT under OWL 2 RL (one
+          `INCONSISTENCY<TAB>rule<TAB>table<TAB>premises` line per finding, last
+          line `INCONSISTENT<TAB>n`). Both are measured answers, not failures
+          to answer, so they share 1; the last line says which.
           --json adds the W3C-shaped report as data (`report`) and as expanded
           JSON-LD (`report-jsonld`).
   Exit 2: refused or unmeasurable (REFUSE line names the reason) -- including
@@ -49,6 +53,8 @@
            "\tuntargeted-node-shapes\t" (:untargeted-node-shapes c))
       (str "SCANNED\tdata-triples\t" (:data-triples c) "\tdata-nodes\t" (:data-nodes c))
       (str "ENTAILED\t" (:entailed c) "\tinferred\t" (:inferred c))
+      (str "SCHEMA\tsubclass-edges\t" (:subclass-edges c)
+           "\tsubproperty-edges\t" (:subproperty-edges c))
       (str "RULES\t" (str/join "," (map name (:rules result))))]
      (for [{:keys [s o inferred?]} (:types result)]
        (str "TYPE\t" s "\t" o "\t" (if inferred? "inferred" "asserted")))
@@ -63,8 +69,14 @@
             "\tshape\t" shape
             (when (not= "http://www.w3.org/ns/shacl#Violation" severity)
               (str "\tseverity\t" severity))))
-     [(if (= :conforms (:status result))
-        "CONFORMS"
+     (for [{:keys [rule table triples]} (:inconsistencies result)]
+       (str "INCONSISTENCY\t" (name rule) "\t" table "\t"
+            (str/join " " (map (fn [{:keys [s p o]}]
+                                 (str "(" (literal-str s) " " p " " (literal-str o) ")"))
+                               triples))))
+     [(case (:status result)
+        :conforms "CONFORMS"
+        :inconsistent (str "INCONSISTENT\t" (count (:inconsistencies result)))
         (str "VIOLATIONS\t" (:violations c)))])))
 
 (defn run
