@@ -71,6 +71,7 @@ schema remains valid without a text decoder.
 
 `mithril.reason` reasons over ANY compiled ontology, not only the fixed
 ontologies the domain modules (checkpoint, decision, growth, state) accept:
+OWL 2 RL entailment first, then W3C SHACL Core over the entailed graph.
 
 ```sh
 kbb --backend sci bin/mithril.cljk reason <ontology.mith> <data.(nq|nt|jsonld|json)> \
@@ -84,22 +85,37 @@ kbb --backend sci bin/mithril.cljk reason <ontology.mith> <data.(nq|nt|jsonld|js
                {:query-type "https://…#Performer"})          ; optional
 ;; => {:status :conforms | :violations | :refused
 ;;     :refusal {:reason kw :detail {…}}                    ; only when refused
+;;     :report {:conforms bool :results [{…}]}              ; W3C validation report, below
 ;;     :rules [...] :entailed [{:s :p :o}] :inferred [...]
-;;     :types [{:s :p :o :inferred?}] :violations [{:focus :shape :path :constraint …}]
-;;     :counts {:ontology-triples :axioms :node-shapes :property-shapes
+;;     :types [{:s :p :o :inferred?}]
+;;     :violations [{:focus :constraint :component :severity :path :expected :value :count :shape}]
+;;     :inactive [{:shape :parameter :reason}]              ; parameters that activated nothing
+;;     :counts {:ontology-triples :axioms :node-shapes :property-shapes :shape-triples
 ;;              :data-triples :data-nodes :entailed :inferred :focus-nodes :checks :violations …}}
 ```
 
-Exit codes: `0` conforms, `1` SHACL violations, `2` refused or unmeasurable
-(one `REFUSE<TAB>reason<TAB>detail` line). Zero data triples is exit 2
-(`no-data-triples`), never 0. Text output starts with `SCANNED` lines (ontology
-triples, axioms, shapes, data triples) so an empty or unread input is visible;
-`--json` prints the result map without the full `:entailed` list.
+Exit codes: `0` conforms, `1` the report does not conform (at any severity:
+SHACL's `sh:conforms` is false for a Warning or Info result too), `2` refused or
+unmeasurable (one `REFUSE<TAB>reason<TAB>detail` line). Zero data triples is
+exit 2 (`no-data-triples`), never 0. Text output starts with `SCANNED` lines
+(ontology triples, axioms, shapes, data triples) so an empty or unread input is
+visible; `INACTIVE` lines name parameters that switched no component on;
+`VIOLATION` lines add `severity` when it is not `sh:Violation`. `--json` prints
+the result map without the full `:entailed` list, including `report` and
+`report-jsonld`.
+
+### OWL: what is entailed, and the capability set
 
 **Axioms** are read from the ontology's RDF (its JSON-LD expanded to quads), so
-any context term that expands to one of these predicates counts. The rules are
-exactly `owl.rules/triple-rules` from `org-w3-owl2`, run to a fixpoint by
-`oak.semantic/materialize :owl2-rl`:
+any context term that expands to an accepted predicate counts. Entailment is
+`oak.semantic/materialize :owl2-rl` over `owl.rules/triple-rules` from
+`org-w3-owl2`. Which terms are ACCEPTED is a capability set,
+`reason/owl-vocabulary`: `owl.rules/supported-vocabulary` when the pinned
+org-w3-owl2 exports it (a map read like `owl.rules/keyword-vocabulary`, or a
+collection of `:owl/…` keywords / IRIs), otherwise `reason/fixed-owl-vocabulary`
+— the terms the current pin (`2392927`) implements. `reason/rules` is likewise
+`owl.rules/supported-rules` or `reason/fixed-rules`. Bumping the owl2 / oak pin
+to a version that exports them widens what is accepted with no change here.
 
 | rule | axiom | entails |
 |---|---|---|
@@ -113,20 +129,187 @@ exactly `owl.rules/triple-rules` from `org-w3-owl2`, run to a fixpoint by
 | prp-symp | `owl:SymmetricProperty` | the reversed triple |
 | prp-inv | `owl:inverseOf` | the inverse triple, both directions |
 
-Any other `owl:` / `rdfs:` axiom (`owl:disjointWith`, `owl:FunctionalProperty`,
-restrictions, …) refuses with `unsupported-owl-axiom`: answering without it
-would be a silent subset. A sub-property of `rdf:type` is not lifted (a stated
-gap in `owl.rules`).
+Any `owl:` / `rdfs:` axiom outside the capability set refuses with
+`unsupported-owl-axiom`, naming the predicate or type (a list-valued axiom such
+as `owl:unionOf` is named by its own predicate, not by `rdf:first`): answering
+without it would be a silent subset. `owl:ReflexiveProperty` is outside OWL 2
+RL and refuses with `not-owl2-rl` whatever the capability set says. A
+sub-property of `rdf:type` is not lifted (a stated gap in `owl.rules`).
 
-**SHACL subset.** Node shapes select focus nodes with `sh:targetClass` over
-ENTAILED types. Property shapes need an IRI `sh:path` (predicate paths only)
-and may carry `sh:class` (checked against entailed types), `sh:datatype`,
-`sh:minCount`, `sh:maxCount`. Values are read from the entailed graph, so a
-triple asserted on a sub-property counts for its super-property's path. Any
-other `sh:` term on a shape refuses with `unsupported-shacl-constraint`, naming
-the term; complex paths refuse with `unsupported-shacl-path`.
+### SHACL Core
 
-**Limits.** Default and named graphs are reasoned over as one graph. Data
+`mithril.shacl` implements W3C SHACL Core (Recommendation 2017-07-20, §2–4):
+
+- **Targets:** `sh:targetClass` (over ENTAILED types), `sh:targetNode`,
+  `sh:targetSubjectsOf`, `sh:targetObjectsOf`, and implicit class targets — a
+  shape that is a SHACL instance of `rdfs:Class` in the shapes graph (an
+  `owl:Class` alone is not, per §2.1.3.3; add `:rdf/type ["rdfs:Class"]`).
+- **Shapes:** node and property shapes, `sh:deactivated`, `sh:severity`
+  (`sh:Violation` default, `sh:Warning`, `sh:Info`, or any IRI), `sh:message`
+  (copied to `sh:resultMessage`); `sh:name`, `sh:description`, `sh:order`,
+  `sh:group`, `sh:defaultValue` are accepted and do not validate.
+- **Paths:** predicate, sequence, `sh:alternativePath`, `sh:inversePath`,
+  `sh:zeroOrMorePath`, `sh:oneOrMorePath`, `sh:zeroOrOnePath`, nested freely.
+- **Components (all 29 Core constraint-component IRIs):** `class`, `datatype` (ill-formed
+  lexical forms of XSD numeric / boolean / date / dateTime / time / gYear
+  literals fail), `nodeKind`, `minCount`, `maxCount`, `minExclusive`,
+  `minInclusive`, `maxExclusive`, `maxInclusive` (numeric, string, boolean,
+  date/dateTime comparison; incomparable values fail), `minLength`,
+  `maxLength`, `pattern` (+ `flags` `i m s x q`), `languageIn`, `uniqueLang`,
+  `equals`, `disjoint`, `lessThan`, `lessThanOrEquals`, `not`, `and`, `or`,
+  `xone`, `node`, `property`, `qualifiedValueShape` + `qualifiedMinCount` /
+  `qualifiedMaxCount` (+ `qualifiedValueShapesDisjoint`, over sibling shapes),
+  `closed` + `ignoredProperties`, `hasValue`, `in`.
+- `sh:class` is SHACL instance-of (`rdf:type`/`rdfs:subClassOf*`) in the data
+  graph, which here is the OWL 2 RL entailed graph: an entailed type satisfies
+  it, and a sub-property's triple counts for the super-property's path.
+
+A parameter whose component is incomplete activates nothing and is reported in
+`:inactive` (e.g. `sh:qualifiedMinCount` without `sh:qualifiedValueShape`,
+`sh:flags` without `sh:pattern`, `sh:ignoredProperties` without
+`sh:closed true`, and `"1"^^xsd:boolean` where SHACL names the literal `true`).
+
+**Refused, by name** (exit 2): SHACL-SPARQL (`sh:sparql`, `sh:select`,
+`sh:ask`, `sh:SPARQLConstraint`, `sh:SPARQLTarget`, `sh:prefixes`,
+`sh:declare`, …) → `unsupported-shacl-sparql`; SHACL Advanced Features and
+custom components (`sh:rule`, `sh:target`, `sh:parameter`, …) and any other
+unknown `sh:` term on a shape → `unsupported-shacl-constraint`; a path node of
+no SHACL form → `unsupported-shacl-path`; a malformed parameter (non-integer
+count, non-IRI `sh:class`, a malformed RDF list, `sh:minCount` on a node shape)
+→ `invalid-shacl-operand`; a shape that reaches itself on the same focus node →
+`recursive-shape` (SHACL leaves recursion undefined).
+
+**Validation report.** `(:report result)` is the W3C report as data:
+
+```clojure
+{:conforms false
+ :results [{:focus-node "urn:x:a"
+            :result-path {:inverse "urn:x:p"}   ; IRI string or path EDN, below
+            :value {:literal "x" :datatype "http://www.w3.org/2001/XMLSchema#string"}
+            :source-shape "_:o-b3"
+            :source-constraint-component "http://www.w3.org/ns/shacl#NodeKindConstraintComponent"
+            :result-severity "http://www.w3.org/ns/shacl#Violation"
+            :result-message [{:literal "needs p" :datatype "…#langString" :language "en"}]}]}
+```
+
+IRIs are strings, blank nodes `_:…`, literals `{:literal :datatype :language}`;
+path EDN is an IRI or `{:sequence [..]}` / `{:alternative [..]}` /
+`{:inverse p}` / `{:zero-or-more p}` / `{:one-or-more p}` / `{:zero-or-one p}`.
+`shacl/report->triples`, `shacl/report->nquads` and `shacl/report->jsonld`
+serialize it (an `sh:ValidationReport` node, one `sh:ValidationResult` per
+result, paths as SHACL path nodes and RDF lists); the tests check that the
+N-Quads and the JSON-LD both round-trip to the same RDFC-1.0 canonical graph.
+
+**W3C test suite.** `test/mithril/shacl_w3c_test.cljk` runs every approved
+entry of the W3C SHACL Core suite (w3c/data-shapes `data-shapes-test-suite/tests/core`,
+vendored at `test/fixtures/w3c-shacl` from commit `5069ed3`, see
+`PROVENANCE.edn`), manifest-driven, comparing the report as a multiset on
+focusNode / resultPath / value / sourceShape / sourceConstraintComponent /
+resultSeverity (+ resultMessage where the expected result states one) and
+`sh:conforms`. Result at this commit: **98 / 98** — complex 2/2, misc 5/5,
+node 32/32, path 13/13, property 38/38, targets 7/7, validation-reports 1/1.
+Negative controls in the same file show the comparison fails when a component
+is removed, a result is added, or a severity is changed. The suite's Turtle is
+read by a test-support reader (`test/mithril/turtle.cljk`; kotoba-lang has a
+Turtle serializer, `org-w3-turtle`, but no parser).
+
+**Why not `kotoba-lang/shacl`.** That repo is "a bounded SHACL-inspired
+validator" over canonical EDN documents: shapes address nested keyword paths in
+maps, with no RDF terms, no focus-node targets, no property paths over a graph,
+no RDF-class instance-of, containers capped at 32 entries, and a
+keyword-typed datatype set (`:string` / `:number` / `:integer` / `:boolean`).
+Its semantics differ from W3C SHACL over RDF graphs, so it cannot pass the W3C
+suite or check DM2 data; `mithril.shacl` is RDF-native instead.
+
+### Form syntax for OWL and SHACL
+
+Every key below lowers to a context term that expands to the W3C IRI (checked
+per key in `test/mithril/shacl_test.cljk`). New context terms are named
+`sh…` / `owl…` (`shMinInclusive`, `owlUnionOf`) so no bare key an existing
+document uses changes meaning; the graph digests of all 36 shipped
+`.mith` / `.mithril` files are pinned in `test/fixtures/digest-baseline.edn`
+and did not move. Vectors on list-valued keys become RDF lists
+(`rdf:first` / `rdf:rest`); strings on IRI-valued keys are IRIs (compact IRIs
+such as `"sh:IRI"` / `"rdf:type"` expand); integers and booleans are literals.
+
+| Form key | W3C term | value |
+|---|---|---|
+| `:sh/target-class` `:sh/target-node` `:sh/target-subjects-of` `:sh/target-objects-of` | targets | IRI (target-node also a literal) |
+| `:sh/property` | `sh:property` | `[(shacl/property-shape …)]` or `(rdf/node :id …)` |
+| `:sh/path` | `sh:path` | IRI or a path form |
+| `:sh/class` `:sh/datatype` `:sh/node-kind` | | IRI (`"sh:IRI"`, `"sh:BlankNodeOrIRI"`, …) |
+| `:sh/min-count` `:sh/max-count` `:sh/min-length` `:sh/max-length` `:sh/qualified-min-count` `:sh/qualified-max-count` | | integer |
+| `:sh/min-exclusive` `:sh/min-inclusive` `:sh/max-exclusive` `:sh/max-inclusive` | | literal (integer, string, `(rdf/literal …)`) |
+| `:sh/pattern` `:sh/flags` `:sh/message` `:sh/name` `:sh/description` | | string or `(rdf/literal … :language "en")` |
+| `:sh/language-in` | `sh:languageIn` | vector of strings (list) |
+| `:sh/unique-lang` `:sh/closed` `:sh/deactivated` `:sh/qualified-value-shapes-disjoint` | | boolean |
+| `:sh/equals` `:sh/disjoint` `:sh/less-than` `:sh/less-than-or-equals` | | property IRI |
+| `:sh/not` `:sh/node` `:sh/qualified-value-shape` | | shape: IRI or `(shacl/node-shape …)` |
+| `:sh/and` `:sh/or` `:sh/xone` | | vector of shapes (list) |
+| `:sh/ignored-properties` `:sh/in` | | vector (list); `:sh/in` members may be IRIs, integers, booleans, `(rdf/literal …)` |
+| `:sh/has-value` `:sh/severity` | | IRI (or literal for has-value) |
+| `:owl/disjoint-with` `:owl/complement-of` `:owl/on-property` `:owl/some-values-from` `:owl/all-values-from` `:owl/has-value` `:owl/on-class` `:owl/same-as` `:owl/different-from` `:owl/property-disjoint-with` `:owl/equivalent-property` | | IRI or nested node |
+| `:owl/members` `:owl/property-chain-axiom` `:owl/has-key` `:owl/intersection-of` `:owl/union-of` `:owl/one-of` | | vector (list) |
+| `:owl/max-cardinality` `:owl/max-qualified-cardinality` | | integer (`xsd:nonNegativeInteger`) |
+
+Typed tags: `owl/class`, `owl/object-property`, `owl/datatype-property`,
+`owl/restriction`, `owl/all-disjoint-classes`, `owl/named-individual`,
+`shacl/node-shape`, `shacl/property-shape`. A tag's own type comes first and
+`:rdf/type` ADDS types, which is how property characteristics are written:
+`(owl/object-property :id "…#partOf" :rdf/type ["owl:TransitiveProperty" "owl:FunctionalProperty"])`
+(`owl:FunctionalProperty`, `InverseFunctionalProperty`, `IrreflexiveProperty`,
+`AsymmetricProperty`, `TransitiveProperty`, `SymmetricProperty`).
+`owl:ReflexiveProperty` is refused by the Form (`not-owl2-rl`).
+
+Path forms are positional: `(path/sequence p1 p2 …)`,
+`(path/alternative p1 p2 …)` (both need two or more), `(path/inverse p)`,
+`(path/zero-or-more p)`, `(path/one-or-more p)`, `(path/zero-or-one p)`, where
+each `p` is an IRI string or another path form. `(rdf/literal "2020-01-01"
+:datatype "xsd:date")` / `(rdf/literal "hi" :language "en")` write typed and
+language-tagged literals.
+
+```clojure
+(mithril/ontology
+  :id "https://mithril.fund/ontology/example/dm2-slice"
+  :profile ["https://www.w3.org/TR/rdf11-concepts/"
+            "https://www.w3.org/TR/owl2-profiles/#OWL_2_RL"
+            "https://www.w3.org/TR/shacl/"]
+  :graph
+  [(owl/class :id "https://example.org/dm2#Performer")
+   (owl/object-property :id "https://example.org/dm2#partOf"
+                        :rdf/type ["owl:TransitiveProperty"])
+   (shacl/node-shape
+     :id "https://example.org/dm2#PerformerShape"
+     :sh/target-class "https://example.org/dm2#Performer"
+     :sh/closed true
+     :sh/ignored-properties ["rdf:type" "https://example.org/dm2#partOf"]
+     :sh/property
+     [(shacl/property-shape
+        :sh/path "https://example.org/dm2#label"
+        :sh/datatype "http://www.w3.org/2001/XMLSchema#string"
+        :sh/min-length 1 :sh/pattern "^[A-Z]" :sh/max-count 1
+        :sh/severity "sh:Warning"
+        :sh/message (rdf/literal "label must start upper-case" :language "en"))
+      (shacl/property-shape
+        :sh/path (path/sequence "https://example.org/dm2#partOf"
+                                (path/zero-or-more "https://example.org/dm2#partOf"))
+        :sh/qualified-value-shape (shacl/node-shape :sh/class "https://example.org/dm2#System")
+        :sh/qualified-min-count 1)
+      (shacl/property-shape
+        :sh/path (path/inverse "https://example.org/dm2#capabilityOfPerformer")
+        :sh/or [(shacl/node-shape :sh/class "https://example.org/dm2#Capability")
+                (shacl/node-shape :sh/node-kind "sh:BlankNode")])])])
+```
+
+(The pinned JSON-LD expander coerces a native number under `"@type": "@id"` to
+a relative IRI, where JSON-LD 1.1 coerces strings only; the Form lowers
+integers and booleans in `:sh/target-node`, `:sh/in`, `:sh/has-value`,
+`:owl/has-value` and `:owl/one-of` to explicit value objects so they stay
+literals.)
+
+### Limits
+
+Default and named graphs are reasoned over as one graph. Data
 JSON-LD may use only inline contexts or the pinned Mithril context; any other
 remote context is refused, never fetched. A predicate that is a compact IRI
 whose prefix is a Mithril context prefix (`rdfs:subClassOf` as a literal
@@ -138,7 +321,7 @@ are of that kind (shape class = property range, target = property domain), so
 on DM2 the SHACL pass checks focus-node selection but cannot report a
 `sh:class` violation.
 
-Measured 2026-09-25 on that DM2 ontology (173 classes, 81 properties) with
+Measured 2026-09-25, before SHACL Core landed, on that DM2 ontology (173 classes, 81 properties) with
 three data triples (`edr a System`, `vm-cap capabilityOfPerformer vm-svc`,
 `edr activityPerformedByPerformer scan`): 1,658 ontology triples, 396 axioms,
 62 node shapes, 423 entailed / 24 inferred triples, 4 focus nodes, 53 checks,
@@ -152,6 +335,7 @@ literal compact strings in predicate position (the context walk reached a term
 before its prefix). That pin changes every graph digest computed from such a
 term; the digests pinned in `examples/`, `lib/` consumers and tests were
 re-derived at the same time.
+
 
 ## Hermes coding workspace
 

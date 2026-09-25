@@ -2,13 +2,16 @@
   "`mithril reason <ontology.mith> <data.(nq|nt|jsonld)> [--query-type <iri>] [--json]`
 
   Exit 0: the data conforms to the ontology's shapes after entailment.
-  Exit 1: SHACL violations.
+  Exit 1: the SHACL Core validation report does not conform (any severity).
+          --json adds the W3C-shaped report as data (`report`) and as expanded
+          JSON-LD (`report-jsonld`).
   Exit 2: refused or unmeasurable (REFUSE line names the reason) -- including
           zero data triples, an unknown data format, an unparseable file, and
           any OWL axiom or SHACL constraint this reasoner does not evaluate."
   (:require [clojure.string :as str]
             [mithril.compiler :as compiler]
-            [mithril.reason :as reason]))
+            [mithril.reason :as reason]
+            [mithril.shacl :as shacl]))
 
 (defn- parse-args [args]
   (loop [[a & more] args opts {}]
@@ -49,13 +52,17 @@
       (str "RULES\t" (str/join "," (map name (:rules result))))]
      (for [{:keys [s o inferred?]} (:types result)]
        (str "TYPE\t" s "\t" o "\t" (if inferred? "inferred" "asserted")))
+     (for [{:keys [shape parameter reason]} (:inactive result)]
+       (str "INACTIVE\t" shape "\t" parameter "\t" reason))
      [(str "CHECKED\tfocus-nodes\t" (:focus-nodes c) "\tchecks\t" (:checks c))]
-     (for [{:keys [focus constraint path expected count value shape]} (:violations result)]
-       (str "VIOLATION\t" focus "\t" constraint "\t" path
+     (for [{:keys [focus constraint path expected count value shape severity] :as v} (:violations result)]
+       (str "VIOLATION\t" focus "\t" constraint "\t" (if (string? path) path (pr-str path))
             "\texpected\t" (literal-str expected)
             (when (some? count) (str "\tcount\t" count))
-            (when (some? value) (str "\tvalue\t" (literal-str value)))
-            "\tshape\t" shape))
+            (when (contains? v :value) (str "\tvalue\t" (literal-str value)))
+            "\tshape\t" shape
+            (when (not= "http://www.w3.org/ns/shacl#Violation" severity)
+              (str "\tseverity\t" severity))))
      [(if (= :conforms (:status result))
         "CONFORMS"
         (str "VIOLATIONS\t" (:violations c)))])))
@@ -111,7 +118,9 @@
       (println (.stringify js/JSON
                            (clj->js (json-safe (-> result
                                                    (dissoc :entailed)
-                                                   (assoc :exit exit))))
+                                                   (assoc :exit exit)
+                                                   (cond-> (:report result)
+                                                     (assoc :report-jsonld (shacl/report->jsonld (:report result)))))))
                            nil 2))
       (doseq [line out] (println line)))
     (js/process.exit exit)))

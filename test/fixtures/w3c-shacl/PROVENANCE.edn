@@ -1,0 +1,12 @@
+;; Vendored W3C SHACL Core test suite. Read by mithril.shacl-w3c-test.
+{:upstream "https://github.com/w3c/data-shapes"
+ :path "data-shapes-test-suite/tests/core"
+ ;; gh-pages tip when vendored (2026-09-25). The last commit that touched
+ ;; tests/core is b5f4d0c8a3 (2019-03-31, "#111: No longer require sh:value
+ ;; on sh:hasValue in node shapes"); the files are byte-identical at both.
+ :commit "5069ed3519c31cfcf074d2cf779542abc37ce80d"
+ :last-core-commit "b5f4d0c8a3"
+ :files 121
+ :approved-entries 98
+ :license "W3C Software and Document License (http://www.w3.org/Consortium/Legal/copyright-software), per the upstream LICENSE.md"
+ :modifications :none}

@@ -1,0 +1,30 @@
+(mithril/ontology
+  :id "https://mithril.fund/ontology/example/dm2-slice"
+  :profile ["https://www.w3.org/TR/rdf11-concepts/"
+            "https://www.w3.org/TR/owl2-profiles/#OWL_2_RL"
+            "https://www.w3.org/TR/shacl/"]
+  :graph
+  [(owl/class :id "https://example.org/dm2#Performer")
+   (owl/object-property :id "https://example.org/dm2#partOf"
+                        :rdf/type ["owl:TransitiveProperty"])
+   (shacl/node-shape
+     :id "https://example.org/dm2#PerformerShape"
+     :sh/target-class "https://example.org/dm2#Performer"
+     :sh/closed true
+     :sh/ignored-properties ["rdf:type" "https://example.org/dm2#partOf"]
+     :sh/property
+     [(shacl/property-shape
+        :sh/path "https://example.org/dm2#label"
+        :sh/datatype "http://www.w3.org/2001/XMLSchema#string"
+        :sh/min-length 1 :sh/pattern "^[A-Z]" :sh/max-count 1
+        :sh/severity "sh:Warning"
+        :sh/message (rdf/literal "label must start upper-case" :language "en"))
+      (shacl/property-shape
+        :sh/path (path/sequence "https://example.org/dm2#partOf"
+                                (path/zero-or-more "https://example.org/dm2#partOf"))
+        :sh/qualified-value-shape (shacl/node-shape :sh/class "https://example.org/dm2#System")
+        :sh/qualified-min-count 1)
+      (shacl/property-shape
+        :sh/path (path/inverse "https://example.org/dm2#capabilityOfPerformer")
+        :sh/or [(shacl/node-shape :sh/class "https://example.org/dm2#Capability")
+                (shacl/node-shape :sh/node-kind "sh:BlankNode")])])])

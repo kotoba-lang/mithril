@@ -1,0 +1,829 @@
+(ns mithril.shacl
+  "W3C SHACL Core (Shapes Constraint Language, W3C Recommendation 2017-07-20,
+  §2-4) over RDF triples.
+
+  Terms are the `mithril.reason` shapes: IRIs are absolute IRI strings, blank
+  nodes `_:<label>` strings, literals `{:literal :datatype :language}` maps.
+  A graph is a seq of `{:s :p :o}`.
+
+    (compile-shapes shapes-triples)           -> compiled shapes, or a refusal
+    (validate compiled data-triples)          -> {:conforms :results :counts}
+    (report->triples report) / report->nquads / report->jsonld
+
+  ## What is evaluated
+
+  Targets: sh:targetClass, sh:targetNode, sh:targetSubjectsOf,
+  sh:targetObjectsOf, and implicit class targets (a shape that is a SHACL
+  instance of rdfs:Class in the shapes graph).
+
+  Shapes: node and property shapes, sh:deactivated, sh:severity, sh:message;
+  sh:name / sh:description / sh:order / sh:group / sh:defaultValue are
+  accepted and do not validate (SHACL §2.3.2).
+
+  Paths: predicate, sequence, sh:alternativePath, sh:inversePath,
+  sh:zeroOrMorePath, sh:oneOrMorePath, sh:zeroOrOnePath, nested freely.
+
+  Components (SHACL §4): class, datatype, nodeKind, minCount, maxCount,
+  minExclusive, minInclusive, maxExclusive, maxInclusive, minLength,
+  maxLength, pattern (+ flags), languageIn, uniqueLang, equals, disjoint,
+  lessThan, lessThanOrEquals, not, and, or, xone, node, property,
+  qualifiedValueShape (+ qualifiedMinCount / qualifiedMaxCount /
+  qualifiedValueShapesDisjoint), closed (+ ignoredProperties), hasValue, in.
+
+  sh:class is SHACL instance-of: rdf:type followed by rdfs:subClassOf* in the
+  DATA graph. `mithril.reason` passes the OWL 2 RL entailed graph, so an
+  entailed type satisfies it.
+
+  ## What is refused, by name (never ignored)
+
+  SHACL-SPARQL (sh:sparql, sh:select, sh:ask, sh:SPARQLConstraint,
+  sh:SPARQLTarget, sh:prefixes, sh:declare, ... on a shape) refuses with
+  `:unsupported-shacl-sparql`; SHACL Advanced Features and custom constraint
+  components (sh:rule, sh:target, sh:parameter, ...) and any other unknown
+  sh: term on a shape refuse with `:unsupported-shacl-constraint`; a path
+  that is none of the forms above refuses with `:unsupported-shacl-path`; a
+  malformed parameter refuses with `:invalid-shacl-operand`; a shape that
+  reaches itself on the same focus node refuses with `:recursive-shape`
+  (SHACL leaves recursion undefined).
+
+  Host: kbb / ClojureScript (literal checks use js/BigInt, js/RegExp, js/Date)."
+  (:require [clojure.string :as str]
+            [nquads.core :as nq]))
+
+(def sh "http://www.w3.org/ns/shacl#")
+(def rdf "http://www.w3.org/1999/02/22-rdf-syntax-ns#")
+(def rdfs "http://www.w3.org/2000/01/rdf-schema#")
+(def xsd "http://www.w3.org/2001/XMLSchema#")
+
+(defn- s* [local] (str sh local))
+(def ^:private rdf-type (str rdf "type"))
+(def ^:private rdf-first (str rdf "first"))
+(def ^:private rdf-rest (str rdf "rest"))
+(def ^:private rdf-nil (str rdf "nil"))
+(def ^:private sub-class-of (str rdfs "subClassOf"))
+
+(defn- refuse! [reason detail]
+  (throw (ex-info (str "mithril.shacl refused: " (name reason))
+                  {:mithril.reason/refusal reason :detail detail})))
+
+(defn literal? [v] (map? v))
+(defn blank? [v] (and (string? v) (str/starts-with? v "_:")))
+(defn iri? [v] (and (string? v) (not (blank? v))))
+
+;; ── vocabulary ──────────────────────────────────────────────────────────────
+
+(def target-predicates
+  (mapv s* ["targetClass" "targetNode" "targetSubjectsOf" "targetObjectsOf"]))
+
+(def component-parameters
+  "Every SHACL Core constraint parameter. A node with one of these is a shape
+  (SHACL §2.1)."
+  (set (map s* ["class" "datatype" "nodeKind" "minCount" "maxCount"
+                "minExclusive" "minInclusive" "maxExclusive" "maxInclusive"
+                "minLength" "maxLength" "pattern" "flags" "languageIn"
+                "uniqueLang" "equals" "disjoint" "lessThan" "lessThanOrEquals"
+                "not" "and" "or" "xone" "node" "property" "qualifiedValueShape"
+                "qualifiedMinCount" "qualifiedMaxCount"
+                "qualifiedValueShapesDisjoint" "closed" "ignoredProperties"
+                "hasValue" "in"])))
+
+(def shape-level-predicates
+  (set (map s* ["path" "deactivated" "severity" "message" "name" "description"
+                "order" "group" "defaultValue"])))
+
+(def supported-predicates
+  "The sh: predicates a shape may carry."
+  (into (into component-parameters shape-level-predicates) target-predicates))
+
+(def sparql-terms
+  "SHACL-SPARQL (§5-6): out of scope, refused by name."
+  (set (map s* ["sparql" "select" "ask" "construct" "update" "prefixes" "declare"
+                "prefix" "namespace" "SPARQLConstraint" "SPARQLTarget"
+                "SPARQLTargetType" "SPARQLConstraintComponent" "SPARQLAskValidator"
+                "SPARQLSelectValidator" "SPARQLExecutable" "SPARQLAskExecutable"
+                "SPARQLSelectExecutable" "SPARQLConstructExecutable"
+                "SPARQLUpdateExecutable" "SPARQLRule" "SPARQLFunction"])))
+
+(def path-predicates
+  (set (map s* ["alternativePath" "inversePath" "zeroOrMorePath" "oneOrMorePath"
+                "zeroOrOnePath"])))
+
+(def node-kinds
+  (set (map s* ["IRI" "BlankNode" "Literal" "BlankNodeOrIRI" "BlankNodeOrLiteral"
+                "IRIOrLiteral"])))
+
+(def components
+  "Component local name -> the parameter that names it in legacy output."
+  {"Class" "class" "Datatype" "datatype" "NodeKind" "nodeKind"
+   "MinCount" "minCount" "MaxCount" "maxCount"
+   "MinExclusive" "minExclusive" "MinInclusive" "minInclusive"
+   "MaxExclusive" "maxExclusive" "MaxInclusive" "maxInclusive"
+   "MinLength" "minLength" "MaxLength" "maxLength" "Pattern" "pattern"
+   "LanguageIn" "languageIn" "UniqueLang" "uniqueLang" "Equals" "equals"
+   "Disjoint" "disjoint" "LessThan" "lessThan"
+   "LessThanOrEquals" "lessThanOrEquals" "Not" "not" "And" "and" "Or" "or"
+   "Xone" "xone" "Node" "node" "Property" "property"
+   "QualifiedMinCount" "qualifiedMinCount" "QualifiedMaxCount" "qualifiedMaxCount"
+   "Closed" "closed" "HasValue" "hasValue" "In" "in"})
+
+(def supported-components
+  "The constraint component IRIs `validate` evaluates."
+  (into (sorted-set) (map #(s* (str % "ConstraintComponent")) (keys components))))
+
+;; ── graph index ─────────────────────────────────────────────────────────────
+
+(defn index
+  "{:spo {s {p #{o}}} :pos {p {o #{s}}}}"
+  [triples]
+  (reduce (fn [g {:keys [s p o]}]
+            (-> g
+                (update-in [:spo s p] (fnil conj #{}) o)
+                (update-in [:pos p o] (fnil conj #{}) s)))
+          {:spo {} :pos {}} triples))
+
+(defn- objects [g s p] (get-in g [:spo s p] #{}))
+(defn- subjects [g p o] (get-in g [:pos p o] #{}))
+
+(defn- rdf-list
+  "The members of the RDF list at `head`, and its cells. Refuses a malformed list."
+  [g head where]
+  (loop [node head items [] cells [] seen #{}]
+    (cond
+      (= rdf-nil node) {:items items :cells cells}
+      (or (contains? seen node) (not (blank? node)))
+      (refuse! :invalid-shacl-operand {:where where :reason "not a well-formed RDF list" :node node})
+      :else
+      (let [f (objects g node rdf-first) r (objects g node rdf-rest)]
+        (when-not (and (= 1 (count f)) (= 1 (count r)))
+          (refuse! :invalid-shacl-operand {:where where :reason "not a well-formed RDF list" :node node}))
+        (recur (first r) (conj items (first f)) (conj cells node) (conj seen node))))))
+
+;; ── shapes graph -> shapes ──────────────────────────────────────────────────
+
+(defn- instance-of?
+  "SHACL instance: rdf:type then rdfs:subClassOf* in graph `g`."
+  [g node cls]
+  (loop [frontier (vec (objects g node rdf-type)) seen #{}]
+    (if-let [[t & more] (seq frontier)]
+      (cond
+        (= t cls) true
+        (contains? seen t) (recur (vec more) seen)
+        :else (recur (into (vec more) (objects g t sub-class-of)) (conj seen t)))
+      false)))
+
+(defn- shape-valued [g s]
+  (concat (objects g s (s* "node")) (objects g s (s* "property"))
+          (objects g s (s* "not")) (objects g s (s* "qualifiedValueShape"))
+          (mapcat #(:items (rdf-list g % "shape list"))
+                  (mapcat #(objects g s (s* %)) ["and" "or" "xone"]))))
+
+(defn- shape-roots
+  "Every node that is a shape by SHACL §2.1: a SHACL instance of sh:NodeShape
+  or sh:PropertyShape, the subject of a target or a constraint parameter, or
+  the value of a shape-expecting parameter -- closed over the last."
+  [g]
+  (let [spo (:spo g)
+        direct (set (for [[s ps] spo
+                          :when (or (instance-of? g s (s* "NodeShape"))
+                                    (instance-of? g s (s* "PropertyShape"))
+                                    (some #(contains? ps %) target-predicates)
+                                    (some #(contains? component-parameters %) (keys ps)))]
+                      s))]
+    (loop [frontier (vec direct) seen direct]
+      (if-let [[s & more] (seq frontier)]
+        (let [new (remove seen (shape-valued g s))]
+          (recur (into (vec more) new) (into seen new)))
+        seen))))
+
+(declare parse-path)
+
+(defn- parse-path*
+  [g node owned depth]
+  (when (> depth 64) (refuse! :unsupported-shacl-path {:path node :reason "path nesting deeper than 64"}))
+  (cond
+    (iri? node) node
+    (not (blank? node)) (refuse! :unsupported-shacl-path {:path node})
+    (seq (objects g node rdf-first))
+    (let [{:keys [items cells]} (rdf-list g node "sh:path sequence")]
+      (vswap! owned into cells)
+      (when (< (count items) 2)
+        (refuse! :unsupported-shacl-path {:path node :reason "a sequence path needs at least two members"}))
+      {:sequence (mapv #(parse-path* g % owned (inc depth)) items)})
+    :else
+    (let [ps (keys (get-in g [:spo node]))
+          [p & extra] (filter path-predicates ps)]
+      (when (or (nil? p) (seq extra) (not= 1 (count ps)) (not= 1 (count (objects g node p))))
+        (refuse! :unsupported-shacl-path {:path node :predicates (vec (sort ps))}))
+      (vswap! owned conj node)
+      (let [v (first (objects g node p))]
+        (condp = p
+          (s* "alternativePath")
+          (let [{:keys [items cells]} (rdf-list g v "sh:alternativePath")]
+            (vswap! owned into cells)
+            (when (< (count items) 2)
+              (refuse! :unsupported-shacl-path {:path node :reason "an alternative path needs at least two members"}))
+            {:alternative (mapv #(parse-path* g % owned (inc depth)) items)})
+          (s* "inversePath") {:inverse (parse-path* g v owned (inc depth))}
+          (s* "zeroOrMorePath") {:zero-or-more (parse-path* g v owned (inc depth))}
+          (s* "oneOrMorePath") {:one-or-more (parse-path* g v owned (inc depth))}
+          (s* "zeroOrOnePath") {:zero-or-one (parse-path* g v owned (inc depth))})))))
+
+(defn parse-path
+  "A path node in graph `g` -> path EDN: an IRI string, or {:sequence [..]},
+  {:alternative [..]}, {:inverse p}, {:zero-or-more p}, {:one-or-more p},
+  {:zero-or-one p}. `owned` (a volatile set) collects the blank nodes read."
+  ([g node] (parse-path g node (volatile! #{})))
+  ([g node owned] (parse-path* g node owned 0)))
+
+(defn- integer-value [v shape param]
+  (if (and (literal? v)
+           (re-matches #"[+]?[0-9]+" (:literal v))
+           (contains? #{(str xsd "integer") (str xsd "nonNegativeInteger")
+                        (str xsd "positiveInteger") (str xsd "int") (str xsd "long")}
+                      (:datatype v)))
+    (js/parseInt (:literal v) 10)
+    (refuse! :invalid-shacl-operand {:shape shape :constraint param :value v})))
+
+(def ^:dynamic ^:private *inactive* nil)
+
+(defn- inactive!
+  "Record a parameter that does not activate its component, so the omission
+  is observable in `:inactive` rather than silent."
+  [shape param reason]
+  (when *inactive* (vswap! *inactive* conj {:shape shape :parameter param :reason reason})))
+
+(defn- boolean-value
+  "SHACL names the literal true (§4); \"1\"^^xsd:boolean does not activate a
+  component (W3C core/property/uniqueLang-002)."
+  [v shape param]
+  (cond
+    (and (literal? v) (= (str xsd "boolean") (:datatype v)) (= "true" (:literal v))) true
+    (and (literal? v) (= (str xsd "boolean") (:datatype v)) (#{"false" "0" "1"} (:literal v)))
+    (do (when (= "1" (:literal v)) (inactive! shape param "only the literal true activates"))
+        false)
+    :else (refuse! :invalid-shacl-operand {:shape shape :constraint param :value v})))
+
+(defn- single! [g s p]
+  (let [vs (objects g s p)]
+    (when (> (count vs) 1)
+      (refuse! :invalid-shacl-operand {:shape s :constraint p :reason "more than one value"}))
+    (first vs)))
+
+(defn- iri-param! [v shape param]
+  (when-not (iri? v) (refuse! :invalid-shacl-operand {:shape shape :constraint param :value v}))
+  v)
+
+(defn- compile-shape [g s owned]
+  (let [ps (get-in g [:spo s] {})
+        sh-preds (filter #(str/starts-with? % sh) (keys ps))
+        sparql (filter sparql-terms sh-preds)
+        unknown (remove supported-predicates sh-preds)
+        types (objects g s rdf-type)]
+    (when-let [t (first (sort (filter sparql-terms types)))]
+      (refuse! :unsupported-shacl-sparql {:shape s :constraint t}))
+    (when (seq sparql)
+      (refuse! :unsupported-shacl-sparql {:shape s :constraint (first (sort sparql))}))
+    (when (seq unknown)
+      (refuse! :unsupported-shacl-constraint {:shape s :constraint (first (sort unknown))}))
+    (let [path-node (single! g s (s* "path"))
+          path (when path-node (parse-path g path-node owned))
+          property? (some? path)
+          list-of (fn [p]
+                    (let [heads (objects g s p)]
+                      (mapv (fn [h] (let [{:keys [items cells]} (rdf-list g h p)]
+                                      (vswap! owned into cells)
+                                      items))
+                            heads)))
+          int-of (fn [p] (some-> (single! g s p) (integer-value s p)))
+          c (fn [local & kvs] (apply hash-map :component (s* (str local "ConstraintComponent"))
+                                     :param (s* (get components local)) kvs))
+          comps
+          (vec
+           (concat
+            (for [v (objects g s (s* "class"))] (c "Class" :value (iri-param! v s "sh:class")))
+            (for [v (objects g s (s* "datatype"))] (c "Datatype" :value (iri-param! v s "sh:datatype")))
+            (for [v (objects g s (s* "nodeKind"))]
+              (do (when-not (contains? node-kinds v)
+                    (refuse! :invalid-shacl-operand {:shape s :constraint "sh:nodeKind" :value v}))
+                  (c "NodeKind" :value v)))
+            (when-let [n (int-of (s* "minCount"))] [(c "MinCount" :value n)])
+            (when-let [n (int-of (s* "maxCount"))] [(c "MaxCount" :value n)])
+            (for [[local p] [["MinExclusive" "minExclusive"] ["MinInclusive" "minInclusive"]
+                             ["MaxExclusive" "maxExclusive"] ["MaxInclusive" "maxInclusive"]]
+                  v (objects g s (s* p))]
+              (do (when-not (literal? v) (refuse! :invalid-shacl-operand {:shape s :constraint p :value v}))
+                  (c local :value v)))
+            (when-let [n (int-of (s* "minLength"))] [(c "MinLength" :value n)])
+            (when-let [n (int-of (s* "maxLength"))] [(c "MaxLength" :value n)])
+            (let [flags (single! g s (s* "flags"))]
+              (when (and flags (empty? (objects g s (s* "pattern"))))
+                (inactive! s "sh:flags" "sh:flags without sh:pattern"))
+              (for [v (objects g s (s* "pattern"))]
+                (do (when-not (literal? v) (refuse! :invalid-shacl-operand {:shape s :constraint "sh:pattern" :value v}))
+                    (c "Pattern" :value v :flags (some-> flags :literal)))))
+            (for [langs (list-of (s* "languageIn"))]
+              (do (when-not (every? literal? langs)
+                    (refuse! :invalid-shacl-operand {:shape s :constraint "sh:languageIn"}))
+                  (c "LanguageIn" :value (mapv :literal langs))))
+            (when-let [u (single! g s (s* "uniqueLang"))]
+              (when (boolean-value u s "sh:uniqueLang") [(c "UniqueLang" :value true)]))
+            (for [local ["Equals" "Disjoint" "LessThan" "LessThanOrEquals"]
+                  :let [p (get components local)]
+                  v (objects g s (s* p))]
+              (c local :value (iri-param! v s (str "sh:" p))))
+            (for [v (objects g s (s* "not"))] (c "Not" :value v))
+            (for [local ["And" "Or" "Xone"]
+                  shapes (list-of (s* (get components local)))]
+              (c local :value shapes))
+            (for [v (objects g s (s* "node"))] (c "Node" :value v))
+            (for [v (objects g s (s* "property"))] (c "Property" :value v))
+            (let [qvs (objects g s (s* "qualifiedValueShape"))
+                  qmin (int-of (s* "qualifiedMinCount"))
+                  qmax (int-of (s* "qualifiedMaxCount"))
+                  disjoint? (some-> (single! g s (s* "qualifiedValueShapesDisjoint"))
+                                    (boolean-value s "sh:qualifiedValueShapesDisjoint"))]
+              (when (and (or qmin qmax) (empty? qvs))
+                (inactive! s "sh:qualifiedMinCount/sh:qualifiedMaxCount" "no sh:qualifiedValueShape"))
+              (for [q qvs
+                    [local n] [["QualifiedMinCount" qmin] ["QualifiedMaxCount" qmax]]
+                    :when n]
+                (c local :value n :shape q :disjoint? (boolean disjoint?))))
+            (when (and (seq (objects g s (s* "ignoredProperties")))
+                       (not (some-> (single! g s (s* "closed")) (boolean-value s "sh:closed"))))
+              (inactive! s "sh:ignoredProperties" "sh:closed is not true"))
+            (when-let [cl (single! g s (s* "closed"))]
+              (when (boolean-value cl s "sh:closed")
+                [(c "Closed" :value true
+                    :ignored (set (apply concat (list-of (s* "ignoredProperties")))))]))
+            (for [v (objects g s (s* "hasValue"))] (c "HasValue" :value v))
+            (for [members (list-of (s* "in"))] (c "In" :value (set members) :members members))))]
+    (doseq [k ["minCount" "maxCount" "uniqueLang" "qualifiedValueShape"]]
+      (when (and (not property?) (seq (objects g s (s* k))))
+        (refuse! :invalid-shacl-operand {:shape s :constraint (str "sh:" k)
+                                         :reason "only allowed on a property shape"})))
+    {:id s
+     :path path
+     :targets {:class (vec (objects g s (s* "targetClass")))
+               :node (vec (objects g s (s* "targetNode")))
+               :subjects-of (vec (objects g s (s* "targetSubjectsOf")))
+               :objects-of (vec (objects g s (s* "targetObjectsOf")))
+               :implicit-class? (and (iri? s) (instance-of? g s (str rdfs "Class")))}
+     :deactivated (boolean (some-> (single! g s (s* "deactivated"))
+                                   (boolean-value s "sh:deactivated")))
+     :severity (or (some-> (single! g s (s* "severity")) (iri-param! s "sh:severity"))
+                   (s* "Violation"))
+     :messages (vec (sort-by pr-str (objects g s (s* "message"))))
+     :components comps})))
+
+(defn compile-shapes
+  "Shapes-graph triples -> {:shapes {id shape} :shape-ids #{..} :owned #{..}}.
+  `:owned` is the set of auxiliary blank nodes (path nodes, list cells) whose
+  triples belong to the shapes. Refuses (ex-info with
+  :mithril.reason/refusal) on any unsupported or malformed construct."
+  [triples]
+  (let [g (index triples)
+        roots (shape-roots g)
+        owned (volatile! #{})
+        inactive (volatile! [])
+        shapes (binding [*inactive* inactive]
+                 (into {} (map (fn [s] [s (compile-shape g s owned)]) (sort roots))))
+        ;; parents: which shapes carry each property shape (for qualified siblings)
+        parents (reduce (fn [m [id shape]]
+                          (reduce (fn [m comp]
+                                    (if (= (s* "PropertyConstraintComponent") (:component comp))
+                                      (update m (:value comp) (fnil conj #{}) id)
+                                      m))
+                                  m (:components shape)))
+                        {} shapes)]
+    {:shapes shapes
+     :shape-ids (set (keys shapes))
+     :owned @owned
+     :inactive @inactive
+     :parents parents
+     :graph g}))
+
+;; ── data graph evaluation ───────────────────────────────────────────────────
+
+(defn- step [g node p inverse?]
+  (if inverse? (subjects g p node) (if (literal? node) #{} (objects g node p))))
+
+(declare eval-path*)
+
+(defn- closure [g path nodes inverse? include-start?]
+  (loop [frontier (vec nodes) seen (if include-start? (set nodes) #{})]
+    (if-let [[n & more] (seq frontier)]
+      (let [next (remove seen (eval-path* g path n inverse?))]
+        (recur (into (vec more) next) (into seen next)))
+      seen)))
+
+(defn- eval-path* [g path node inverse?]
+  (cond
+    (string? path) (step g node path inverse?)
+    (:inverse path) (eval-path* g (:inverse path) node (not inverse?))
+    (:sequence path) (reduce (fn [nodes p] (set (mapcat #(eval-path* g p % inverse?) nodes)))
+                             #{node}
+                             (if inverse? (reverse (:sequence path)) (:sequence path)))
+    (:alternative path) (set (mapcat #(eval-path* g % node inverse?) (:alternative path)))
+    (:zero-or-more path) (closure g (:zero-or-more path) [node] inverse? true)
+    (:one-or-more path) (closure g (:one-or-more path) [node] inverse? false)
+    (:zero-or-one path) (conj (set (eval-path* g (:zero-or-one path) node inverse?)) node)
+    :else (refuse! :unsupported-shacl-path {:path path})))
+
+(defn eval-path
+  "The value nodes of `path` from `node` in indexed data graph `g`."
+  [g path node]
+  (set (eval-path* g path node false)))
+
+;; ── literals ────────────────────────────────────────────────────────────────
+
+(def ^:private integer-types
+  {"integer" nil "nonNegativeInteger" ["0" nil] "positiveInteger" ["1" nil]
+   "nonPositiveInteger" [nil "0"] "negativeInteger" [nil "-1"]
+   "long" ["-9223372036854775808" "9223372036854775807"] "int" ["-2147483648" "2147483647"]
+   "short" ["-32768" "32767"] "byte" ["-128" "127"]
+   "unsignedLong" ["0" "18446744073709551615"] "unsignedInt" ["0" "4294967295"]
+   "unsignedShort" ["0" "65535"] "unsignedByte" ["0" "255"]})
+
+(def ^:private tz "(Z|[+-](0[0-9]|1[0-4]):[0-5][0-9])?")
+(def ^:private date-re (re-pattern (str "^-?[0-9]{4,}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])" tz "$")))
+(def ^:private datetime-re
+  (re-pattern (str "^-?[0-9]{4,}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T"
+                   "(([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](\\.[0-9]+)?|24:00:00(\\.0+)?)" tz "$")))
+(def ^:private time-re
+  (re-pattern (str "^(([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](\\.[0-9]+)?|24:00:00(\\.0+)?)" tz "$")))
+
+(defn- local [dt] (when (and (string? dt) (str/starts-with? dt xsd)) (subs dt (count xsd))))
+
+(defn well-formed?
+  "Is literal `v`'s lexical form in its datatype's lexical space? Datatypes
+  outside the XSD set below are taken as well-formed."
+  [{:keys [literal datatype language]}]
+  (let [l (local datatype)]
+    (cond
+      (= datatype (str rdf "langString")) (boolean (seq language))
+      (contains? integer-types l)
+      (and (re-matches #"[+-]?[0-9]+" literal)
+           (let [n (js/BigInt (str/replace literal #"^\+" ""))
+                 [lo hi] (get integer-types l)]
+             (and (or (nil? lo) (>= n (js/BigInt lo)))
+                  (or (nil? hi) (<= n (js/BigInt hi))))))
+      (= l "decimal") (boolean (re-matches #"[+-]?([0-9]+(\.[0-9]*)?|\.[0-9]+)" literal))
+      (#{"float" "double"} l)
+      (boolean (re-matches #"([+-]?([0-9]+(\.[0-9]*)?|\.[0-9]+)([eE][+-]?[0-9]+)?|[+-]?INF|NaN)" literal))
+      (= l "boolean") (contains? #{"true" "false" "1" "0"} literal)
+      (= l "date") (boolean (re-find date-re literal))
+      (= l "dateTime") (boolean (re-find datetime-re literal))
+      (= l "dateTimeStamp") (boolean (and (re-find datetime-re literal)
+                                          (re-find #"(Z|[+-][0-9]{2}:[0-9]{2})$" literal)))
+      (= l "time") (boolean (re-find time-re literal))
+      (= l "gYear") (boolean (re-matches (re-pattern (str "-?[0-9]{4,}" tz)) literal))
+      (= l "string") (not language)
+      :else true)))
+
+(def ^:private numeric-locals
+  (into #{"decimal" "float" "double"} (keys integer-types)))
+
+(defn- comparable-key
+  "[category value] for ordering, or nil when the literal has no order."
+  [v]
+  (when (and (literal? v) (well-formed? v))
+    (let [l (local (:datatype v)) lex (:literal v)]
+      (cond
+        (contains? numeric-locals l) [:numeric (js/Number lex)]
+        (= l "string") [:string lex]
+        (= l "boolean") [:boolean (if (#{"true" "1"} lex) 1 0)]
+        (#{"dateTime" "dateTimeStamp"} l)
+        [(if (re-find #"(Z|[+-][0-9]{2}:[0-9]{2})$" lex) :dateTime-tz :dateTime) lex]
+        (= l "date") [(if (re-find #"(Z|[+-][0-9]{2}:[0-9]{2})$" lex) :date-tz :date) lex]
+        (= l "time") [:time lex]
+        :else nil))))
+
+(defn- compare-terms
+  "-1 / 0 / 1 per SPARQL `<` on literals, nil when incomparable."
+  [a b]
+  (let [[ca va] (comparable-key a) [cb vb] (comparable-key b)]
+    (when (and ca (= ca cb))
+      (case ca
+        (:dateTime-tz) (compare (.getTime (js/Date. va)) (.getTime (js/Date. vb)))
+        (:date-tz) (compare (.getTime (js/Date. (str (subs va 0 10) "T00:00:00" (subs va 10))))
+                            (.getTime (js/Date. (str (subs vb 0 10) "T00:00:00" (subs vb 10)))))
+        (compare va vb)))))
+
+(defn- lexical [v] (cond (literal? v) (:literal v) (iri? v) v :else nil))
+
+(defn- lang-matches? [tag range]
+  (let [tag (str/lower-case (or tag "")) range (str/lower-case range)]
+    (or (= "*" range)
+        (and (seq tag) (or (= tag range) (str/starts-with? tag (str range "-")))))))
+
+(defn- regex [pattern flags]
+  (let [flags (or flags "")
+        bad (remove #{\i \m \s \x \q} flags)]
+    (when (seq bad)
+      (refuse! :invalid-shacl-operand {:constraint "sh:flags" :value flags}))
+    (let [src (cond-> pattern
+                (str/includes? flags "q") (str/replace #"[.*+?^${}()|\[\]\\]" "\\$&")
+                (str/includes? flags "x") (str/replace #"\s" ""))]
+      (try (js/RegExp. src (str "u" (apply str (filter #{\i \m \s} flags))))
+           (catch :default _
+             (try (js/RegExp. src (apply str (filter #{\i \m \s} flags)))
+                  (catch :default _
+                    (refuse! :invalid-shacl-operand {:constraint "sh:pattern" :value pattern}))))))))
+
+;; ── validation ──────────────────────────────────────────────────────────────
+
+(def ^:dynamic ^:private *stack* #{})
+
+(declare validate-shape)
+
+(defn conforms?
+  "Does `node` conform to shape `shape-id`?"
+  [ctx shape-id node]
+  (empty? (validate-shape ctx shape-id node)))
+
+(defn- node-kind-ok? [kind v]
+  (let [i (iri? v) b (blank? v) l (literal? v)]
+    (condp = kind
+      (s* "IRI") i (s* "BlankNode") b (s* "Literal") l
+      (s* "BlankNodeOrIRI") (or b i) (s* "BlankNodeOrLiteral") (or b l)
+      (s* "IRIOrLiteral") (or i l))))
+
+(defn- sibling-shapes [{:keys [compiled]} ps-id q]
+  (let [{:keys [shapes parents]} compiled]
+    (set (for [parent (get parents ps-id)
+               comp (:components (get shapes parent))
+               :when (= (s* "PropertyConstraintComponent") (:component comp))
+               :let [sib (get shapes (:value comp))]
+               :when sib
+               c (:components sib)
+               :when (#{(s* "QualifiedMinCountConstraintComponent")
+                        (s* "QualifiedMaxCountConstraintComponent")} (:component c))
+               :when (not= q (:shape c))]
+           (:shape c)))))
+
+(defn- evaluate-component
+  "Results (maps without shape-level fields) for one component."
+  [{:keys [g] :as ctx} shape focus values {:keys [component value] :as comp}]
+  (let [r (fn [& kvs] (apply hash-map :component comp kvs))
+        c (subs component (count sh))]
+    (case c
+      "ClassConstraintComponent"
+      (for [v values :when (or (literal? v) (not (instance-of? g v value)))] (r :value v))
+      "DatatypeConstraintComponent"
+      (for [v values :when (not (and (literal? v) (= value (:datatype v)) (well-formed? v)))] (r :value v))
+      "NodeKindConstraintComponent"
+      (for [v values :when (not (node-kind-ok? value v))] (r :value v))
+      "MinCountConstraintComponent" (when (< (count values) value) [(r :count (count values))])
+      "MaxCountConstraintComponent" (when (> (count values) value) [(r :count (count values))])
+      "MinExclusiveConstraintComponent"
+      (for [v values :when (not= -1 (compare-terms value v))] (r :value v))
+      "MinInclusiveConstraintComponent"
+      (for [v values :when (not (#{-1 0} (compare-terms value v)))] (r :value v))
+      "MaxExclusiveConstraintComponent"
+      (for [v values :when (not= -1 (compare-terms v value))] (r :value v))
+      "MaxInclusiveConstraintComponent"
+      (for [v values :when (not (#{-1 0} (compare-terms v value)))] (r :value v))
+      "MinLengthConstraintComponent"
+      (for [v values :let [s (lexical v)] :when (or (nil? s) (< (count s) value))] (r :value v))
+      "MaxLengthConstraintComponent"
+      (for [v values :let [s (lexical v)] :when (or (nil? s) (> (count s) value))] (r :value v))
+      "PatternConstraintComponent"
+      (let [re (regex (:literal value) (:flags comp))]
+        (for [v values :let [s (lexical v)] :when (or (nil? s) (not (.test re s)))] (r :value v)))
+      "LanguageInConstraintComponent"
+      (for [v values
+            :when (not (and (literal? v) (:language v)
+                            (some #(lang-matches? (:language v) %) value)))]
+        (r :value v))
+      "UniqueLangConstraintComponent"
+      (for [[lang n] (frequencies (keep #(some-> (when (literal? %) (:language %)) str/lower-case) values))
+            :when (and (seq lang) (> n 1))]
+        (r :lang lang))
+      "EqualsConstraintComponent"
+      (let [others (objects g focus value)]
+        (concat (for [v values :when (not (contains? others v))] (r :value v))
+                (for [o others :when (not (contains? values o))] (r :value o))))
+      "DisjointConstraintComponent"
+      (let [others (objects g focus value)]
+        (for [v values :when (contains? others v)] (r :value v)))
+      "LessThanConstraintComponent"
+      (let [others (objects g focus value)]
+        (for [v values o others :when (not= -1 (compare-terms v o))] (r :value v)))
+      "LessThanOrEqualsConstraintComponent"
+      (let [others (objects g focus value)]
+        (for [v values o others :when (not (#{-1 0} (compare-terms v o)))] (r :value v)))
+      "NotConstraintComponent"
+      (for [v values :when (conforms? ctx value v)] (r :value v))
+      "AndConstraintComponent"
+      (for [v values :when (not (every? #(conforms? ctx % v) value))] (r :value v))
+      "OrConstraintComponent"
+      (for [v values :when (not (some #(conforms? ctx % v) value))] (r :value v))
+      "XoneConstraintComponent"
+      (for [v values :when (not= 1 (count (filter #(conforms? ctx % v) value)))] (r :value v))
+      "NodeConstraintComponent"
+      (for [v values :when (not (conforms? ctx value v))] (r :value v))
+      "PropertyConstraintComponent"
+      (for [v values res (validate-shape ctx value v)] (assoc res ::nested true))
+      ("QualifiedMinCountConstraintComponent" "QualifiedMaxCountConstraintComponent")
+      (let [q (:shape comp)
+            sibs (if (:disjoint? comp) (sibling-shapes ctx (:id shape) q) #{})
+            n (count (filter (fn [v] (and (conforms? ctx q v)
+                                          (not-any? #(conforms? ctx % v) sibs)))
+                             values))]
+        (if (= c "QualifiedMinCountConstraintComponent")
+          (when (< n value) [(r :count n)])
+          (when (> n value) [(r :count n)])))
+      "ClosedConstraintComponent"
+      (let [allowed (into (:ignored comp)
+                          (for [cmp (:components shape)
+                                :when (= (s* "PropertyConstraintComponent") (:component cmp))
+                                :let [p (:path (get-in ctx [:compiled :shapes (:value cmp)]))]
+                                :when (string? p)]
+                            p))]
+        (for [v values
+              :when (not (literal? v))
+              [p os] (sort-by key (get-in g [:spo v]))
+              :when (not (contains? allowed p))
+              o (sort-by pr-str os)]
+          (r :value o :result-path p)))
+      "HasValueConstraintComponent"
+      (when-not (contains? values value) [(r)])
+      "InConstraintComponent"
+      (for [v values :when (not (contains? value v))] (r :value v)))))
+
+(defn validate-shape
+  "Results of validating `node` against shape `shape-id` (SHACL §3.4)."
+  [{:keys [g compiled checks] :as ctx} shape-id node]
+  (let [shape (get-in compiled [:shapes shape-id])]
+    (cond
+      (nil? shape) (refuse! :unsupported-shacl-constraint {:shape shape-id :reason "referenced shape was not compiled"})
+      (:deactivated shape) []
+      (contains? *stack* [shape-id node]) (refuse! :recursive-shape {:shape shape-id :focus node})
+      :else
+      (binding [*stack* (conj *stack* [shape-id node])]
+        (let [values (if (:path shape) (eval-path g (:path shape) node) #{node})]
+          (vec
+           (for [comp (:components shape)
+                 :let [_ (when checks (vswap! checks inc))]
+                 res (evaluate-component ctx shape node values comp)]
+             (if (::nested res)
+               (dissoc res ::nested)
+               (cond-> {:focus-node node
+                        :source-shape shape-id
+                        :source-constraint-component (:component (:component res))
+                        :result-severity (:severity shape)
+                        :param (:param (:component res))
+                        :expected (let [c (:component res)]
+                                    (case (subs (:component c) (count sh))
+                                      ("QualifiedMinCountConstraintComponent"
+                                       "QualifiedMaxCountConstraintComponent") (:value c)
+                                      ("InConstraintComponent") (:members c)
+                                      (:value c)))}
+                 (contains? res :value) (assoc :value (:value res))
+                 (contains? res :count) (assoc :count (:count res))
+                 (:result-path res) (assoc :result-path (:result-path res))
+                 (and (:path shape) (not (:result-path res))) (assoc :result-path (:path shape))
+                 (seq (:messages shape)) (assoc :result-message (:messages shape)))))))))))
+
+(defn focus-nodes
+  "The focus nodes of `shape` in indexed data graph `g` (SHACL §2.1.3)."
+  [g shape]
+  (let [{:keys [class node subjects-of objects-of implicit-class?]} (:targets shape)
+        instances (fn [c] (filter #(instance-of? g % c) (keys (:spo g))))]
+    (set (concat node
+                 (mapcat instances class)
+                 (when implicit-class? (instances (:id shape)))
+                 (mapcat #(apply concat (vals (get-in g [:pos %]))) subjects-of)
+                 (mapcat #(keys (get-in g [:pos %])) objects-of)))))
+
+(defn validate
+  "compiled: `compile-shapes` output. data-triples: the data graph.
+  Returns {:conforms bool :results [result] :counts {:focus-nodes :checks :results}}.
+  A result is {:focus-node :result-path :value :source-shape
+  :source-constraint-component :result-severity :result-message} plus the
+  legacy fields :param / :expected / :count."
+  [compiled data-triples]
+  (let [g (index data-triples)
+        checks (volatile! 0)
+        ctx {:g g :compiled compiled :checks checks}
+        targeted (for [[id shape] (sort-by key (:shapes compiled))
+                       :when (not (:deactivated shape))
+                       node (sort-by pr-str (focus-nodes g shape))]
+                   [id node])
+        results (vec (mapcat (fn [[id node]] (validate-shape ctx id node)) targeted))
+        results (vec (sort-by (juxt (comp pr-str :focus-node) (comp pr-str :source-shape)
+                                    :source-constraint-component (comp pr-str :value))
+                              results))]
+    {:conforms (empty? results)
+     :results results
+     :counts {:focus-nodes (count (set (map second targeted)))
+              :checks @checks
+              :results (count results)}}))
+
+;; ── the report ──────────────────────────────────────────────────────────────
+
+(def report-keys
+  [:focus-node :result-path :value :source-shape :source-constraint-component
+   :result-severity :result-message])
+
+(defn report
+  "The W3C-shaped validation report as data (SHACL §3.6)."
+  [{:keys [conforms results]}]
+  {:conforms conforms
+   :results (mapv #(select-keys % report-keys) results)})
+
+(defn- path-triples
+  "Path EDN -> [node triples] with fresh blank nodes from `fresh`."
+  [path fresh]
+  (let [list-of (fn [items]
+                  (let [parts (mapv #(path-triples % fresh) items)
+                        cells (vec (repeatedly (count items) fresh))]
+                    [(first cells)
+                     (vec (concat (mapcat second parts)
+                                  (mapcat (fn [i cell]
+                                            [{:s cell :p rdf-first :o (first (nth parts i))}
+                                             {:s cell :p rdf-rest :o (get cells (inc i) rdf-nil)}])
+                                          (range) cells)))]))
+        wrap (fn [p inner]
+               (let [n (fresh) [o ts] (path-triples inner fresh)]
+                 [n (conj ts {:s n :p (s* p) :o o})]))]
+    (cond
+      (string? path) [path []]
+      (:sequence path) (list-of (:sequence path))
+      (:alternative path) (let [n (fresh) [head ts] (list-of (:alternative path))]
+                            [n (conj ts {:s n :p (s* "alternativePath") :o head})])
+      (:inverse path) (wrap "inversePath" (:inverse path))
+      (:zero-or-more path) (wrap "zeroOrMorePath" (:zero-or-more path))
+      (:one-or-more path) (wrap "oneOrMorePath" (:one-or-more path))
+      (:zero-or-one path) (wrap "zeroOrOnePath" (:zero-or-one path)))))
+
+(defn report->triples
+  "The report as RDF triples: one sh:ValidationReport, one sh:ValidationResult
+  per result, paths as SHACL path nodes and RDF lists."
+  [rep]
+  (let [n (volatile! 0)
+        fresh #(str "_:b" (vswap! n inc))
+        root "_:report"
+        bool {:literal (str (boolean (:conforms rep))) :datatype (str xsd "boolean")}]
+    (vec
+     (concat
+      [{:s root :p rdf-type :o (s* "ValidationReport")}
+       {:s root :p (s* "conforms") :o bool}]
+      (mapcat (fn [{:keys [focus-node result-path value source-shape
+                           source-constraint-component result-severity result-message] :as res}]
+                (let [r (fresh)
+                      [po pts] (when result-path (path-triples result-path fresh))]
+                  (concat
+                   [{:s root :p (s* "result") :o r}
+                    {:s r :p rdf-type :o (s* "ValidationResult")}
+                    {:s r :p (s* "focusNode") :o focus-node}
+                    {:s r :p (s* "sourceConstraintComponent") :o source-constraint-component}
+                    {:s r :p (s* "resultSeverity") :o result-severity}
+                    {:s r :p (s* "sourceShape") :o source-shape}]
+                   (when result-path (cons {:s r :p (s* "resultPath") :o po} pts))
+                   (when (contains? res :value) [{:s r :p (s* "value") :o value}])
+                   (for [m result-message] {:s r :p (s* "resultMessage") :o m}))))
+              (:results rep))))))
+
+(defn- term->quad-term [v]
+  (cond
+    (literal? v) (cond-> {:type :literal :value (:literal v)}
+                   (:language v) (assoc :language (:language v))
+                   (and (not (:language v)) (not= (str xsd "string") (:datatype v)))
+                   (assoc :datatype (:datatype v)))
+    (blank? v) {:type :blank :value (subs v 2)}
+    :else {:type :iri :value v}))
+
+(defn triples->quads
+  "{:s :p :o} -> json-ld-api / nquads quad maps (default graph)."
+  [triples]
+  (mapv (fn [{:keys [s p o]}]
+          {:subject (term->quad-term s) :predicate (term->quad-term p) :object (term->quad-term o)})
+        triples))
+
+(defn report->jsonld
+  "The report as expanded JSON-LD (a vector of node objects). Lists stay as
+  rdf:first / rdf:rest nodes, which is valid expanded JSON-LD and round-trips
+  through JSON-LD -> RDF to the same graph."
+  [rep]
+  (let [triples (report->triples rep)
+        obj (fn [v] (cond
+                      (literal? v) (cond-> {"@value" (:literal v)}
+                                     (:language v) (assoc "@language" (:language v))
+                                     (and (not (:language v))
+                                          (not= (str xsd "string") (:datatype v)))
+                                     (assoc "@type" (:datatype v)))
+                      :else {"@id" v}))]
+    (->> (group-by :s triples)
+         (sort-by key)
+         (mapv (fn [[s ts]]
+                 (reduce (fn [node {:keys [p o]}]
+                           (if (= p rdf-type)
+                             (update node "@type" (fnil conj []) o)
+                             (update node p (fnil conj []) (obj o))))
+                         {"@id" s} ts))))))
+
+(defn report->nquads
+  "The report as N-Quads text (default graph), via `nquads.core`."
+  [rep]
+  (nq/serialize-dataset (triples->quads (report->triples rep))))
