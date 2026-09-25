@@ -57,14 +57,16 @@
   (str "(shacl/node-shape :id \"urn:x:S\" :sh/target-node \"urn:x:a\" " (str/join " " kvs) ")"))
 
 (def cases
-  "[component shape-form violating-data conforming-data]"
+  "[component shape-form violating-data conforming-data inconsistency-rules?]"
   [["Class" (ps ":sh/class \"urn:x:C\"")
     (t a "urn:x:p" (i "urn:x:b"))
     (str (t a "urn:x:p" (i "urn:x:b")) (t "urn:x:b" type* (i "urn:x:C")))]
    ["Datatype" (ps ":sh/datatype \"http://www.w3.org/2001/XMLSchema#integer\"")
     (t a "urn:x:p" "\"x\"") (t a "urn:x:p" (int* 5))]
    ["Datatype" (ps ":sh/datatype \"http://www.w3.org/2001/XMLSchema#integer\"")
-    (t a "urn:x:p" (str "\"five\"^^<" xsd "integer>")) (t a "urn:x:p" (int* 5))]
+    ;; an ill-typed literal is ALSO an OWL 2 RL inconsistency (dt-not-type),
+    ;; which outranks the SHACL result in :status; the report still names it
+    (t a "urn:x:p" (str "\"five\"^^<" xsd "integer>")) (t a "urn:x:p" (int* 5)) #{:dt-not-type}]
    ["NodeKind" (ps ":sh/node-kind \"sh:IRI\"")
     (t a "urn:x:p" "\"x\"") (t a "urn:x:p" (i "urn:x:b"))]
    ["MinCount" (ps ":sh/min-count 2")
@@ -125,12 +127,14 @@
     (str (t a "urn:x:p" (i "urn:x:v")) (t a "urn:x:p" (int* 1)) (t a "urn:x:p" "\"s\""))]])
 
 (deftest every-constraint-component-fails-for-its-own-reason
-  (doseq [[component shape bad good] cases]
+  (doseq [[component shape bad good incons] cases]
     (testing (str component " " shape)
       (let [o (onto shape)
             r (run o bad)
             c (run o good)]
-        (is (= :violations (:status r)) (pr-str (:refusal r)))
+        (is (= (if incons :inconsistent :violations) (:status r)) (pr-str (:refusal r)))
+        (is (= (or incons #{}) (set (map :rule (:inconsistencies r)))))
+        (is (false? (get-in r [:report :conforms])))
         (is (= #{(str component "ConstraintComponent")} (components r)))
         (is (= :conforms (:status c)) (str "control: " (pr-str (or (:refusal c) (:violations c)))))))))
 
@@ -257,22 +261,30 @@
   [{"@id" "urn:x:p" "@type" ["owl:ObjectProperty" "owl:FunctionalProperty"]}])
 
 (deftest owl-axioms-are-accepted-by-capability-set-and-refused-by-name
-  (testing "at the pinned owl2 (no owl.rules/supported-vocabulary) the fixed set applies"
-    (is (nil? (resolve 'owl.rules/supported-vocabulary)))
-    (is (= reason/fixed-owl-vocabulary (reason/owl-vocabulary)))
-    (is (= reason/fixed-rules reason/rules)))
-  (let [r (run (od functional) (t a "urn:x:p" (i "urn:x:b")))]
-    (is (= :unsupported-owl-axiom (get-in r [:refusal :reason])))
-    (is (= (str owl "FunctionalProperty") (get-in r [:refusal :detail :type]))))
+  (testing "at the pinned owl2 (93214e9) the capability set IS owl.rules/supported-vocabulary"
+    (is (some? (resolve 'owl.rules/supported-vocabulary)))
+    (is (= @(resolve 'owl.rules/supported-vocabulary) (reason/owl-vocabulary)))
+    (is (= (vec (sort @(resolve 'owl.rules/supported-rules))) reason/rules)))
+  (testing "so owl:FunctionalProperty is accepted with no code change here"
+    (is (= :conforms (:status (run (od functional) (t a "urn:x:p" (i "urn:x:b")))))))
+  (testing "control: under the old fixed RDFS-core vocabulary it refuses by name"
+    (let [r (reason/reason (od functional) (nq* (t a "urn:x:p" (i "urn:x:b")))
+                           {:vocabulary reason/fixed-owl-vocabulary})]
+      (is (= :unsupported-owl-axiom (get-in r [:refusal :reason])))
+      (is (= (str owl "FunctionalProperty") (get-in r [:refusal :detail :type])))))
   (testing "the seam: a vocabulary that names the term accepts it, no code change"
     (let [v (reason/owl-vocabulary {:functional-property :owl/FunctionalProperty
                                     :sub-class-of :rdfs/subClassOf})]
       (is (= #{(str owl "FunctionalProperty") "http://www.w3.org/2000/01/rdf-schema#subClassOf"} v))
       (is (= :conforms (:status (reason/reason (od functional) (nq* (t a "urn:x:p" (i "urn:x:b")))
                                                {:vocabulary v}))))))
-  (testing "a list-valued axiom is refused by its own predicate, not by rdf:first"
-    (let [r (run (onto "(owl/class :id \"urn:x:U\" :owl/union-of [\"urn:x:A\" \"urn:x:B\"])")
-                 (t a "urn:x:p" (i "urn:x:b")))]
+  (testing "a list-valued axiom is accepted at this pin"
+    (is (= :conforms (:status (run (onto "(owl/class :id \"urn:x:U\" :owl/union-of [\"urn:x:A\" \"urn:x:B\"])")
+                                   (t a "urn:x:p" (i "urn:x:b")))))))
+  (testing "and, outside a vocabulary, refused by its own predicate, not by rdf:first"
+    (let [r (reason/reason (onto "(owl/class :id \"urn:x:U\" :owl/union-of [\"urn:x:A\" \"urn:x:B\"])")
+                           (nq* (t a "urn:x:p" (i "urn:x:b")))
+                           {:vocabulary reason/fixed-owl-vocabulary})]
       (is (= :unsupported-owl-axiom (get-in r [:refusal :reason])))
       (is (= (str owl "unionOf") (get-in r [:refusal :detail :predicate])))))
   (testing "owl:ReflexiveProperty is not OWL 2 RL: refused even if a vocabulary names it"
@@ -458,3 +470,39 @@
       (is (= #{"QualifiedMinCountConstraintComponent"}
              (components (run o (str/replace (str base (t "urn:x:p" (str dm2 "label") "\"Upper\""))
                                              (str "<urn:x:s> <" type* "> <" dm2 "System> .\n") ""))))))))
+
+;; ── native numbers / booleans on IRI-coerced keys ───────────────────────────
+
+(defn- value-objects
+  "The doc with every native number / boolean wrapped as {\"@value\" v} -- the
+  lowering the Form used before org-w3-json-ld-api ef6a81a."
+  [x]
+  (cond
+    (map? x) (into {} (map (fn [[k v]] [k (value-objects v)])) x)
+    (vector? x) (mapv value-objects x)
+    (or (number? x) (boolean? x)) {"@value" x}
+    :else x))
+
+(deftest a-native-literal-on-an-iri-key-is-a-literal-and-no-digest-moves
+  (let [forms ["(shacl/node-shape :id \"urn:x:S\" :sh/target-node [7 true \"urn:x:a\"])"
+               "(shacl/property-shape :id \"urn:x:P\" :sh/path \"urn:x:p\" :sh/in [\"urn:x:v\" 1 true])"
+               "(shacl/property-shape :id \"urn:x:P\" :sh/path \"urn:x:p\" :sh/has-value 5)"
+               "(owl/restriction :id \"urn:x:R\" :owl/on-property \"urn:x:p\" :owl/has-value false)"
+               "(owl/class :id \"urn:x:C\" :owl/one-of [1 2 3])"]]
+    (doseq [f forms]
+      (let [doc (compiler/parse-source (ontology-text f))
+            node (first (get doc "@graph"))]
+        (testing f
+          (is (not= doc (value-objects doc)) "the Form now lowers them as plain native values")
+          (is (= (compiler/graph-digest (value-objects doc)) (compiler/graph-digest doc))
+              "the same RDF as the explicit value objects the Form used to write"))))
+    (testing "7 under sh:targetNode is the integer literal, not an IRI"
+      (let [quads (compiler/ontology-quads
+                   (compiler/compile-ontology-text "t.mith" (ontology-text "(shacl/node-shape :id \"urn:x:S\" :sh/target-node 7)")))
+            o (some #(when (= (str sh "targetNode") (get-in % [:predicate :value])) (:object %)) quads)]
+        (is (= {:type :literal :value "7"} (select-keys o [:type :value])))
+        (is (= (str xsd "integer") (:datatype o)))))
+    (testing "control: the STRING \"7\" is still an IRI there (a different graph)"
+      (let [n (compiler/parse-source (ontology-text "(shacl/node-shape :id \"urn:x:S\" :sh/target-node 7)"))
+            s (compiler/parse-source (ontology-text "(shacl/node-shape :id \"urn:x:S\" :sh/target-node \"7\")"))]
+        (is (not= (compiler/graph-digest n) (compiler/graph-digest s)))))))

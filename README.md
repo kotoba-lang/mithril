@@ -83,8 +83,13 @@ kbb --backend sci bin/mithril.cljk reason <ontology.mith> <data.(nq|nt|jsonld|js
 (reason/reason (compiler/compile-ontology-text path text)   ; ontology artifact
                (reason/parse-data data-path data-text)       ; quads, or oak {:s :p :o} triples
                {:query-type "https://…#Performer"})          ; optional
-;; => {:status :conforms | :violations | :refused
+;; => {:status :conforms | :violations | :inconsistent | :refused
 ;;     :refusal {:reason kw :detail {…}}                    ; only when refused
+;;     :consistent? bool
+;;     :inconsistencies [{:rule :cax-dw :table 7 :triples [{:s :p :o} …]}]  ; premises
+;;     :schema {:superclasses {class #{…}} :superproperties {prop #{…}}
+;;              :counts {:subclass-edges :subproperty-edges
+;;                       :subclass-edges-total :subproperty-edges-total}}
 ;;     :report {:conforms bool :results [{…}]}              ; W3C validation report, below
 ;;     :rules [...] :entailed [{:s :p :o}] :inferred [...]
 ;;     :types [{:s :p :o :inferred?}]
@@ -95,7 +100,11 @@ kbb --backend sci bin/mithril.cljk reason <ontology.mith> <data.(nq|nt|jsonld|js
 ```
 
 Exit codes: `0` conforms, `1` the report does not conform (at any severity:
-SHACL's `sh:conforms` is false for a Warning or Info result too), `2` refused or
+SHACL's `sh:conforms` is false for a Warning or Info result too) OR the
+ontology plus data are inconsistent under OWL 2 RL (one
+`INCONSISTENCY<TAB>rule<TAB>table<TAB>premises` line each, last line
+`INCONSISTENT<TAB>n`; both are measured answers, so they share `1` and the last
+line says which), `2` refused or
 unmeasurable (one `REFUSE<TAB>reason<TAB>detail` line). Zero data triples is
 exit 2 (`no-data-triples`), never 0. Text output starts with `SCANNED` lines
 (ontology triples, axioms, shapes, data triples) so an empty or unread input is
@@ -108,33 +117,59 @@ the result map without the full `:entailed` list, including `report` and
 
 **Axioms** are read from the ontology's RDF (its JSON-LD expanded to quads), so
 any context term that expands to an accepted predicate counts. Entailment is
-`oak.semantic/materialize :owl2-rl` over `owl.rules/triple-rules` from
-`org-w3-owl2`. Which terms are ACCEPTED is a capability set,
-`reason/owl-vocabulary`: `owl.rules/supported-vocabulary` when the pinned
-org-w3-owl2 exports it (a map read like `owl.rules/keyword-vocabulary`, or a
-collection of `:owl/…` keywords / IRIs), otherwise `reason/fixed-owl-vocabulary`
-— the terms the current pin (`2392927`) implements. `reason/rules` is likewise
-`owl.rules/supported-rules` or `reason/fixed-rules`. Bumping the owl2 / oak pin
-to a version that exports them widens what is accepted with no change here.
+`oak.semantic/entail :owl2-rl`: the complete OWL 2 RL/RDF rule table of OWL 2
+Profiles §4.3 (Tables 4–9, `owl.rules/owl2-rl-rules` from `org-w3-owl2`,
+evaluated by `owl.rl`) — 77 rules at oak `4474497` / owl2 `93214e9`
+(`reason/rules` = `owl.rules/supported-rules`, sorted; `eq-ref` is omitted
+upstream and some datatype rules are partial, see `owl.rules/rule-status`).
+That includes the Table 9 schema rules, so the `rdfs:subClassOf` /
+`rdfs:subPropertyOf` closures are in `:entailed` and, as data, in `:schema`
+(`reason/superclasses result class`).
 
-| rule | axiom | entails |
-|---|---|---|
-| rdfs11 | `rdfs:subClassOf` (and `owl:equivalentClass`, as subsumption both ways) | transitive subclass |
-| rdfs5 | `rdfs:subPropertyOf` | transitive subproperty |
-| rdfs9 | `rdf:type` + subclass | types climb the hierarchy, from asserted and derived types |
-| rdfs7 | `rdfs:subPropertyOf` | a sub-property's triple is the super-property's |
-| rdfs2 | `rdfs:domain` | the subject's type |
-| rdfs3 | `rdfs:range` | the object's type |
-| prp-trp | `owl:TransitiveProperty` | transitive closure over derived triples |
-| prp-symp | `owl:SymmetricProperty` | the reversed triple |
-| prp-inv | `owl:inverseOf` | the inverse triple, both directions |
+Which terms are ACCEPTED is a capability set, `reason/owl-vocabulary`:
+`owl.rules/supported-vocabulary` (every IRI a supported rule gives its RL
+semantics to), or `reason/fixed-owl-vocabulary` (the RDFS core) for a pin that
+predates it. Bumping the pin widened it with no change to the seam:
+`owl:disjointWith`, `owl:FunctionalProperty`, `owl:someValuesFrom` /
+`allValuesFrom` / `hasValue`, `owl:unionOf` / `intersectionOf` / `oneOf`,
+`owl:sameAs` / `differentFrom`, property chains, keys, … are accepted AND
+reasoned (tests in `test/mithril/reason_test.cljk`). Terms
+`owl.rules/vocabulary-status` calls `:inert` (`owl:Restriction`,
+`owl:Ontology`, `owl:imports`, …) are carried without entailment. Any other
+`owl:` / `rdfs:` / `rdf:` term refuses with `unsupported-owl-axiom`, naming the
+predicate or type and carrying the vocabulary-status reason (`:status
+:unsupported :why "no RL rule (existential; outside the RL profile)"` for
+`owl:minCardinality`; likewise `owl:cardinality`, `owl:hasSelf`,
+`owl:disjointUnionOf`, datatype restrictions). `owl:maxCardinality` /
+`owl:maxQualifiedCardinality` are partial in RL (rules for 0 and 1 only) and
+refuse for any other value. `owl:ReflexiveProperty` refuses with
+`not-owl2-rl` whatever the capability set says. A list-valued axiom is named by
+its own predicate, not by `rdf:first`.
 
-Any `owl:` / `rdfs:` axiom outside the capability set refuses with
-`unsupported-owl-axiom`, naming the predicate or type (a list-valued axiom such
-as `owl:unionOf` is named by its own predicate, not by `rdf:first`): answering
-without it would be a silent subset. `owl:ReflexiveProperty` is outside OWL 2
-RL and refuses with `not-owl2-rl` whatever the capability set says. A
-sub-property of `rdf:type` is not lifted (a stated gap in `owl.rules`).
+**Inconsistency.** The rules whose conclusion is `false` (`cax-dw`, `prp-irp`,
+`prp-asyp`, `prp-pdw`, `cls-nothing2`, `eq-diff1`, `dt-not-type`, …) are
+reported under `:inconsistencies` with their premise triples, and `:status` is
+`:inconsistent` whatever SHACL says (the report is still computed over the RL
+closure). An ill-typed literal such as `"five"^^xsd:integer` is `dt-not-type`.
+
+**Trivial entailments.** `scm-cls` makes every declared class a subclass of
+itself and of `owl:Thing`, so every individual of a declared class is entailed
+an `owl:Thing`. Those triples stay in `:entailed`; `:types` (and the CLI's
+`TYPE` lines) list an `rdf:`/`rdfs:`/`owl:` vocabulary type (`owl:Thing`,
+`owl:Class` on a class IRI the data names) only when the data itself asserts
+it, and `:schema :superclasses` lists
+PROPER superclasses only (no C ⊑ C, C ⊑ owl:Thing, owl:Nothing ⊑ C;
+`:subclass-edges` vs `:subclass-edges-total` counts both). Superclasses include
+anonymous class expressions (blank nodes, e.g. a `someValuesFrom` restriction)
+when the ontology states them. SHACL is evaluated over the entailed graph minus
+the triples whose SUBJECT is a literal (`dt-type2` types every literal with each
+datatype whose value space holds it; a literal is never a focus node through a
+class or subjects-of target).
+
+The domain modules (checkpoint, decision_semantic, domain_rdf, execution,
+growth_semantic, state_ontology) still call the 2-arity
+`oak.semantic/materialize :owl2-rl` (the RDFS core, unchanged byte for byte):
+they compare exact entailed sets.
 
 ### SHACL Core
 
@@ -301,11 +336,12 @@ language-tagged literals.
                 (shacl/node-shape :sh/node-kind "sh:BlankNode")])])])
 ```
 
-(The pinned JSON-LD expander coerces a native number under `"@type": "@id"` to
-a relative IRI, where JSON-LD 1.1 coerces strings only; the Form lowers
-integers and booleans in `:sh/target-node`, `:sh/in`, `:sh/has-value`,
-`:owl/has-value` and `:owl/one-of` to explicit value objects so they stay
-literals.)
+(Integers and booleans in `:sh/target-node`, `:sh/in`, `:sh/has-value`,
+`:owl/has-value` and `:owl/one-of` are literals: org-w3-json-ld-api `ef6a81a`
+coerces only strings under `"@type": "@id"`, as JSON-LD 1.1 §5.3.2 says.
+Earlier pins made them relative IRIs and the Form wrapped them in explicit
+value objects; that lowering is gone and the RDF, so every graph digest, is
+the same — `a-native-literal-on-an-iri-key-is-a-literal-and-no-digest-moves`.)
 
 ### Limits
 
@@ -328,6 +364,16 @@ three data triples (`edr a System`, `vm-cap capabilityOfPerformer vm-svc`,
 CONFORMS, in about 5 s wall on one local run. `edr` was entailed
 Performer / Resource / IndividualType / Type / Thing, `vm-cap` Capability,
 `vm-svc` Performer, `scan` Activity.
+
+Re-measured 2026-09-25 with the complete RL table (oak `4474497`, owl2
+`93214e9`, json-ld-api `ef6a81a`), same ontology and three triples:
+1,658 ontology triples, 650 axioms (the owl:Class / owl:ObjectProperty
+declarations are now axioms: scm-cls / scm-op read them), 77 rules,
+3,058 entailed / 2,405 inferred, schema closure 840 proper subclass edges and
+239 proper subproperty edges, 0 inconsistencies, 4 focus nodes, 106 checks,
+CONFORMS, about 5 s wall. The same types as above. Control: a copy with
+`System owl:disjointWith Activity` plus `edr a Activity` exits 1 with one
+`INCONSISTENCY cax-dw 7` line naming the three premises.
 
 Before org-w3-json-ld-api `70058cc`, the compiled ontology's RDF carried
 `rdfs:subClassOf`, `rdfs:domain`, `rdfs:range`, `sh:*` and `mith:name` as

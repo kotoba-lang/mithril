@@ -15,31 +15,40 @@
   Axioms are read from the ontology's RDF (the JSON-LD dataset the compiler
   produced, expanded to quads), never from compact keys, so any context term
   that expands to one of the accepted predicates is honoured. Entailment is
-  `oak.semantic/materialize :owl2-rl`, i.e. `owl.rules/triple-rules`.
+  `oak.semantic/entail :owl2-rl` -- the COMPLETE OWL 2 RL/RDF rule table
+  (OWL 2 Profiles §4.3 Tables 4-9, `owl.rules/owl2-rl-rules`, evaluated by
+  `owl.rl`), including the Table 9 schema rules, so the subClassOf /
+  subPropertyOf closures are in the entailed graph and in `:schema`.
 
   Which OWL / RDFS terms are ACCEPTED as axioms is a capability set,
-  `owl-vocabulary`: `owl.rules/supported-vocabulary` when the pinned
-  org-w3-owl2 defines it, otherwise `fixed-owl-vocabulary` -- the terms the
-  current pin's rules implement:
+  `owl-vocabulary`: `owl.rules/supported-vocabulary` (every IRI a supported
+  rule gives its RL semantics to, fully or in the RL-admitted form), or
+  `fixed-owl-vocabulary` when a pin predates that export. Terms
+  `owl.rules/vocabulary-status` calls `:inert` (owl:Restriction,
+  owl:Ontology, owl:imports, ...) are carried, not reasoned. Anything else in
+  the rdf: / rdfs: / owl: namespaces REFUSES with `:unsupported-owl-axiom`,
+  its detail carrying the vocabulary-status reason: reasoning without it
+  would silently answer a subset. owl:maxCardinality /
+  owl:maxQualifiedCardinality are `:partial` (RL has rules for 0 and 1 only)
+  and refuse for any other value. owl:ReflexiveProperty is outside OWL 2 RL
+  and always refuses with `:not-owl2-rl`.
 
-    rdfs11   rdfs:subClassOf is transitive
-             (owl:equivalentClass folds in as subsumption both ways)
-    rdfs5    rdfs:subPropertyOf is transitive
-    rdfs9    rdf:type climbs the class hierarchy, from asserted AND derived types
-    rdfs7    a sub-property's triples are the super-property's
-    rdfs2    rdfs:domain types the subject
-    rdfs3    rdfs:range types the object
-    prp-trp  owl:TransitiveProperty closes over derived triples
-    prp-symp owl:SymmetricProperty reads backwards
-    prp-inv  owl:inverseOf, both directions
+  ## Inconsistency
 
-  Bumping the owl2 / oak pin to one that exports `supported-vocabulary`
-  (and `supported-rules`) widens both with no change here. Any OWL / RDFS
-  axiom outside the capability set (owl:FunctionalProperty, owl:disjointWith,
-  owl:someValuesFrom, ... at the current pin) REFUSES with
-  `:unsupported-owl-axiom`: reasoning without it would silently answer a
-  subset. owl:ReflexiveProperty is outside OWL 2 RL and always refuses with
-  `:not-owl2-rl`.
+  The rules whose conclusion is `false` (cax-dw, prp-irp, prp-fp over
+  different literals, cls-nothing2, ...) are reported under
+  `:inconsistencies` as {:rule :table :triples [premise triple ...]}; any
+  inconsistency makes `:status` `:inconsistent`, whatever SHACL says.
+
+  ## Trivial entailments
+
+  scm-cls makes every declared class a subclass of itself and of owl:Thing,
+  so every typed individual is entailed an owl:Thing. Those triples stay in
+  `:entailed`, but `:types` lists an rdf: / rdfs: / owl: vocabulary type
+  (owl:Thing, owl:Class on a class IRI the data names, ...) only when the
+  data itself asserts it, and `:schema` lists
+  only PROPER superclasses / superproperties (no C ⊑ C, no C ⊑ owl:Thing,
+  no owl:Nothing ⊑ C); `:schema :counts` states both totals.
 
   ## What is checked (SHACL Core)
 
@@ -52,8 +61,10 @@
   ## Outcomes
 
   `:status` is `:conforms`, `:violations` (the report does not conform, at
-  any severity) or `:refused`. A refusal names its reason; zero data triples
-  is a refusal (`:no-data-triples`), not a pass."
+  any severity), `:inconsistent` (the ontology plus data entail `false`;
+  the SHACL report is still computed over the RL closure) or `:refused`. A
+  refusal names its reason; zero data triples is a refusal
+  (`:no-data-triples`), not a pass."
   (:require [clojure.string :as str]
             [json-ld-api.core :as jsonld]
             [json-ld-api.to-rdf :as to-rdf]
@@ -79,23 +90,35 @@
   (when-let [v (resolve (symbol "owl.rules" (name sym)))]
     (let [x @v] (if (fn? x) (x) x))))
 
-(def fixed-rules
-  "The rules the current owl2 pin's `triple-rules` implements."
-  [:rdfs11 :rdfs5 :rdfs9 :rdfs7 :rdfs2 :rdfs3 :prp-trp :prp-symp :prp-inv])
-
 (def rules
-  "The rule names `reason` evaluates: `owl.rules/supported-rules` when the
-  pin exports it, else `fixed-rules`."
-  (vec (or (owl-rules-export 'supported-rules) fixed-rules)))
+  "The rule ids `reason` evaluates, sorted: `owl.rules/supported-rules`
+  (status :implemented or :partial in `owl.rules/rule-status`) -- exactly
+  what `oak.semantic/entail :owl2-rl` runs by default."
+  (vec (sort (owl-rules-export 'supported-rules))))
 
 (def fixed-owl-vocabulary
-  "The OWL / RDFS terms (as IRIs) the current pin's rules read: predicates
-  whose triples are axioms, and rdf:type objects that switch a rule on."
+  "The RDFS core (as IRIs), for a pin that predates
+  `owl.rules/supported-vocabulary`: predicates whose triples are axioms, and
+  rdf:type objects that switch a rule on."
   #{(str rdfs "subClassOf") (str rdfs "subPropertyOf") (str rdfs "domain")
     (str rdfs "range") (str owl "equivalentClass") (str owl "inverseOf")
     (str owl "TransitiveProperty") (str owl "SymmetricProperty")})
 
-(def ^:private prefixes {"rdf" rdf "rdfs" rdfs "owl" owl})
+(def vocabulary-status
+  "`owl.rules/vocabulary-status` (full IRI -> :supported | :inert |
+  {:partial reason} | {:unsupported reason}), or {} when the pin predates it."
+  (or (owl-rules-export 'vocabulary-status) {}))
+
+(def inert-vocabulary
+  "IRIs carried without entailment (declaration / annotation / header terms)."
+  (set (keep (fn [[iri s]] (when (= :inert s) iri)) vocabulary-status)))
+
+(def partial-cardinality
+  "Cardinality predicates OWL 2 RL has rules for only at the values 0 and 1."
+  #{(str owl "maxCardinality") (str owl "maxQualifiedCardinality")})
+
+(def ^:private prefixes
+  {"rdf" rdf "rdfs" rdfs "owl" owl "xsd" xsd})
 
 (defn vocabulary-term->iri
   "A vocabulary entry as an IRI: an IRI string as is, or a keyword in the
@@ -239,23 +262,34 @@
   "One of :axiom, :list, :declaration, :shape, :annotation, or
   [:refuse reason detail]. The triple has its IRIs as strings."
   [vocabulary {:keys [shape-ids owned]} {:keys [s p o]}]
-  (cond
-    (contains? owned s) :shape
-    (and (contains? shape-ids s)
-         (or (in-ns? p sh) (and (= rdf-type p) (in-ns? o sh)))) :shape
-    (contains? list-predicates p) :list
-    (= rdf-type p) (cond (contains? not-owl2-rl o) [:refuse :not-owl2-rl {:subject s :type o}]
-                         (contains? vocabulary o) :axiom
-                         (contains? declaration-classes o) :declaration
-                         (or (in-ns? o owl) (in-ns? o rdfs) (in-ns? o sh))
-                         [:refuse :unsupported-owl-axiom {:subject s :type o}]
-                         :else :declaration)
-    (contains? vocabulary p) :axiom
-    (contains? annotation-predicates p) :annotation
-    (or (in-ns? p owl) (in-ns? p rdfs) (in-ns? p rdf))
-    [:refuse :unsupported-owl-axiom {:subject s :predicate p}]
-    (in-ns? p sh) [:refuse :unsupported-shacl-constraint {:subject s :constraint p}]
-    :else :annotation))
+  (let [status (fn [term] (let [st (get vocabulary-status term)]
+                            (cond-> {}
+                              (map? st) (assoc :status (key (first st)) :why (val (first st))))))]
+    (cond
+      (contains? owned s) :shape
+      (and (contains? shape-ids s)
+           (or (in-ns? p sh) (and (= rdf-type p) (in-ns? o sh)))) :shape
+      (contains? list-predicates p) :list
+      (= rdf-type p) (cond (contains? not-owl2-rl o)
+                           [:refuse :not-owl2-rl (merge {:subject s :type o} (status o))]
+                           (contains? vocabulary o) :axiom
+                           (or (contains? declaration-classes o) (contains? inert-vocabulary o))
+                           :declaration
+                           (or (in-ns? o owl) (in-ns? o rdfs) (in-ns? o sh))
+                           [:refuse :unsupported-owl-axiom (merge {:subject s :type o} (status o))]
+                           :else :declaration)
+      ;; annotations carry no RL semantics beyond prp-ap, so they are kept
+      ;; out of the reasoner even though prp-ap puts them in the vocabulary
+      (contains? annotation-predicates p) :annotation
+      (and (contains? partial-cardinality p)
+           (not (contains? #{"0" "1"} (when (literal? o) (str (:literal o))))))
+      [:refuse :unsupported-owl-axiom (merge {:subject s :predicate p :value o} (status p))]
+      (contains? vocabulary p) :axiom
+      (contains? inert-vocabulary p) :annotation
+      (or (in-ns? p owl) (in-ns? p rdfs) (in-ns? p rdf))
+      [:refuse :unsupported-owl-axiom (merge {:subject s :predicate p} (status p))]
+      (in-ns? p sh) [:refuse :unsupported-shacl-constraint {:subject s :constraint p}]
+      :else :annotation)))
 
 (defn compile-ontology
   "Ontology artifact -> {:axioms #{triple} :shapes compiled-shapes :counts {...}},
@@ -311,6 +345,53 @@
     (contains? r :value) (assoc :value value)
     (some? count) (assoc :count count)))
 
+;; ── the schema closure ──────────────────────────────────────────────────────
+
+(def ^:private owl-thing (str owl "Thing"))
+(def ^:private owl-nothing (str owl "Nothing"))
+
+(defn- proper-edges
+  "The entailed `p` edges (IRIs as strings) that say something: no x ⊑ x,
+  no x ⊑ owl:Thing, no owl:Nothing ⊑ x (scm-cls / scm-op / scm-dp emit
+  those for every declared term)."
+  [edges]
+  (remove (fn [{:keys [s o]}]
+            (or (= s o) (= owl-thing o) (= owl-nothing s)))
+          edges))
+
+(defn- up-map [edges]
+  (reduce (fn [m {:keys [s o]}] (update m s (fnil conj (sorted-set)) o)) (sorted-map) edges))
+
+(defn schema-closure
+  "The entailed subClassOf / subPropertyOf closure of `entailed` (triples in
+  `out-triple` shape) as data:
+    {:superclasses {class #{proper superclass ...}}
+     :superproperties {property #{proper superproperty ...}}
+     :counts {:subclass-edges n :subproperty-edges n          ; proper
+              :subclass-edges-total n :subproperty-edges-total n}}  ; as entailed
+  Superclasses include anonymous class expressions (blank nodes `_:o-…`,
+  e.g. an owl:someValuesFrom restriction) when the ontology states them."
+  [entailed]
+  (let [edges (fn [p] (filter #(and (= p (:p %)) (string? (:s %)) (string? (:o %))) entailed))
+        sc (edges (str rdfs "subClassOf"))
+        sp (edges (str rdfs "subPropertyOf"))
+        sc* (proper-edges sc)
+        sp* (proper-edges sp)]
+    {:superclasses (up-map sc*)
+     :superproperties (up-map sp*)
+     :counts {:subclass-edges (count sc*)
+              :subproperty-edges (count sp*)
+              :subclass-edges-total (count sc)
+              :subproperty-edges-total (count sp)}}))
+
+(defn superclasses
+  "The proper superclasses of `class` in a `reason` result (#{} when none)."
+  [result class]
+  (get-in result [:schema :superclasses class] #{}))
+
+(defn- out-inconsistency [{:keys [rule table triples]}]
+  {:rule rule :table table :triples (mapv out-triple triples)})
+
 ;; ── the entry ────────────────────────────────────────────────────────────────
 
 (defn reason
@@ -319,8 +400,11 @@
   opts: {:query-type <class IRI>} narrows :types to that class;
         {:vocabulary #{iri}} overrides the OWL capability set.
 
-  Returns {:status :conforms|:violations|:refused
+  Returns {:status :conforms|:violations|:inconsistent|:refused
            :refusal {:reason kw :detail {...}}   ; only when refused
+           :consistent? bool
+           :inconsistencies [{:rule kw :table n :triples [triple]}]
+           :schema {:superclasses {...} :superproperties {...} :counts {...}}
            :entailed [triple] :inferred [triple] :types [triple]
            :report {:conforms bool :results [...]} ; W3C-shaped, mithril.shacl/report
            :violations [...] :inactive [...] :rules [...] :counts {...}}"
@@ -334,22 +418,40 @@
           _ (when (empty? data)
               (refuse! :no-data-triples {:data-triples 0}))
           asserted (into (set axioms) data)
-          entailed (oak/materialize :owl2-rl asserted)
+          rl (oak/entail :owl2-rl asserted)
+          entailed (:graph rl)
+          entailed-out (mapv out-triple (sort-by pr-str entailed))
+          inconsistencies (mapv out-inconsistency (:inconsistencies rl))
           data-nodes (set (concat (map :s data)
                                   (keep #(when-not (literal? (:o %)) (:o %)) data)))
-          inferred (remove asserted entailed)
+          inferred (:inferred rl)
+          data-set (set data)
+          ;; rdf: / rdfs: / owl: vocabulary types (owl:Thing from scm-cls /
+          ;; cax-sco, owl:Class on a class IRI the data names, ...) are listed
+          ;; only when the DATA asserts them; they stay in :entailed
+          vocabulary-type? (fn [t] (and (keyword? (:o t)) (not (contains? data-set t))))
           types (->> entailed
-                     (filter #(and (= :rdf/type (:p %)) (contains? data-nodes (:s %))))
+                     (filter #(and (= :rdf/type (:p %)) (contains? data-nodes (:s %))
+                                   (not (vocabulary-type? %))))
                      (filter #(or (nil? (:query-type opts))
                                   (= (:query-type opts) (iri-of (:o %)))))
                      (map #(assoc (out-triple %) :inferred? (not (contains? asserted %))))
                      (sort-by (juxt :s :o))
                      vec)
-          validation (shacl/validate shapes (map out-triple entailed))
+          schema (schema-closure entailed-out)
+          ;; a literal is never a SHACL focus node reached through a target
+          ;; other than sh:targetNode, and dt-type2 types EVERY literal with
+          ;; each datatype whose value space holds it -- keep those out
+          validation (shacl/validate shapes (remove #(literal? (:s %)) entailed-out))
           violations (mapv violation (:results validation))]
-      {:status (if (:conforms validation) :conforms :violations)
-       :rules rules
-       :entailed (mapv out-triple (sort-by pr-str entailed))
+      {:status (cond (seq inconsistencies) :inconsistent
+                     (:conforms validation) :conforms
+                     :else :violations)
+       :consistent? (empty? inconsistencies)
+       :inconsistencies inconsistencies
+       :rules (:rules rl)
+       :schema schema
+       :entailed entailed-out
        :inferred (mapv out-triple (sort-by pr-str inferred))
        :types types
        :report (shacl/report validation)
@@ -361,6 +463,10 @@
                        :entailed (count entailed)
                        :inferred (count inferred)
                        :types (count types)
+                       :rules (count (:rules rl))
+                       :inconsistencies (count inconsistencies)
+                       :subclass-edges (get-in schema [:counts :subclass-edges])
+                       :subproperty-edges (get-in schema [:counts :subproperty-edges])
                        :focus-nodes (get-in validation [:counts :focus-nodes])
                        :checks (get-in validation [:counts :checks])
                        :violations (count violations)})})
@@ -369,5 +475,5 @@
         {:status :refused
          :refusal {:reason reason* :detail (:detail (ex-data e))}
          :rules rules :entailed [] :inferred [] :types [] :violations []
-         :counts {}}
+         :inconsistencies [] :counts {}}
         (throw e)))))

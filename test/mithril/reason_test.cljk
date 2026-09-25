@@ -6,7 +6,8 @@
             [clojure.string :as str]
             [mithril.compiler :as compiler]
             [mithril.reason :as reason]
-            [mithril.reason-cli :as cli]))
+            [mithril.reason-cli :as cli]
+            [owl.rules]))
 
 (defn- read-text [path] (.readFileSync (js/require "fs") path "utf8"))
 
@@ -33,8 +34,14 @@
 (defn- constraints [result] (mapv :constraint (:violations result)))
 
 (deftest the-rule-list-is-exactly-what-owl-rules-implements
-  (is (= [:rdfs11 :rdfs5 :rdfs9 :rdfs7 :rdfs2 :rdfs3 :prp-trp :prp-symp :prp-inv]
-         reason/rules)))
+  (is (= (vec (sort owl.rules/supported-rules)) reason/rules))
+  (testing "the complete RL table: every Table 4-9 rule but the omitted ones"
+    (is (= (count (remove #(= :omitted (:status %)) owl.rules/owl2-rl-rules)) (count reason/rules)))
+    (is (every? (set reason/rules) [:cax-dw :prp-fp :cls-svf1 :cls-uni :eq-rep-s :scm-sco :scm-spo]))
+    (is (not (contains? (set reason/rules) :eq-ref)) "eq-ref is omitted upstream"))
+  (testing "and a result reports the rules that were evaluated"
+    (is (= reason/rules
+           (:rules (reason/reason (ontology "dm2-mini.mith") (data "conforming.nq") {}))))))
 
 (deftest a-subclass-chain-is-climbed
   (let [r (reason/reason (ontology "dm2-mini.mith") (data "conforming.nq") {})]
@@ -125,12 +132,10 @@
     (let [o (update-in (ontology "shacl-sparql.mith") [:rdf-dataset "@graph" 1 "property" 0]
                        dissoc "sh:sparql")]
       (is (= :conforms (:status (reason/reason o (data "conforming.nq") {}))))))
-  (let [r (reason/reason (ontology "unsupported-axiom.mith") (data "conforming.nq") {})]
-    (is (= :unsupported-owl-axiom (get-in r [:refusal :reason])))
-    (is (= "http://www.w3.org/2002/07/owl#disjointWith" (get-in r [:refusal :detail :predicate]))))
-  (testing "control: without owl:disjointWith the ontology is accepted"
-    (let [o (without (ontology "unsupported-axiom.mith") (str dm2 "Performer") "owl:disjointWith")]
-      (is (= :conforms (:status (reason/reason o (data "conforming.nq") {})))))))
+  (testing "owl:disjointWith -- refused while the pin had only the RDFS core -- is accepted"
+    (let [r (reason/reason (ontology "unsupported-axiom.mith") (data "conforming.nq") {})]
+      (is (= :conforms (:status r)))
+      (is (true? (:consistent? r))))))
 
 (deftest zero-data-is-refused-not-conforming
   (let [r (reason/reason (ontology "dm2-mini.mith") (data "empty.nq") {})]
@@ -211,3 +216,169 @@
     (let [{:keys [exit out]} (run [(str dir "conforming.nq") "--bogus"])]
       (is (= 2 exit))
       (is (str/starts-with? (first out) "REFUSE\tusage\t")))))
+
+;; ── complete OWL 2 RL (oak.semantic/entail) ─────────────────────────────────
+
+(def owl-ns "http://www.w3.org/2002/07/owl#")
+(def subclass-of "http://www.w3.org/2000/01/rdf-schema#subClassOf")
+
+(defn- doc-ontology
+  "An ontology artifact from a JSON-LD @graph written against the Mithril context."
+  [graph]
+  (compiler/compile-ontology-document
+   "doc.mith"
+   {"@context" compiler/context-uri
+    "@id" "https://mithril.fund/ontology/test/owl-rl"
+    "@type" "Ontology"
+    "profile" ["https://www.w3.org/TR/rdf11-concepts/"
+               "https://www.w3.org/TR/owl2-profiles/#OWL_2_RL"
+               "https://www.w3.org/TR/shacl/"]
+    "@graph" graph}))
+
+(defn- rules-fired [result] (set (map :rule (:inconsistencies result))))
+
+(deftest the-schema-closure-is-data-and-proper
+  (let [r (reason/reason (ontology "dm2-mini.mith") (data "conforming.nq") {})]
+    (is (= #{(str dm2 "Performer") (str dm2 "Resource") (str dm2 "IndividualType")}
+           (reason/superclasses r (str dm2 "System"))))
+    (is (= #{(str dm2 "capabilityOfPerformer")}
+           (get-in r [:schema :superproperties (str dm2 "desiredCapabilityOfPerformer")])))
+    (testing "the closure is in the entailed graph too (scm-sco), not only in :schema"
+      (is (entailed? r (str dm2 "System") subclass-of (str dm2 "IndividualType"))))
+    (testing "trivial scm-cls edges are entailed but not listed"
+      (is (entailed? r (str dm2 "System") subclass-of (str dm2 "System")))
+      (is (entailed? r (str dm2 "System") subclass-of (str owl-ns "Thing")))
+      (is (not-any? #(or (= % (str dm2 "System")) (= % (str owl-ns "Thing")))
+                    (reason/superclasses r (str dm2 "System"))))
+      (is (< (get-in r [:schema :counts :subclass-edges])
+             (get-in r [:schema :counts :subclass-edges-total]))))
+    (testing "7 classes, chains System<Performer<Resource<IndividualType and 3 leaves: 9 proper edges"
+      (is (= 9 (get-in r [:schema :counts :subclass-edges])))
+      (is (= 9 (get-in r [:counts :subclass-edges]))))
+    (testing "owl:Thing is entailed for every typed individual but left out of :types"
+      (is (entailed? r "urn:x:edr" rdf-type (str owl-ns "Thing")))
+      (is (not (contains? (types-of r "urn:x:edr") (str owl-ns "Thing")))))
+    (testing "a class IRI the data names is a data node, but its owl:Class declaration is not listed"
+      (is (entailed? r (str dm2 "System") rdf-type (str owl-ns "Class")))
+      (is (= #{} (types-of r (str dm2 "System"))))))
+  (testing "control: a vocabulary type the DATA asserts is listed"
+    (let [r (reason/reason (ontology "dm2-mini.mith")
+                           (into (data "conforming.nq")
+                                 (nq (str "<urn:x:edr> <" rdf-type "> <" owl-ns "NamedIndividual> .")))
+                           {})]
+      (is (contains? (types-of r "urn:x:edr") (str owl-ns "NamedIndividual")))))
+  (testing "control: without System subClassOf Performer the closure loses exactly those edges"
+    (let [r (reason/reason (without (ontology "dm2-mini.mith") (str dm2 "System") "subClassOf")
+                           (data "conforming.nq") {})]
+      (is (= #{} (reason/superclasses r (str dm2 "System"))))
+      (is (= 6 (get-in r [:schema :counts :subclass-edges]))))))
+
+(deftest disjoint-classes-are-an-inconsistency-named-by-rule
+  (let [o (ontology "unsupported-axiom.mith")
+        both (nq (str "<urn:x:a> <" rdf-type "> <" dm2 "Performer> .\n"
+                      "<urn:x:a> <" rdf-type "> <" dm2 "Location> .\n"))
+        r (reason/reason o both {})]
+    (is (= :inconsistent (:status r)))
+    (is (false? (:consistent? r)))
+    (is (= #{:cax-dw} (rules-fired r)))
+    (is (= 1 (get-in r [:counts :inconsistencies])))
+    (is (= #{{:s (str dm2 "Performer") :p (str owl-ns "disjointWith") :o (str dm2 "Location")}
+             {:s "urn:x:a" :p rdf-type :o (str dm2 "Performer")}
+             {:s "urn:x:a" :p rdf-type :o (str dm2 "Location")}}
+           (set (:triples (first (:inconsistencies r))))))
+    (testing "the CLI reports it by rule and exits 1 (a measured answer, not a refusal)"
+      (let [{:keys [exit out]} (cli/run (fn [p] (if (= p "both.nq")
+                                                   (str "<urn:x:a> <" rdf-type "> <" dm2 "Performer> .\n"
+                                                        "<urn:x:a> <" rdf-type "> <" dm2 "Location> .\n")
+                                                   (read-text p)))
+                                         (str dir "unsupported-axiom.mith") ["both.nq"])]
+        (is (= 1 exit))
+        (is (= "INCONSISTENT\t1" (last out)))
+        (is (some #(str/starts-with? % "INCONSISTENCY\tcax-dw\t") out)))))
+  (testing "control: an individual of ONE of the classes is consistent and conforms"
+    (let [r (reason/reason (ontology "unsupported-axiom.mith")
+                           (nq (str "<urn:x:a> <" rdf-type "> <" dm2 "Performer> .\n")) {})]
+      (is (= :conforms (:status r)))
+      (is (true? (:consistent? r)))
+      (is (= [] (:inconsistencies r)))))
+  (testing "control: without owl:disjointWith the same two types are consistent"
+    (let [o (without (ontology "unsupported-axiom.mith") (str dm2 "Performer") "owl:disjointWith")
+          r (reason/reason o (nq (str "<urn:x:a> <" rdf-type "> <" dm2 "Performer> .\n"
+                                      "<urn:x:a> <" rdf-type "> <" dm2 "Location> .\n")) {})]
+      (is (= :conforms (:status r))))))
+
+(deftest rl-axioms-outside-the-old-rdfs-core-are-accepted-and-reason
+  (testing "owl:FunctionalProperty: two values are the same individual (prp-fp)"
+    (let [o (doc-ontology [{"@id" "urn:x:p" "@type" ["owl:ObjectProperty" "owl:FunctionalProperty"]}])
+          r (reason/reason o (nq "<urn:x:a> <urn:x:p> <urn:x:b> .\n<urn:x:a> <urn:x:p> <urn:x:c> .\n") {})]
+      (is (= :conforms (:status r)))
+      (is (entailed? r "urn:x:b" (str owl-ns "sameAs") "urn:x:c"))
+      (testing "control: not functional, no sameAs"
+        (let [o (doc-ontology [{"@id" "urn:x:p" "@type" "owl:ObjectProperty"}])
+              r (reason/reason o (nq "<urn:x:a> <urn:x:p> <urn:x:b> .\n<urn:x:a> <urn:x:p> <urn:x:c> .\n") {})]
+          (is (not (entailed? r "urn:x:b" (str owl-ns "sameAs") "urn:x:c")))))))
+  (testing "owl:someValuesFrom: an existential restriction is recognised (cls-svf1)"
+    (let [graph [{"@id" "urn:x:C" "@type" "owl:Class"}
+                 {"@id" "urn:x:HasC" "@type" "owl:Class" "subClassOf" "urn:x:Holder"}
+                 {"@id" "urn:x:R" "@type" "owl:Restriction" "owlOnProperty" "urn:x:p"
+                  "owlSomeValuesFrom" "urn:x:C" "subClassOf" "urn:x:HasC"}]
+          r (reason/reason (doc-ontology graph)
+                           (nq (str "<urn:x:a> <urn:x:p> <urn:x:y> .\n"
+                                    "<urn:x:y> <" rdf-type "> <urn:x:C> .\n")) {})]
+      (is (contains? (types-of r "urn:x:a") "urn:x:R"))
+      (is (contains? (types-of r "urn:x:a") "urn:x:Holder") "and climbs from the restriction")
+      (testing "control: y is not a C, so a is not an R"
+        (let [r (reason/reason (doc-ontology graph) (nq "<urn:x:a> <urn:x:p> <urn:x:y> .\n") {})]
+          (is (not (contains? (types-of r "urn:x:a") "urn:x:R")))))))
+  (testing "owl:unionOf: a member class's individual is the union's (cls-uni) and scm-uni orders them"
+    (let [graph [{"@id" "urn:x:A" "@type" "owl:Class"}
+                 {"@id" "urn:x:B" "@type" "owl:Class"}
+                 {"@id" "urn:x:U" "@type" "owl:Class" "owlUnionOf" ["urn:x:A" "urn:x:B"]}]
+          r (reason/reason (doc-ontology graph) (nq (str "<urn:x:a> <" rdf-type "> <urn:x:B> .\n")) {})]
+      (is (contains? (types-of r "urn:x:a") "urn:x:U"))
+      (is (contains? (reason/superclasses r "urn:x:A") "urn:x:U"))
+      (testing "control: without the union, B's individual is only a B"
+        (let [r (reason/reason (doc-ontology (pop graph))
+                               (nq (str "<urn:x:a> <" rdf-type "> <urn:x:B> .\n")) {})]
+          (is (= #{"urn:x:B"} (types-of r "urn:x:a")))))))
+  (testing "owl:sameAs: a type crosses to the same individual (eq-rep-s)"
+    (let [graph [{"@id" "urn:x:C" "@type" "owl:Class"}
+                 {"@id" "urn:x:a" "owlSameAs" "urn:x:b"}]
+          r (reason/reason (doc-ontology graph) (nq (str "<urn:x:a> <" rdf-type "> <urn:x:C> .\n")) {})]
+      (is (entailed? r "urn:x:b" rdf-type "urn:x:C"))
+      (testing "control: without sameAs, b is untyped"
+        (let [r (reason/reason (doc-ontology (pop graph))
+                               (nq (str "<urn:x:a> <" rdf-type "> <urn:x:C> .\n")) {})]
+          (is (not (entailed? r "urn:x:b" rdf-type "urn:x:C"))))))))
+
+(deftest terms-outside-owl2-rl-still-refuse-with-the-vocabulary-reason
+  (let [d (nq "<urn:x:a> <urn:x:p> <urn:x:b> .")
+        refusal (fn [graph] (:refusal (reason/reason (doc-ontology graph) d {})))]
+    (testing "owl:ReflexiveProperty"
+      (let [f (refusal [{"@id" "urn:x:p" "@type" ["owl:ObjectProperty" "owl:ReflexiveProperty"]}])]
+        (is (= :not-owl2-rl (:reason f)))
+        (is (= :unsupported (get-in f [:detail :status])))
+        (is (str/includes? (get-in f [:detail :why]) "ReflexiveObjectProperty"))))
+    (testing "owl:minCardinality"
+      (let [f (refusal [{"@id" "urn:x:R" "@type" "owl:Restriction" "owlOnProperty" "urn:x:p"
+                         (str owl-ns "minCardinality") {"@value" "1" "@type" "http://www.w3.org/2001/XMLSchema#nonNegativeInteger"}}])]
+        (is (= :unsupported-owl-axiom (:reason f)))
+        (is (= (str owl-ns "minCardinality") (get-in f [:detail :predicate])))
+        (is (= :unsupported (get-in f [:detail :status])))
+        (is (str/includes? (get-in f [:detail :why]) "existential"))))
+    (testing "owl:hasSelf"
+      (let [f (refusal [{"@id" "urn:x:R" "@type" "owl:Restriction" "owlOnProperty" "urn:x:p"
+                         (str owl-ns "hasSelf") true}])]
+        (is (= :unsupported-owl-axiom (:reason f)))
+        (is (= (str owl-ns "hasSelf") (get-in f [:detail :predicate])))
+        (is (str/includes? (get-in f [:detail :why]) "ObjectHasSelf"))))
+    (testing "owl:maxCardinality 2 is outside the RL form (0 / 1 only)"
+      (let [f (refusal [{"@id" "urn:x:R" "@type" "owl:Restriction" "owlOnProperty" "urn:x:p"
+                         "owlMaxCardinality" "2"}])]
+        (is (= :unsupported-owl-axiom (:reason f)))
+        (is (= :partial (get-in f [:detail :status])))))
+    (testing "control: owl:maxCardinality 1 is accepted"
+      (is (nil? (refusal [{"@id" "urn:x:R" "@type" "owl:Restriction" "owlOnProperty" "urn:x:p"
+                           "owlMaxCardinality" "1"}]))))
+    (testing "control: the same property without ReflexiveProperty is accepted"
+      (is (nil? (refusal [{"@id" "urn:x:p" "@type" "owl:ObjectProperty"}]))))))
