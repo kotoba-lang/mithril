@@ -44,4 +44,17 @@
          :git/sha "1b21025327e63652e533b54303b5e7b8e11f59ba"}
         io.github.kotoba-lang/io-ipld-car
         {:git/url "https://github.com/kotoba-lang/io-ipld-car.git"
-         :git/sha "52fcafbdd02ae34ff27c6e440d9e40cbbe0bf904"}}}
+         :git/sha "52fcafbdd02ae34ff27c6e440d9e40cbbe0bf904"}
+        ;; Test-only: the IPQ/1 loopback interoperability test (checkpoint_ipq)
+        ;; requires kotobase.protocols.ipq, which requires kotobase.protocols.core.
+        ;; Both were previously supplied by hand on the classpath. Same shas as
+        ;; deps.edn; both reachable from their default branch (2026-09-25).
+        io.github.kotoba-lang/kotobase-protocol-ipq
+        {:git/url "https://github.com/kotoba-lang/kotobase-protocol-ipq.git"
+         :git/sha "6ad3df76db640494912e96442b6dfa74c55b7efa"}
+        io.github.kotoba-lang/kotobase-protocol-core
+        {:git/url "https://github.com/kotoba-lang/kotobase-protocol-core.git"
+         :git/sha "ca3874d2dababed63bb1c357722c8a38e4a3a812"}
+        io.github.kotoba-lang/org-nist-sha2
+        {:git/url "https://github.com/kotoba-lang/org-nist-sha2.git"
+         :git/sha "ad98470c672d40f207992890dac6bf0473b52199"}}}

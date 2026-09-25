@@ -1,0 +1,13 @@
+{"@context": "https://mithril.fund/context/v1",
+ "@id": "https://mithril.fund/ontology/test/shacl-sparql",
+ "@type": "Ontology",
+ "profile": ["https://www.w3.org/TR/rdf11-concepts/",
+             "https://www.w3.org/TR/owl2-profiles/#OWL_2_RL",
+             "https://www.w3.org/TR/shacl/"],
+ "@graph": [{"@id": "https://example.org/dm2#Performer", "@type": "owl:Class"},
+            {"@id": "https://example.org/dm2#PerformerShape", "@type": "sh:NodeShape",
+             "targetClass": "https://example.org/dm2#Performer",
+             "property": [{"@type": "sh:PropertyShape",
+                           "propertyPath": "https://example.org/dm2#label",
+                           "datatype": "http://www.w3.org/2001/XMLSchema#string",
+                           "sh:sparql": {"sh:select": "SELECT $this WHERE { }"}}]}]}

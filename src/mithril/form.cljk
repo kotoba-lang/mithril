@@ -41,6 +41,9 @@
   {'owl/class "owl:Class"
    'owl/object-property "owl:ObjectProperty"
    'owl/datatype-property "owl:DatatypeProperty"
+   'owl/restriction "owl:Restriction"
+   'owl/all-disjoint-classes "owl:AllDisjointClasses"
+   'owl/named-individual "owl:NamedIndividual"
    'shacl/node-shape "sh:NodeShape"
    'shacl/property-shape "sh:PropertyShape"
    'bpmn/process "bpmn:Process"
@@ -139,7 +142,68 @@
    :sh/min-count "minCount"
    :sh/max-count "maxCount"
    :sh/class "valueClass"
-   :sh/datatype "datatype"})
+   :sh/datatype "datatype"
+   ;; SHACL Core (W3C 2017), beyond the seven keys above. Context terms are
+   ;; "sh<LocalName>" so they cannot collide with a bare key an existing
+   ;; document already uses (such keys were dropped by JSON-LD expansion and
+   ;; would start producing triples -- moving that document's digest).
+   :sh/target-node "shTargetNode"
+   :sh/target-subjects-of "shTargetSubjectsOf"
+   :sh/target-objects-of "shTargetObjectsOf"
+   :sh/deactivated "shDeactivated"
+   :sh/severity "shSeverity"
+   :sh/message "shMessage"
+   :sh/name "shName"
+   :sh/description "shDescription"
+   :sh/node-kind "shNodeKind"
+   :sh/min-exclusive "shMinExclusive"
+   :sh/min-inclusive "shMinInclusive"
+   :sh/max-exclusive "shMaxExclusive"
+   :sh/max-inclusive "shMaxInclusive"
+   :sh/min-length "shMinLength"
+   :sh/max-length "shMaxLength"
+   :sh/pattern "shPattern"
+   :sh/flags "shFlags"
+   :sh/language-in "shLanguageIn"
+   :sh/unique-lang "shUniqueLang"
+   :sh/equals "shEquals"
+   :sh/disjoint "shDisjoint"
+   :sh/less-than "shLessThan"
+   :sh/less-than-or-equals "shLessThanOrEquals"
+   :sh/not "shNot"
+   :sh/and "shAnd"
+   :sh/or "shOr"
+   :sh/xone "shXone"
+   :sh/node "shNode"
+   :sh/qualified-value-shape "shQualifiedValueShape"
+   :sh/qualified-min-count "shQualifiedMinCount"
+   :sh/qualified-max-count "shQualifiedMaxCount"
+   :sh/qualified-value-shapes-disjoint "shQualifiedValueShapesDisjoint"
+   :sh/closed "shClosed"
+   :sh/ignored-properties "shIgnoredProperties"
+   :sh/has-value "shHasValue"
+   :sh/in "shIn"
+   ;; OWL 2 vocabulary (expression only; what `mithril.reason` entails is
+   ;; its capability set, see `mithril.reason/owl-vocabulary`).
+   :owl/disjoint-with "owlDisjointWith"
+   :owl/members "owlMembers"
+   :owl/property-chain-axiom "owlPropertyChainAxiom"
+   :owl/has-key "owlHasKey"
+   :owl/intersection-of "owlIntersectionOf"
+   :owl/union-of "owlUnionOf"
+   :owl/complement-of "owlComplementOf"
+   :owl/one-of "owlOneOf"
+   :owl/on-property "owlOnProperty"
+   :owl/some-values-from "owlSomeValuesFrom"
+   :owl/all-values-from "owlAllValuesFrom"
+   :owl/has-value "owlHasValue"
+   :owl/max-cardinality "owlMaxCardinality"
+   :owl/max-qualified-cardinality "owlMaxQualifiedCardinality"
+   :owl/on-class "owlOnClass"
+   :owl/same-as "owlSameAs"
+   :owl/different-from "owlDifferentFrom"
+   :owl/property-disjoint-with "owlPropertyDisjointWith"
+   :owl/equivalent-property "owlEquivalentProperty"})
 
 (defn- fail! [code detail]
   (throw (ex-info detail {:mithril/error code :detail detail})))
@@ -164,6 +228,20 @@
     :else (fail! :mithril.form/unsupported-value
                  (str "unsupported Mithril form value: " (pr-str value)))))
 
+(def ^:private mixed-value-terms
+  "IRI-coerced terms whose values may also be integer or boolean literals
+  (sh:targetNode 7, sh:in [1 2], sh:hasValue true). The pinned JSON-LD
+  expander coerces a native number under \"@type\" \"@id\" to a relative IRI;
+  JSON-LD 1.1 applies that coercion to strings only, so these are lowered as
+  explicit value objects."
+  #{"shTargetNode" "shHasValue" "shIn" "owlHasValue" "owlOneOf"})
+
+(defn- native->value-object [v]
+  (cond
+    (vector? v) (mapv native->value-object v)
+    (or (integer? v) (boolean? v)) {"@value" v}
+    :else v))
+
 (defn- fields [xs]
   (when (odd? (count xs))
     (fail! :mithril.form/field-arity "Mithril forms require keyword/value pairs"))
@@ -171,13 +249,90 @@
         names (map (comp key-name first) pairs)]
     (when-not (= (count names) (count (set names)))
       (fail! :mithril.form/duplicate-field "Mithril form fields must be unique"))
-    (into {} (map (fn [[k v]] [(key-name k) (lower-value v)]) pairs))))
+    (into {} (map (fn [[k v]]
+                    (let [n (key-name k)]
+                      [n (cond-> (lower-value v)
+                           (contains? mixed-value-terms n) native->value-object)]))
+                  pairs))))
+
+(def ^:private path-tags
+  "SHACL property path sub-syntax (SHACL §2.3.1). Positional, not keyword
+  pairs: each argument is an IRI string or another path form."
+  {'path/sequence nil
+   'path/alternative "shAlternativePath"
+   'path/inverse "shInversePath"
+   'path/zero-or-more "shZeroOrMorePath"
+   'path/one-or-more "shOneOrMorePath"
+   'path/zero-or-one "shZeroOrOnePath"})
+
+(def ^:private not-owl2-rl-types
+  "OWL terms Mithril refuses to express: its ontologies declare the OWL 2 RL
+  profile, and these are outside it."
+  #{"owl:ReflexiveProperty" "http://www.w3.org/2002/07/owl#ReflexiveProperty"})
+
+(defn- lower-path [p]
+  (cond
+    (string? p) {"@id" p}
+    (and (list? p) (contains? path-tags (first p))) (lower-form p)
+    :else (fail! :mithril.form/invalid-path
+                 (str "a path is an IRI string or a path/... form: " (pr-str p)))))
+
+(defn- lower-path-form [[tag & args]]
+  (let [n (count args)]
+    (if (contains? #{'path/sequence 'path/alternative} tag)
+      (when (< n 2)
+        (fail! :mithril.form/path-arity (str tag " takes at least two paths")))
+      (when-not (= 1 n)
+        (fail! :mithril.form/path-arity (str tag " takes exactly one path"))))
+    (cond
+      (= 'path/sequence tag) {"@list" (mapv lower-path args)}
+      (= 'path/alternative tag) {"shAlternativePath" (mapv lower-path args)}
+      :else {(get path-tags tag) (lower-path (first args))})))
+
+(defn- lower-literal
+  "(rdf/literal \"lexical\" [:datatype \"xsd:date\" | :language \"en\"]) -> a
+  JSON-LD value object: for typed or language-tagged literals, which bare
+  Form values (strings, integers, booleans) cannot state."
+  [[_ lexical & opts]]
+  (when-not (string? lexical)
+    (fail! :mithril.form/invalid-literal "rdf/literal takes a lexical string first"))
+  (when (odd? (count opts))
+    (fail! :mithril.form/field-arity "rdf/literal options are keyword/value pairs"))
+  (let [{:keys [datatype language] :as o} (apply hash-map opts)]
+    (when-not (every? #{:datatype :language} (keys o))
+      (fail! :mithril.form/unknown-field "rdf/literal accepts only :datatype or :language"))
+    (when (and datatype language)
+      (fail! :mithril.form/invalid-literal "a literal has a datatype or a language, not both"))
+    (when-not (every? #(or (nil? %) (string? %)) [datatype language])
+      (fail! :mithril.form/invalid-literal "rdf/literal :datatype / :language are strings"))
+    (cond-> {"@value" lexical}
+      datatype (assoc "@type" datatype)
+      language (assoc "@language" language))))
+
+(defn- merge-type
+  "A typed tag's own type first, then any :rdf/type the body adds."
+  [tag-type body-type]
+  (let [extra (cond (nil? body-type) [] (vector? body-type) body-type :else [body-type])
+        types (vec (distinct (cons tag-type extra)))]
+    (if (= 1 (count types)) (first types) types)))
+
+(declare lower-tagged)
 
 (defn lower-form [form]
   (when-not (and (list? form) (symbol? (first form)))
     (fail! :mithril.form/invalid-form "Mithril source must be one tagged S-expression"))
+  (cond
+    (contains? path-tags (first form)) (lower-path-form form)
+    (= 'rdf/literal (first form)) (lower-literal form)
+    :else (lower-tagged form)))
+
+(defn- lower-tagged [form]
   (let [tag (first form)
-        body (fields (rest form))]
+        body (fields (rest form))
+        types (let [t (get body "@type")] (if (vector? t) t [t]))]
+    (when-let [bad (some not-owl2-rl-types types)]
+      (fail! :mithril.form/not-owl2-rl
+             (str bad " is outside the OWL 2 RL profile Mithril ontologies declare")))
     (cond
       (contains? top-level-tags tag)
       (assoc body "@context" (cond
@@ -200,7 +355,7 @@
       (contains? nested-tags tag) body
 
       (contains? typed-node-tags tag)
-      (assoc body "@type" (get typed-node-tags tag))
+      (assoc body "@type" (merge-type (get typed-node-tags tag) (get body "@type")))
 
       :else (fail! :mithril.form/unknown-tag (str "unknown Mithril form tag: " tag)))))
 

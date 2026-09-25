@@ -1,0 +1,460 @@
+(ns mithril.shacl-test
+  "SHACL Core and OWL vocabulary through the whole Mithril path: Form text ->
+  JSON-LD -> RDF -> `mithril.reason` (OWL 2 RL entailment, then
+  `mithril.shacl`). Every constraint component has a violating input that
+  fails FOR THAT COMPONENT and a control input that conforms."
+  (:require [cljs.test :refer [deftest is testing]]
+            [clojure.string :as str]
+            [cljs.reader :as reader]
+            [json-ld-api.to-rdf :as to-rdf]
+            [nquads.core :as nq]
+            [rdf-canon.core :as rdf-canon]
+            [mithril.compiler :as compiler]
+            [mithril.form :as form]
+            [mithril.reason :as reason]
+            [mithril.reason-cli :as cli]
+            [mithril.shacl :as shacl]))
+
+(defn- read-text [path] (.readFileSync (js/require "fs") path "utf8"))
+
+(def rdf "http://www.w3.org/1999/02/22-rdf-syntax-ns#")
+(def sh "http://www.w3.org/ns/shacl#")
+(def owl "http://www.w3.org/2002/07/owl#")
+(def xsd "http://www.w3.org/2001/XMLSchema#")
+
+(def profile
+  "[\"https://www.w3.org/TR/rdf11-concepts/\" \"https://www.w3.org/TR/owl2-profiles/#OWL_2_RL\" \"https://www.w3.org/TR/shacl/\"]")
+
+(defn- ontology-text [& nodes]
+  (str "(mithril/ontology :id \"https://mithril.fund/ontology/test/shacl\" :profile " profile
+       " :graph [" (str/join "\n" nodes) "])"))
+
+(defn- onto [& nodes] (compiler/compile-ontology-text "t.mith" (apply ontology-text nodes)))
+(defn- nq* [text] (reason/parse-data "inline.nq" text))
+(defn- run [o data] (reason/reason o (nq* data) {}))
+(defn- components [r] (set (map #(subs (:source-constraint-component %) (count sh))
+                                (get-in r [:report :results]))))
+
+(defn- t [s p o] (str "<" s "> <" p "> " o " .\n"))
+(defn- i [x] (str "<" x ">"))
+(def a "urn:x:a")
+(def type* (str rdf "type"))
+(defn- int* [n] (str "\"" n "\"^^<" xsd "integer>"))
+
+(defn- ps
+  "A node shape targeting urn:x:a with one property shape on urn:x:p."
+  [& kvs]
+  (str "(shacl/node-shape :id \"urn:x:S\" :sh/target-node \"urn:x:a\" :sh/property "
+       "[(shacl/property-shape :sh/path \"urn:x:p\" " (str/join " " kvs) ")])"))
+
+(defn- pp
+  "Like ps, with the path given."
+  [path & kvs]
+  (str "(shacl/node-shape :id \"urn:x:S\" :sh/target-node \"urn:x:a\" :sh/property "
+       "[(shacl/property-shape :sh/path " path " " (str/join " " kvs) ")])"))
+
+(defn- ns* [& kvs]
+  (str "(shacl/node-shape :id \"urn:x:S\" :sh/target-node \"urn:x:a\" " (str/join " " kvs) ")"))
+
+(def cases
+  "[component shape-form violating-data conforming-data]"
+  [["Class" (ps ":sh/class \"urn:x:C\"")
+    (t a "urn:x:p" (i "urn:x:b"))
+    (str (t a "urn:x:p" (i "urn:x:b")) (t "urn:x:b" type* (i "urn:x:C")))]
+   ["Datatype" (ps ":sh/datatype \"http://www.w3.org/2001/XMLSchema#integer\"")
+    (t a "urn:x:p" "\"x\"") (t a "urn:x:p" (int* 5))]
+   ["Datatype" (ps ":sh/datatype \"http://www.w3.org/2001/XMLSchema#integer\"")
+    (t a "urn:x:p" (str "\"five\"^^<" xsd "integer>")) (t a "urn:x:p" (int* 5))]
+   ["NodeKind" (ps ":sh/node-kind \"sh:IRI\"")
+    (t a "urn:x:p" "\"x\"") (t a "urn:x:p" (i "urn:x:b"))]
+   ["MinCount" (ps ":sh/min-count 2")
+    (t a "urn:x:p" "\"x\"") (str (t a "urn:x:p" "\"x\"") (t a "urn:x:p" "\"y\""))]
+   ["MaxCount" (ps ":sh/max-count 1")
+    (str (t a "urn:x:p" "\"x\"") (t a "urn:x:p" "\"y\"")) (t a "urn:x:p" "\"x\"")]
+   ["MinExclusive" (ps ":sh/min-exclusive 5") (t a "urn:x:p" (int* 5)) (t a "urn:x:p" (int* 6))]
+   ["MinInclusive" (ps ":sh/min-inclusive 5") (t a "urn:x:p" (int* 4)) (t a "urn:x:p" (int* 5))]
+   ["MaxExclusive" (ps ":sh/max-exclusive 5") (t a "urn:x:p" (int* 5)) (t a "urn:x:p" (int* 4))]
+   ["MaxInclusive" (ps ":sh/max-inclusive 5") (t a "urn:x:p" (int* 6)) (t a "urn:x:p" (int* 5))]
+   ["MinInclusive" (ps ":sh/min-inclusive (rdf/literal \"2020-01-01\" :datatype \"xsd:date\")")
+    (t a "urn:x:p" (str "\"2019-12-31\"^^<" xsd "date>"))
+    (t a "urn:x:p" (str "\"2020-01-01\"^^<" xsd "date>"))]
+   ["MinLength" (ps ":sh/min-length 3") (t a "urn:x:p" "\"ab\"") (t a "urn:x:p" "\"abc\"")]
+   ["MaxLength" (ps ":sh/max-length 2") (t a "urn:x:p" "\"abc\"") (t a "urn:x:p" "\"ab\"")]
+   ["Pattern" (ps ":sh/pattern \"^a\" :sh/flags \"i\"") (t a "urn:x:p" "\"Bcd\"") (t a "urn:x:p" "\"Abc\"")]
+   ["LanguageIn" (ps ":sh/language-in [\"en\"]") (t a "urn:x:p" "\"x\"@ja") (t a "urn:x:p" "\"x\"@en-GB")]
+   ["UniqueLang" (ps ":sh/unique-lang true")
+    (str (t a "urn:x:p" "\"x\"@en") (t a "urn:x:p" "\"y\"@en"))
+    (str (t a "urn:x:p" "\"x\"@en") (t a "urn:x:p" "\"y\"@ja"))]
+   ["Equals" (ps ":sh/equals \"urn:x:q\"")
+    (str (t a "urn:x:p" (i "urn:x:b")) (t a "urn:x:q" (i "urn:x:c")))
+    (str (t a "urn:x:p" (i "urn:x:b")) (t a "urn:x:q" (i "urn:x:b")))]
+   ["Disjoint" (ps ":sh/disjoint \"urn:x:q\"")
+    (str (t a "urn:x:p" (i "urn:x:b")) (t a "urn:x:q" (i "urn:x:b")))
+    (str (t a "urn:x:p" (i "urn:x:b")) (t a "urn:x:q" (i "urn:x:c")))]
+   ["LessThan" (ps ":sh/less-than \"urn:x:q\"")
+    (str (t a "urn:x:p" (int* 3)) (t a "urn:x:q" (int* 3)))
+    (str (t a "urn:x:p" (int* 3)) (t a "urn:x:q" (int* 4)))]
+   ["LessThanOrEquals" (ps ":sh/less-than-or-equals \"urn:x:q\"")
+    (str (t a "urn:x:p" (int* 4)) (t a "urn:x:q" (int* 3)))
+    (str (t a "urn:x:p" (int* 3)) (t a "urn:x:q" (int* 3)))]
+   ["Not" (ns* ":sh/not (shacl/node-shape :sh/class \"urn:x:C\")")
+    (t a type* (i "urn:x:C")) (t a type* (i "urn:x:D"))]
+   ["And" (ns* ":sh/and [(shacl/node-shape :sh/class \"urn:x:C\") (shacl/node-shape :sh/class \"urn:x:D\")]")
+    (t a type* (i "urn:x:C")) (str (t a type* (i "urn:x:C")) (t a type* (i "urn:x:D")))]
+   ["Or" (ns* ":sh/or [(shacl/node-shape :sh/class \"urn:x:C\") (shacl/node-shape :sh/class \"urn:x:D\")]")
+    (t a type* (i "urn:x:E")) (t a type* (i "urn:x:D"))]
+   ["Xone" (ns* ":sh/xone [(shacl/node-shape :sh/class \"urn:x:C\") (shacl/node-shape :sh/class \"urn:x:D\")]")
+    (str (t a type* (i "urn:x:C")) (t a type* (i "urn:x:D"))) (t a type* (i "urn:x:D"))]
+   ["Node" (ns* ":sh/node (shacl/node-shape :sh/class \"urn:x:C\")")
+    (t a type* (i "urn:x:D")) (t a type* (i "urn:x:C"))]
+   ["QualifiedMinCount" (ps ":sh/qualified-value-shape (shacl/node-shape :sh/class \"urn:x:C\") :sh/qualified-min-count 2")
+    (str (t a "urn:x:p" (i "urn:x:b")) (t "urn:x:b" type* (i "urn:x:C")))
+    (str (t a "urn:x:p" (i "urn:x:b")) (t "urn:x:b" type* (i "urn:x:C"))
+         (t a "urn:x:p" (i "urn:x:c")) (t "urn:x:c" type* (i "urn:x:C")))]
+   ["QualifiedMaxCount" (ps ":sh/qualified-value-shape (shacl/node-shape :sh/class \"urn:x:C\") :sh/qualified-max-count 1")
+    (str (t a "urn:x:p" (i "urn:x:b")) (t "urn:x:b" type* (i "urn:x:C"))
+         (t a "urn:x:p" (i "urn:x:c")) (t "urn:x:c" type* (i "urn:x:C")))
+    (str (t a "urn:x:p" (i "urn:x:b")) (t "urn:x:b" type* (i "urn:x:C")) (t a "urn:x:p" (i "urn:x:c")))]
+   ["Closed" (ns* ":sh/closed true :sh/ignored-properties [\"rdf:type\"]"
+                  ":sh/property [(shacl/property-shape :sh/path \"urn:x:p\" :sh/min-count 1)]")
+    (str (t a "urn:x:p" "\"x\"") (t a "urn:x:q" "\"y\""))
+    (str (t a "urn:x:p" "\"x\"") (t a type* (i "urn:x:C")))]
+   ["HasValue" (ps ":sh/has-value \"urn:x:v\"") (t a "urn:x:p" (i "urn:x:w")) (t a "urn:x:p" (i "urn:x:v"))]
+   ["In" (ps ":sh/in [\"urn:x:v\" 1 (rdf/literal \"s\")]")
+    (t a "urn:x:p" (i "urn:x:w"))
+    (str (t a "urn:x:p" (i "urn:x:v")) (t a "urn:x:p" (int* 1)) (t a "urn:x:p" "\"s\""))]])
+
+(deftest every-constraint-component-fails-for-its-own-reason
+  (doseq [[component shape bad good] cases]
+    (testing (str component " " shape)
+      (let [o (onto shape)
+            r (run o bad)
+            c (run o good)]
+        (is (= :violations (:status r)) (pr-str (:refusal r)))
+        (is (= #{(str component "ConstraintComponent")} (components r)))
+        (is (= :conforms (:status c)) (str "control: " (pr-str (or (:refusal c) (:violations c)))))))))
+
+(deftest the-seven-core-families-are-all-exercised
+  (is (= (set (map #(subs % (count sh)) shacl/supported-components))
+         (into #{"PropertyConstraintComponent"}
+               (map #(str (first %) "ConstraintComponent") cases)))
+      "every supported component has a case above (Property is exercised by every ps case)"))
+
+(deftest qualified-value-shapes-disjoint-counts-siblings
+  (let [o (onto (str "(shacl/node-shape :id \"urn:x:S\" :sh/target-node \"urn:x:a\" :sh/property ["
+                     "(shacl/property-shape :sh/path \"urn:x:p\" :sh/qualified-value-shape (shacl/node-shape :sh/class \"urn:x:C\")"
+                     " :sh/qualified-min-count 1 :sh/qualified-value-shapes-disjoint true)"
+                     "(shacl/property-shape :sh/path \"urn:x:p\" :sh/qualified-value-shape (shacl/node-shape :sh/class \"urn:x:D\")"
+                     " :sh/qualified-min-count 1 :sh/qualified-value-shapes-disjoint true)])"))
+        both (str (t a "urn:x:p" (i "urn:x:b")) (t "urn:x:b" type* (i "urn:x:C")) (t "urn:x:b" type* (i "urn:x:D")))]
+    (testing "one value that is both C and D counts for neither when disjoint"
+      (is (= 2 (count (get-in (run o both) [:report :results]))))
+      (is (= #{"QualifiedMinCountConstraintComponent"} (components (run o both)))))
+    (testing "control: one C and one other D value conform"
+      (is (= :conforms (:status (run o (str (t a "urn:x:p" (i "urn:x:b")) (t "urn:x:b" type* (i "urn:x:C"))
+                                             (t a "urn:x:p" (i "urn:x:c")) (t "urn:x:c" type* (i "urn:x:D"))))))))))
+
+(deftest targets
+  (let [shape (fn [target] (onto (str "(shacl/node-shape :id \"urn:x:S\" " target
+                                      " :sh/property [(shacl/property-shape :sh/path \"urn:x:p\" :sh/min-count 1)])")))
+        data (str (t a "urn:x:q" (i "urn:x:b")) (t "urn:x:c" type* (i "urn:x:C")))
+        focus (fn [r] (set (map :focus-node (get-in r [:report :results]))))]
+    (is (= #{a} (focus (run (shape ":sh/target-node \"urn:x:a\"") data))) "targetNode")
+    (is (= #{a} (focus (run (shape ":sh/target-subjects-of \"urn:x:q\"") data))) "targetSubjectsOf")
+    (is (= #{"urn:x:b"} (focus (run (shape ":sh/target-objects-of \"urn:x:q\"") data))) "targetObjectsOf")
+    (is (= #{"urn:x:c"} (focus (run (shape ":sh/target-class \"urn:x:C\"") data))) "targetClass")
+    (testing "an ENTAILED instance is a targetClass focus node (subClassOf in the ontology)"
+      (let [o (onto "(owl/class :id \"urn:x:Sub\" :rdfs/sub-class-of \"urn:x:C\")"
+                    (str "(shacl/node-shape :id \"urn:x:S\" :sh/target-class \"urn:x:C\""
+                         " :sh/property [(shacl/property-shape :sh/path \"urn:x:p\" :sh/min-count 1)])"))]
+        (is (= #{"urn:x:d"} (focus (run o (t "urn:x:d" type* (i "urn:x:Sub"))))))))
+    (testing "implicit class target: a shape that is also an rdfs:Class"
+      (let [cls (fn [types] (onto (str "(owl/class :id \"urn:x:C\" :rdf/type " types
+                                       " :sh/property [(shacl/property-shape :sh/path \"urn:x:p\" :sh/min-count 1)])")))]
+        (is (= #{"urn:x:c"} (focus (run (cls "[\"rdfs:Class\"]") data))))
+        (is (= :conforms (:status (run (cls "[]") data)))
+            "control: an owl:Class alone is not an implicit target (SHACL §2.1.3.3 names rdfs:Class)")))))
+
+(deftest property-paths
+  (let [shape (fn [path] (onto (pp path ":sh/min-count 1")))
+        path-shape (fn [path] (onto (str "(shacl/node-shape :id \"urn:x:S\" :sh/target-node \"urn:x:a\" :sh/property "
+                                          "[(shacl/property-shape :sh/path " path " :sh/has-value \"urn:x:z\")])")))
+        chain (str (t a "urn:x:p" (i "urn:x:b")) (t "urn:x:b" "urn:x:q" (i "urn:x:z")))]
+    (is (= :conforms (:status (run (path-shape "(path/sequence \"urn:x:p\" \"urn:x:q\")") chain))))
+    (is (= :violations (:status (run (path-shape "(path/sequence \"urn:x:q\" \"urn:x:p\")") chain))) "control: order matters")
+    (is (= :conforms (:status (run (path-shape "(path/alternative \"urn:x:r\" (path/sequence \"urn:x:p\" \"urn:x:q\"))") chain))))
+    (is (= :conforms (:status (run (path-shape "(path/inverse \"urn:x:p\")") (t "urn:x:z" "urn:x:p" (i a))))))
+    (is (= :violations (:status (run (path-shape "(path/inverse \"urn:x:p\")") (t a "urn:x:p" (i "urn:x:z"))))) "control")
+    (let [star (str (t a "urn:x:p" (i "urn:x:b")) (t "urn:x:b" "urn:x:p" (i "urn:x:z")))]
+      (is (= :conforms (:status (run (path-shape "(path/one-or-more \"urn:x:p\")") star))))
+      (is (= :conforms (:status (run (path-shape "(path/zero-or-more \"urn:x:p\")") star))))
+      (is (= :violations (:status (run (path-shape "(path/zero-or-one \"urn:x:p\")") star)))
+          "control: z is two steps away"))
+    (testing "zeroOrMore includes the focus node itself; oneOrMore does not"
+      (let [self-shape (fn [p] (onto (str "(shacl/node-shape :id \"urn:x:S\" :sh/target-node \"urn:x:a\" :sh/property "
+                                          "[(shacl/property-shape :sh/path " p " :sh/has-value \"urn:x:a\")])")))
+            data (t a "urn:x:q" "\"x\"")]
+        (is (= :conforms (:status (run (self-shape "(path/zero-or-more \"urn:x:p\")") data))))
+        (is (= :violations (:status (run (self-shape "(path/one-or-more \"urn:x:p\")") data))))))
+    (testing "the result path is reported structurally"
+      (let [r (run (shape "(path/inverse \"urn:x:p\")") (t a "urn:x:q" "\"x\""))]
+        (is (= {:inverse "urn:x:p"} (get-in r [:report :results 0 :result-path])))))))
+
+(deftest severity-message-deactivated-and-non-validating-terms
+  (let [base ":sh/min-count 1"
+        data (t a "urn:x:q" "\"x\"")]
+    (testing "sh:severity is carried into the result; the report does not conform"
+      (let [r (run (onto (ps base ":sh/severity \"sh:Warning\"")) data)]
+        (is (= :violations (:status r)))
+        (is (false? (get-in r [:report :conforms])))
+        (is (= (str sh "Warning") (get-in r [:report :results 0 :result-severity])))
+        (is (= (str sh "Violation") (get-in (run (onto (ps base)) data) [:report :results 0 :result-severity]))
+            "control: the default severity is sh:Violation")))
+    (testing "sh:message becomes sh:resultMessage"
+      (let [r (run (onto (ps base ":sh/message (rdf/literal \"needs p\" :language \"en\")")) data)]
+        (is (= [{:literal "needs p" :datatype (str rdf "langString") :language "en"}]
+               (get-in r [:report :results 0 :result-message])))))
+    (testing "sh:deactivated true switches the shape off"
+      (is (= :conforms (:status (run (onto (ps base ":sh/deactivated true")) data))))
+      (is (= :violations (:status (run (onto (ps base ":sh/deactivated false")) data))) "control"))
+    (testing "sh:name / sh:description are accepted and do not validate"
+      (is (= :conforms (:status (run (onto (ps ":sh/name \"p\" :sh/description \"the p\" :sh/min-count 0")) data)))))))
+
+(deftest inactive-parameters-are-reported-not-silent
+  (let [r (run (onto (ps ":sh/qualified-min-count 1 :sh/unique-lang true")) (t a "urn:x:p" "\"x\"@en"))]
+    (is (= :conforms (:status r)))
+    (is (= [{:shape (get-in r [:inactive 0 :shape]) :parameter "sh:qualifiedMinCount/sh:qualifiedMaxCount"
+             :reason "no sh:qualifiedValueShape"}]
+           (:inactive r)))))
+
+(defn- doc [graph]
+  {"@context" compiler/context-uri
+   "@id" "https://mithril.fund/ontology/test/refusals"
+   "@type" "Ontology"
+   "profile" ["https://www.w3.org/TR/rdf11-concepts/"
+              "https://www.w3.org/TR/owl2-profiles/#OWL_2_RL"
+              "https://www.w3.org/TR/shacl/"]
+   "@graph" graph})
+
+(defn- od [graph] (compiler/compile-ontology-document "r.mith" (doc graph)))
+
+(deftest out-of-scope-shacl-refuses-by-name
+  (let [shape (fn [extra] (od [(merge {"@id" "urn:x:S" "@type" "sh:NodeShape" "shTargetNode" "urn:x:a"} extra)]))
+        data (t a "urn:x:p" "\"x\"")]
+    (let [r (run (shape {"sh:sparql" {"sh:select" "SELECT $this WHERE {}"}}) data)]
+      (is (= :unsupported-shacl-sparql (get-in r [:refusal :reason])))
+      (is (= (str sh "sparql") (get-in r [:refusal :detail :constraint]))))
+    (let [r (run (shape {"sh:rule" {"@id" "urn:x:r"}}) data)]
+      (is (= :unsupported-shacl-constraint (get-in r [:refusal :reason])))
+      (is (= (str sh "rule") (get-in r [:refusal :detail :constraint]))))
+    (is (= :conforms (:status (run (shape {}) data))) "control: the same shape without them is evaluated")
+    (let [r (run (od [{"@id" "urn:x:S" "@type" "sh:NodeShape" "shTargetNode" "urn:x:a"
+                       "property" [{"propertyPath" {"urn:x:weird" {"@id" "urn:x:p"}} "minCount" 1}]}])
+                 data)]
+      (is (= :unsupported-shacl-path (get-in r [:refusal :reason]))))))
+
+(def functional
+  [{"@id" "urn:x:p" "@type" ["owl:ObjectProperty" "owl:FunctionalProperty"]}])
+
+(deftest owl-axioms-are-accepted-by-capability-set-and-refused-by-name
+  (testing "at the pinned owl2 (no owl.rules/supported-vocabulary) the fixed set applies"
+    (is (nil? (resolve 'owl.rules/supported-vocabulary)))
+    (is (= reason/fixed-owl-vocabulary (reason/owl-vocabulary)))
+    (is (= reason/fixed-rules reason/rules)))
+  (let [r (run (od functional) (t a "urn:x:p" (i "urn:x:b")))]
+    (is (= :unsupported-owl-axiom (get-in r [:refusal :reason])))
+    (is (= (str owl "FunctionalProperty") (get-in r [:refusal :detail :type]))))
+  (testing "the seam: a vocabulary that names the term accepts it, no code change"
+    (let [v (reason/owl-vocabulary {:functional-property :owl/FunctionalProperty
+                                    :sub-class-of :rdfs/subClassOf})]
+      (is (= #{(str owl "FunctionalProperty") "http://www.w3.org/2000/01/rdf-schema#subClassOf"} v))
+      (is (= :conforms (:status (reason/reason (od functional) (nq* (t a "urn:x:p" (i "urn:x:b")))
+                                               {:vocabulary v}))))))
+  (testing "a list-valued axiom is refused by its own predicate, not by rdf:first"
+    (let [r (run (onto "(owl/class :id \"urn:x:U\" :owl/union-of [\"urn:x:A\" \"urn:x:B\"])")
+                 (t a "urn:x:p" (i "urn:x:b")))]
+      (is (= :unsupported-owl-axiom (get-in r [:refusal :reason])))
+      (is (= (str owl "unionOf") (get-in r [:refusal :detail :predicate])))))
+  (testing "owl:ReflexiveProperty is not OWL 2 RL: refused even if a vocabulary names it"
+    (let [refl (od [{"@id" "urn:x:p" "@type" ["owl:ObjectProperty" "owl:ReflexiveProperty"]}])]
+      (is (= :not-owl2-rl (get-in (reason/reason refl (nq* (t a "urn:x:p" (i "urn:x:b")))
+                                                 {:vocabulary #{(str owl "ReflexiveProperty")}})
+                                  [:refusal :reason])))))
+  (testing "and the Form refuses to express it"
+    (is (= :mithril.form/not-owl2-rl
+           (try (form/parse "(owl/object-property :id \"urn:x:p\" :rdf/type [\"owl:ReflexiveProperty\"])")
+                (catch :default e (:mithril/error (ex-data e))))))))
+
+;; ── Form round trip: every new key reaches RDF as its W3C IRI ────────────────
+
+(def new-keys
+  "[form-key form-value expected-predicate-namespace list?]"
+  [[:sh/target-node "\"urn:x:v\"" sh false]
+   [:sh/target-subjects-of "\"urn:x:v\"" sh false]
+   [:sh/target-objects-of "\"urn:x:v\"" sh false]
+   [:sh/deactivated "true" sh false]
+   [:sh/severity "\"sh:Info\"" sh false]
+   [:sh/message "\"m\"" sh false]
+   [:sh/name "\"n\"" sh false]
+   [:sh/description "\"d\"" sh false]
+   [:sh/node-kind "\"sh:Literal\"" sh false]
+   [:sh/min-exclusive "1" sh false]
+   [:sh/min-inclusive "1" sh false]
+   [:sh/max-exclusive "1" sh false]
+   [:sh/max-inclusive "1" sh false]
+   [:sh/min-length "1" sh false]
+   [:sh/max-length "1" sh false]
+   [:sh/pattern "\"^a\"" sh false]
+   [:sh/flags "\"i\"" sh false]
+   [:sh/language-in "[\"en\" \"ja\"]" sh true]
+   [:sh/unique-lang "true" sh false]
+   [:sh/equals "\"urn:x:v\"" sh false]
+   [:sh/disjoint "\"urn:x:v\"" sh false]
+   [:sh/less-than "\"urn:x:v\"" sh false]
+   [:sh/less-than-or-equals "\"urn:x:v\"" sh false]
+   [:sh/not "\"urn:x:v\"" sh false]
+   [:sh/and "[\"urn:x:v\" \"urn:x:w\"]" sh true]
+   [:sh/or "[\"urn:x:v\" \"urn:x:w\"]" sh true]
+   [:sh/xone "[\"urn:x:v\" \"urn:x:w\"]" sh true]
+   [:sh/node "\"urn:x:v\"" sh false]
+   [:sh/qualified-value-shape "\"urn:x:v\"" sh false]
+   [:sh/qualified-min-count "1" sh false]
+   [:sh/qualified-max-count "1" sh false]
+   [:sh/qualified-value-shapes-disjoint "true" sh false]
+   [:sh/closed "true" sh false]
+   [:sh/ignored-properties "[\"urn:x:v\"]" sh true]
+   [:sh/has-value "\"urn:x:v\"" sh false]
+   [:sh/in "[\"urn:x:v\" 1]" sh true]
+   [:owl/disjoint-with "\"urn:x:v\"" owl false]
+   [:owl/members "[\"urn:x:v\" \"urn:x:w\"]" owl true]
+   [:owl/property-chain-axiom "[\"urn:x:v\" \"urn:x:w\"]" owl true]
+   [:owl/has-key "[\"urn:x:v\"]" owl true]
+   [:owl/intersection-of "[\"urn:x:v\" \"urn:x:w\"]" owl true]
+   [:owl/union-of "[\"urn:x:v\" \"urn:x:w\"]" owl true]
+   [:owl/complement-of "\"urn:x:v\"" owl false]
+   [:owl/one-of "[\"urn:x:v\" \"urn:x:w\"]" owl true]
+   [:owl/on-property "\"urn:x:v\"" owl false]
+   [:owl/some-values-from "\"urn:x:v\"" owl false]
+   [:owl/all-values-from "\"urn:x:v\"" owl false]
+   [:owl/has-value "\"urn:x:v\"" owl false]
+   [:owl/max-cardinality "1" owl false]
+   [:owl/max-qualified-cardinality "1" owl false]
+   [:owl/on-class "\"urn:x:v\"" owl false]
+   [:owl/same-as "\"urn:x:v\"" owl false]
+   [:owl/different-from "\"urn:x:v\"" owl false]
+   [:owl/property-disjoint-with "\"urn:x:v\"" owl false]
+   [:owl/equivalent-property "\"urn:x:v\"" owl false]])
+
+(defn- camel [s] (str/replace s #"-([a-z])" #(str/upper-case (second %))))
+
+(defn- quads-of [text]
+  (compiler/ontology-quads (compiler/compile-ontology-text "k.mith" text)))
+
+(deftest every-new-form-key-expands-to-its-w3c-iri
+  (doseq [[k v ns* list?] new-keys
+          :let [iri (str ns* (camel (name k)))
+                quads (quads-of (ontology-text (str "(rdf/node :id \"urn:x:s\" " k " " v ")")))
+                preds (set (map #(get-in % [:predicate :value]) quads))
+                obj (some #(when (= iri (get-in % [:predicate :value])) (:object %)) quads)]]
+    (testing (str k)
+      (is (contains? preds iri) (str k " -> " iri))
+      (is (every? #(re-find #"^(https?|urn):" %) preds) "no compact / relative predicate")
+      (when list?
+        (is (= :blank (:type obj)) "a vector is an RDF list")
+        (is (contains? preds (str rdf "first")))
+        (is (contains? preds (str rdf "rest"))))
+      (when (and (not list?) (str/starts-with? v "\"urn:"))
+        (is (= {:type :iri :value "urn:x:v"} (select-keys obj [:type :value])) "IRI-valued"))))
+  (testing "integers in IRI-coerced terms stay literals (not relative IRIs)"
+    (let [quads (quads-of (ontology-text "(rdf/node :id \"urn:x:s\" :sh/in [1 true] :sh/target-node 7)"))
+          objs (set (map :object quads))]
+      (is (contains? objs {:type :literal :value "7" :datatype (str xsd "integer")}))
+      (is (contains? objs {:type :literal :value "1" :datatype (str xsd "integer")}))
+      (is (contains? objs {:type :literal :value "true" :datatype (str xsd "boolean")}))))
+  (testing "property characteristics and typed OWL tags"
+    (let [quads (quads-of (ontology-text
+                           (str "(owl/object-property :id \"urn:x:p\" :rdf/type [\"owl:FunctionalProperty\" \"owl:InverseFunctionalProperty\""
+                                " \"owl:IrreflexiveProperty\" \"owl:AsymmetricProperty\" \"owl:TransitiveProperty\" \"owl:SymmetricProperty\"])")
+                           "(owl/all-disjoint-classes :owl/members [\"urn:x:A\" \"urn:x:B\"])"
+                           "(owl/restriction :id \"urn:x:R\" :owl/on-property \"urn:x:p\" :owl/some-values-from \"urn:x:A\")"))
+          types (set (keep #(when (= (str rdf "type") (get-in % [:predicate :value])) (get-in % [:object :value])) quads))]
+      (is (= (set (map #(str owl %) ["ObjectProperty" "FunctionalProperty" "InverseFunctionalProperty" "IrreflexiveProperty"
+                                     "AsymmetricProperty" "TransitiveProperty" "SymmetricProperty"
+                                     "AllDisjointClasses" "Restriction" "Ontology"]))
+             types))))
+  (testing "path forms lower to SHACL path nodes and lists"
+    (let [lowered (form/parse "(shacl/property-shape :sh/path (path/sequence \"urn:x:p\" (path/inverse \"urn:x:q\")))")]
+      (is (= {"@list" [{"@id" "urn:x:p"} {"shInversePath" {"@id" "urn:x:q"}}]} (get lowered "propertyPath"))))
+    (is (= :mithril.form/path-arity
+           (try (form/parse "(shacl/property-shape :sh/path (path/sequence \"urn:x:p\"))")
+                (catch :default e (:mithril/error (ex-data e))))))
+    (is (= :mithril.form/invalid-path
+           (try (form/parse "(shacl/property-shape :sh/path (path/inverse 5))")
+                (catch :default e (:mithril/error (ex-data e))))))))
+
+(deftest shipped-graph-digests-did-not-move
+  (let [baseline (reader/read-string (read-text "test/fixtures/digest-baseline.edn"))]
+    (is (= 36 (count baseline)) "evidence floor: every shipped .mith/.mithril file is in the baseline")
+    (doseq [[path digest] baseline]
+      (is (= digest (compiler/graph-digest (compiler/parse-source (read-text path)))) path))
+    (testing "control: a document that USES a new term does get a new digest"
+      (let [path "test/fixtures/reason/dm2-mini.mith"
+            text (read-text path)
+            changed (str/replace text ":sh/max-count 1)" ":sh/max-count 1 :sh/min-length 1)")]
+        (is (not= text changed))
+        (is (not= (get baseline path) (compiler/graph-digest (compiler/parse-source changed))))))))
+
+;; ── the report as data, N-Quads and JSON-LD ──────────────────────────────────
+
+(deftest the-report-serializes-and-round-trips
+  (let [o (onto (pp "(path/sequence \"urn:x:p\" \"urn:x:q\")" ":sh/min-count 1")
+                (ps ":sh/datatype \"http://www.w3.org/2001/XMLSchema#integer\""))
+        r (run o (t a "urn:x:p" "\"x\"@en"))
+        rep (:report r)
+        triples (shacl/report->triples rep)
+        canon (fn [quads] (rdf-canon/canonical-hash quads))]
+    (is (false? (:conforms rep)))
+    (is (= 2 (count (:results rep))))
+    (is (= #{:focus-node :source-shape :source-constraint-component :result-severity :result-path}
+           (set (keys (first (filter #(= (str sh "MinCountConstraintComponent") (:source-constraint-component %))
+                                     (:results rep)))))))
+    (testing "N-Quads parse back to the same graph"
+      (let [text (shacl/report->nquads rep)]
+        (is (str/includes? text (str "<" sh "conforms> \"false\"^^<" xsd "boolean>")))
+        (is (= (canon (shacl/triples->quads triples)) (canon (nq/parse text))))))
+    (testing "JSON-LD -> RDF is the same graph"
+      (let [jsonld (shacl/report->jsonld rep)]
+        (is (= (canon (shacl/triples->quads triples)) (canon (to-rdf/to-rdf jsonld))))))
+    (testing "control: a different report is a different graph"
+      (is (not= (canon (shacl/triples->quads triples))
+                (canon (shacl/triples->quads (shacl/report->triples (update rep :results pop))))))))
+  (testing "the CLI --json result carries the report"
+    (let [dir "test/fixtures/reason/"
+          {:keys [exit result]} (cli/run read-text (str dir "dm2-mini.mith") [(str dir "violating.nq") "--json"])]
+      (is (= 1 exit))
+      (is (= [(str sh "ClassConstraintComponent")]
+             (mapv :source-constraint-component (get-in result [:report :results])))))))
+
+(deftest the-readme-example-runs
+  (let [path "examples/dm2-shacl-slice.mith"
+        o (compiler/compile-ontology-text path (read-text path))
+        dm2 "https://example.org/dm2#"
+        base (str (t "urn:x:p" type* (i (str dm2 "Performer")))
+                  (t "urn:x:p" (str dm2 "partOf") (i "urn:x:s"))
+                  (t "urn:x:s" type* (i (str dm2 "System")))
+                  (t "urn:x:c" (str dm2 "capabilityOfPerformer") (i "urn:x:p"))
+                  (t "urn:x:c" type* (i (str dm2 "Capability"))))]
+    (is (= :conforms (:status (run o (str base (t "urn:x:p" (str dm2 "label") "\"Upper\""))))))
+    (testing "a lower-case label is a Warning from the pattern constraint, with its message"
+      (let [r (run o (str base (t "urn:x:p" (str dm2 "label") "\"lower\"")))]
+        (is (= #{"PatternConstraintComponent"} (components r)))
+        (is (= (str sh "Warning") (get-in r [:report :results 0 :result-severity])))
+        (is (= "label must start upper-case" (get-in r [:report :results 0 :result-message 0 :literal])))))
+    (testing "an undeclared property on a Performer violates sh:closed"
+      (is (= #{"ClosedConstraintComponent"}
+             (components (run o (str base (t "urn:x:p" (str dm2 "label") "\"Upper\"")
+                                     (t "urn:x:p" (str dm2 "other") "\"x\"")))))))
+    (testing "no System reachable over partOf+ fails the qualified count"
+      (is (= #{"QualifiedMinCountConstraintComponent"}
+             (components (run o (str/replace (str base (t "urn:x:p" (str dm2 "label") "\"Upper\""))
+                                             (str "<urn:x:s> <" type* "> <" dm2 "System> .\n") ""))))))))

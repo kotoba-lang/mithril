@@ -1,0 +1,178 @@
+(ns mithril.shacl-w3c-test
+  "The W3C SHACL Core test suite (w3c/data-shapes, data-shapes-test-suite/
+  tests/core, vendored at test/fixtures/w3c-shacl -- see PROVENANCE.edn),
+  manifest-driven.
+
+  Every sht:Validate entry reachable from core/manifest.ttl is run through
+  `mithril.shacl`. The report is compared as a multiset of results on
+  focusNode, resultPath (structurally), value, sourceShape,
+  sourceConstraintComponent and resultSeverity, plus sh:resultMessage
+  whenever the expected result carries one -- and sh:conforms.
+
+  The outcome of every entry is pinned by name in `expected-outcomes`, so a
+  regression AND an unexplained improvement both fail. Zero entries found is
+  a failure, not a pass."
+  (:require [cljs.test :refer [deftest is testing]]
+            [clojure.string :as str]
+            [mithril.shacl :as shacl]
+            [mithril.turtle :as ttl]))
+
+(def root "test/fixtures/w3c-shacl/")
+(def base "http://datashapes.org/sh/tests/")
+(def mf "http://www.w3.org/2001/sw/DataAccess/tests/test-manifest#")
+(def sht "http://www.w3.org/ns/shacl-test#")
+(def sh "http://www.w3.org/ns/shacl#")
+(def rdf-type "http://www.w3.org/1999/02/22-rdf-syntax-ns#type")
+
+(defn- read-text [path] (.readFileSync (js/require "fs") path "utf8"))
+
+(def parse-file
+  (memoize
+   (fn [rel]
+     (ttl/parse (read-text (str root rel))
+                {:base (str base rel) :scope (str/replace rel #"[^A-Za-z0-9]" "_")}))))
+
+(defn- iri->rel [iri]
+  (when-not (str/starts-with? iri base)
+    (throw (ex-info "graph outside the vendored suite" {:iri iri})))
+  (subs iri (count base)))
+
+(defn- objects [g s p] (get-in g [:spo s p] #{}))
+(defn- one [g s p] (first (objects g s p)))
+
+(defn- list-items [g head]
+  (loop [n head acc []]
+    (if (or (nil? n) (= n "http://www.w3.org/1999/02/22-rdf-syntax-ns#nil"))
+      acc
+      (recur (one g n "http://www.w3.org/1999/02/22-rdf-syntax-ns#rest")
+             (conj acc (one g n "http://www.w3.org/1999/02/22-rdf-syntax-ns#first"))))))
+
+(defn- entries
+  "Every test entry: {:name :section :file :data :shapes :expected-node :graph}."
+  []
+  (let [top (shacl/index (parse-file "core/manifest.ttl"))]
+    (vec
+     (for [inc1 (sort (objects top (str base "core/manifest.ttl") (str mf "include")))
+           :let [sub-rel (iri->rel inc1)
+                 sub (shacl/index (parse-file sub-rel))]
+           inc2 (sort (objects sub inc1 (str mf "include")))
+           :let [rel (iri->rel inc2)
+                 g (shacl/index (parse-file rel))]
+           entry (list-items g (one g inc2 (str mf "entries")))
+           :let [action (one g entry (str mf "action"))]]
+       {:name (str (second (re-find #"core/([^/]+)/" rel)) "/" (last (str/split entry #"/")))
+        :section (second (re-find #"core/([^/]+)/" rel))
+        :type (one g entry rdf-type)
+        :data (iri->rel (one g action (str sht "dataGraph")))
+        :shapes (iri->rel (one g action (str sht "shapesGraph")))
+        :expected-node (one g entry (str mf "result"))
+        :graph g
+        :file rel}))))
+
+(defn- expected-report [g node]
+  (when-not (= (str sht "Failure") node)
+    {:conforms (= "true" (:literal (one g node (str sh "conforms"))))
+     :results
+     (mapv (fn [r]
+             (let [path (one g r (str sh "resultPath"))
+                   msgs (objects g r (str sh "resultMessage"))]
+               (cond-> {:focus-node (one g r (str sh "focusNode"))
+                        :source-shape (one g r (str sh "sourceShape"))
+                        :source-constraint-component (one g r (str sh "sourceConstraintComponent"))
+                        :result-severity (one g r (str sh "resultSeverity"))}
+                 path (assoc :result-path (shacl/parse-path g path))
+                 (seq (objects g r (str sh "value"))) (assoc :value (one g r (str sh "value")))
+                 (seq msgs) (assoc :result-message (set msgs)))))
+           (objects g node (str sh "result")))}))
+
+(defn- comparable [expected actual]
+  ;; Messages are compared only where the expected result states one.
+  (let [key* (fn [r msg?] (cond-> (select-keys r [:focus-node :result-path :value :source-shape
+                                                   :source-constraint-component :result-severity])
+                            msg? (assoc :result-message (set (:result-message r)))))
+        exp (frequencies (map #(key* % (contains? % :result-message)) (:results expected)))
+        with-msg? (some #(contains? % :result-message) (:results expected))
+        act (frequencies (map #(key* % (and with-msg? (seq (:result-message %)))) (:results actual)))]
+    [exp act]))
+
+(defn run-entry
+  "Run one entry. `mutate` (for negative controls) rewrites the compiled
+  shapes, then the report, before comparison."
+  ([e] (run-entry e {}))
+  ([{:keys [data shapes expected-node graph] :as e} {:keys [mutate-shapes mutate-report]
+                                                    :or {mutate-shapes identity mutate-report identity}}]
+  (let [expected (expected-report graph expected-node)
+        outcome (try
+                  (let [compiled (mutate-shapes (shacl/compile-shapes (parse-file shapes)))
+                        r (shacl/validate compiled (parse-file data))]
+                    {:report (mutate-report (shacl/report r))})
+                  (catch :default ex
+                    (if-let [reason (:mithril.reason/refusal (ex-data ex))]
+                      {:refused reason :detail (:detail (ex-data ex))}
+                      {:error (ex-message ex)})))]
+    (cond
+      (nil? expected) (assoc e :status (if (:refused outcome) :pass :fail) :outcome outcome)
+      (:refused outcome) (assoc e :status :refused :outcome outcome)
+      (:error outcome) (assoc e :status :error :outcome outcome)
+      :else
+      (let [[exp act] (comparable expected (:report outcome))
+            ok (and (= (:conforms expected) (:conforms (:report outcome))) (= exp act))]
+        (assoc e :status (if ok :pass :fail) :outcome outcome :expected expected
+               :diff (when-not ok {:missing (remove (set (keys act)) (keys exp))
+                                   :extra (remove (set (keys exp)) (keys act))})))))))
+
+(defn run-suite []
+  (mapv run-entry (entries)))
+
+(defn summary [results]
+  (into (sorted-map)
+        (for [[section rs] (group-by :section results)]
+          [section (merge {:total (count rs) :pass 0 :fail 0 :refused 0 :error 0}
+                          (frequencies (map :status rs)))])))
+
+(def expected-outcomes
+  "Every entry that does not pass, by name, with the reason. Everything else
+  must pass."
+  {})
+
+(deftest the-w3c-shacl-core-suite
+  (let [results (run-suite)
+        by-name (into {} (map (juxt :name identity) results))
+        s (summary results)]
+    (doseq [[section m] s]
+      (println (str "W3C-SHACL\t" section "\ttotal\t" (:total m) "\tpass\t" (:pass m)
+                    "\tfail\t" (:fail m) "\trefused\t" (:refused m) "\terror\t" (:error m))))
+    (testing "evidence floor: the manifests were read and every entry found"
+      (is (= 98 (count results)) "98 approved entries in tests/core at the pinned commit")
+      (is (= #{"complex" "misc" "node" "path" "property" "targets" "validation-reports"}
+             (set (keys s)))))
+    (doseq [{:keys [name status] :as r} results
+            :let [allowed (get expected-outcomes name)]]
+      (if allowed
+        (is (= (:status allowed) status) (str name " expected " (:status allowed)))
+        (is (= :pass status)
+            (str name " " status " " (pr-str (or (:diff r) (select-keys (:outcome r) [:refused :detail :error])))))))))
+
+(deftest the-comparison-can-fail
+  (let [by-name (into {} (map (juxt :name identity) (entries)))
+        drop-min-count (fn [compiled]
+                         (let [drop (fn [cs] (vec (remove #(= (str sh "MinCountConstraintComponent") (:component %)) cs)))]
+                           (update compiled :shapes
+                                   (fn [shapes] (into {} (map (fn [[k s]] [k (update s :components drop)]) shapes))))))]
+    (testing "control: without the MinCount component, minCount-001 fails for a missing result"
+      (let [r (run-entry (get by-name "property/minCount-001") {:mutate-shapes drop-min-count})]
+        (is (= :fail (:status r)))
+        (is (seq (get-in r [:diff :missing])))
+        (is (= :pass (:status (run-entry (get by-name "property/minCount-001")))) "and passes unmutated")))
+    (testing "control: an extra result makes a conforming entry fail"
+      (let [conforming (first (filter #(and (= :pass (:status %)) (:conforms (:expected %))) (run-suite)))
+            r (run-entry conforming {:mutate-report
+                                     (fn [rep] (-> rep (assoc :conforms false)
+                                                   (update :results conj {:focus-node "urn:x:ghost"})))})]
+        (is (some? conforming))
+        (is (= :fail (:status r)))))
+    (testing "control: a wrong severity fails"
+      (let [r (run-entry (get by-name "misc/severity-001")
+                         {:mutate-report (fn [rep] (update rep :results
+                                                           (fn [rs] (mapv #(assoc % :result-severity (str sh "Violation")) rs))))})]
+        (is (= :fail (:status r)))))))

@@ -1,6 +1,6 @@
 (ns mithril.reason
-  "Generic OWL 2 RL entailment and SHACL checking over ANY compiled Mithril
-  ontology and a caller's data graph.
+  "Generic OWL 2 RL entailment and SHACL Core checking over ANY compiled
+  Mithril ontology and a caller's data graph.
 
   The domain modules (checkpoint, decision_semantic, domain_rdf, execution,
   growth_semantic, state_ontology) each accept only their own fixed ontology.
@@ -14,9 +14,13 @@
 
   Axioms are read from the ontology's RDF (the JSON-LD dataset the compiler
   produced, expanded to quads), never from compact keys, so any context term
-  that expands to one of the predicates below is honoured. The rules are
-  exactly `owl.rules/triple-rules` as `oak.semantic/materialize :owl2-rl`
-  evaluates them:
+  that expands to one of the accepted predicates is honoured. Entailment is
+  `oak.semantic/materialize :owl2-rl`, i.e. `owl.rules/triple-rules`.
+
+  Which OWL / RDFS terms are ACCEPTED as axioms is a capability set,
+  `owl-vocabulary`: `owl.rules/supported-vocabulary` when the pinned
+  org-w3-owl2 defines it, otherwise `fixed-owl-vocabulary` -- the terms the
+  current pin's rules implement:
 
     rdfs11   rdfs:subClassOf is transitive
              (owl:equivalentClass folds in as subsumption both ways)
@@ -29,30 +33,35 @@
     prp-symp owl:SymmetricProperty reads backwards
     prp-inv  owl:inverseOf, both directions
 
-  Any other OWL / RDFS axiom in the ontology (owl:FunctionalProperty,
-  owl:disjointWith, owl:someValuesFrom, ...) REFUSES with
+  Bumping the owl2 / oak pin to one that exports `supported-vocabulary`
+  (and `supported-rules`) widens both with no change here. Any OWL / RDFS
+  axiom outside the capability set (owl:FunctionalProperty, owl:disjointWith,
+  owl:someValuesFrom, ... at the current pin) REFUSES with
   `:unsupported-owl-axiom`: reasoning without it would silently answer a
-  subset.
+  subset. owl:ReflexiveProperty is outside OWL 2 RL and always refuses with
+  `:not-owl2-rl`.
 
-  ## What is checked (SHACL subset)
+  ## What is checked (SHACL Core)
 
-  Node shapes with `sh:targetClass`, focus nodes found over ENTAILED types.
-  Property shapes with an IRI `sh:path` (predicate paths only) and any of
-  `sh:class` (checked against entailed types), `sh:datatype`, `sh:minCount`,
-  `sh:maxCount`. Values are read from the entailed graph, so a
-  sub-property's triple counts for its super-property's path. Any other
-  `sh:` term on a shape refuses with `:unsupported-shacl-constraint`.
+  `mithril.shacl`: every SHACL Core target, shape, path and constraint
+  component (W3C SHACL §2-4), evaluated over the ENTAILED graph -- so
+  sh:class accepts an entailed type, and a sub-property's triple counts for
+  its super-property's path. SHACL-SPARQL and any unknown sh: term refuse by
+  name. The result carries a W3C-shaped validation report (`:report`).
 
   ## Outcomes
 
-  `:status` is `:conforms`, `:violations` or `:refused`. A refusal names its
-  reason; zero data triples is a refusal (`:no-data-triples`), not a pass."
+  `:status` is `:conforms`, `:violations` (the report does not conform, at
+  any severity) or `:refused`. A refusal names its reason; zero data triples
+  is a refusal (`:no-data-triples`), not a pass."
   (:require [clojure.string :as str]
             [json-ld-api.core :as jsonld]
             [json-ld-api.to-rdf :as to-rdf]
             [nquads.core :as nq]
             [oak.semantic :as oak]
-            [mithril.compiler :as compiler]))
+            [owl.rules]
+            [mithril.compiler :as compiler]
+            [mithril.shacl :as shacl]))
 
 (def rdf "http://www.w3.org/1999/02/22-rdf-syntax-ns#")
 (def rdfs "http://www.w3.org/2000/01/rdf-schema#")
@@ -61,32 +70,58 @@
 (def xsd "http://www.w3.org/2001/XMLSchema#")
 (def rdf-type (str rdf "type"))
 
-(def rules
-  "The rule names `reason` evaluates, in the order documented above."
+;; ── the OWL capability set ──────────────────────────────────────────────────
+
+(defn- owl-rules-export
+  "The value of `owl.rules/<sym>` when the pinned org-w3-owl2 defines it
+  (a zero-arity fn is called), else nil. This is the seam a pin bump widens."
+  [sym]
+  (when-let [v (resolve (symbol "owl.rules" (name sym)))]
+    (let [x @v] (if (fn? x) (x) x))))
+
+(def fixed-rules
+  "The rules the current owl2 pin's `triple-rules` implements."
   [:rdfs11 :rdfs5 :rdfs9 :rdfs7 :rdfs2 :rdfs3 :prp-trp :prp-symp :prp-inv])
 
-(def iri->term
-  "The vocabulary `owl.rules/triple-rules` matches, as the keywords its
-  keyword vocabulary uses. Everything else stays an IRI string."
-  {rdf-type :rdf/type
-   (str rdfs "subClassOf") :rdfs/subClassOf
-   (str rdfs "subPropertyOf") :rdfs/subPropertyOf
-   (str rdfs "domain") :rdfs/domain
-   (str rdfs "range") :rdfs/range
-   (str owl "equivalentClass") :owl/equivalentClass
-   (str owl "inverseOf") :owl/inverseOf
-   (str owl "TransitiveProperty") :owl/TransitiveProperty
-   (str owl "SymmetricProperty") :owl/SymmetricProperty})
+(def rules
+  "The rule names `reason` evaluates: `owl.rules/supported-rules` when the
+  pin exports it, else `fixed-rules`."
+  (vec (or (owl-rules-export 'supported-rules) fixed-rules)))
 
-(def term->iri (into {} (map (fn [[k v]] [v k]) iri->term)))
-
-(def axiom-predicates
+(def fixed-owl-vocabulary
+  "The OWL / RDFS terms (as IRIs) the current pin's rules read: predicates
+  whose triples are axioms, and rdf:type objects that switch a rule on."
   #{(str rdfs "subClassOf") (str rdfs "subPropertyOf") (str rdfs "domain")
-    (str rdfs "range") (str owl "equivalentClass") (str owl "inverseOf")})
+    (str rdfs "range") (str owl "equivalentClass") (str owl "inverseOf")
+    (str owl "TransitiveProperty") (str owl "SymmetricProperty")})
 
-(def rule-classes
-  "rdf:type objects that are axioms (they switch a rule on)."
-  #{(str owl "TransitiveProperty") (str owl "SymmetricProperty")})
+(def ^:private prefixes {"rdf" rdf "rdfs" rdfs "owl" owl})
+
+(defn vocabulary-term->iri
+  "A vocabulary entry as an IRI: an IRI string as is, or a keyword in the
+  `owl.rules/keyword-vocabulary` convention (:owl/FunctionalProperty)."
+  [t]
+  (cond
+    (string? t) t
+    (and (keyword? t) (contains? prefixes (namespace t))) (str (get prefixes (namespace t)) (name t))
+    :else nil))
+
+(defn owl-vocabulary
+  "The accepted OWL / RDFS axiom terms as IRIs. `supported` is what
+  `owl.rules/supported-vocabulary` holds -- a map (its values are read, as
+  in `owl.rules/keyword-vocabulary`) or a collection of keywords / IRIs --
+  or nil, meaning the pin predates it and `fixed-owl-vocabulary` applies."
+  ([] (owl-vocabulary (owl-rules-export 'supported-vocabulary)))
+  ([supported]
+   (if (nil? supported)
+     fixed-owl-vocabulary
+     (set (keep vocabulary-term->iri (if (map? supported) (vals supported) supported))))))
+
+(def not-owl2-rl
+  "Terms refused whatever the capability set says: outside OWL 2 RL."
+  #{(str owl "ReflexiveProperty")})
+
+(def list-predicates #{(str rdf "first") (str rdf "rest")})
 
 (def declaration-classes
   "rdf:type objects that only declare a term; no rule reads them."
@@ -99,15 +134,6 @@
   #{(str rdfs "label") (str rdfs "comment") (str rdfs "seeAlso")
     (str rdfs "isDefinedBy") (str owl "versionInfo") (str owl "deprecated")})
 
-(def shacl-node-predicates #{(str sh "targetClass") (str sh "property")})
-(def shacl-property-predicates
-  #{(str sh "path") (str sh "class") (str sh "datatype")
-    (str sh "minCount") (str sh "maxCount")})
-
-(def supported-shacl
-  "The SHACL terms `reason` evaluates. Anything else under sh: refuses."
-  (into shacl-node-predicates shacl-property-predicates))
-
 (defn- refusal [reason detail]
   (ex-info (str "mithril.reason refused: " (name reason))
            {:mithril.reason/refusal reason :detail detail}))
@@ -116,13 +142,26 @@
 
 ;; ── RDF terms ────────────────────────────────────────────────────────────────
 
+(defn- in-ns? [iri ns*] (and (string? iri) (str/starts-with? iri ns*)))
+
+(defn- iri->term
+  "rdf: / rdfs: / owl: IRIs become the keywords the `owl.rules` keyword
+  vocabulary uses (:rdfs/subClassOf); everything else stays an IRI string."
+  [iri]
+  (or (some (fn [[p ns*]]
+              (let [local (when (in-ns? iri ns*) (subs iri (count ns*)))]
+                (when (and local (re-matches #"[A-Za-z][A-Za-z0-9_]*" local))
+                  (keyword p local))))
+            prefixes)
+      iri))
+
 (defn- term-value
   "An RDF term as a reasoner value: IRIs as strings (or the rule vocabulary's
   keyword), blank nodes as `_:<scope>-<label>` so data and ontology blank nodes
   can never merge, literals as maps."
   [scope {:keys [type value datatype language]}]
   (case type
-    :iri (get iri->term value value)
+    :iri (iri->term value)
     :blank (str "_:" scope "-" value)
     :literal (cond-> {:literal value
                       :datatype (cond language (str rdf "langString")
@@ -131,7 +170,7 @@
                language (assoc :language language))
     (refuse! :unsupported-rdf-term {:term type})))
 
-(defn- iri-of [v] (if (keyword? v) (get term->iri v) v))
+(defn- iri-of [v] (if (keyword? v) (str (get prefixes (namespace v)) (name v)) v))
 
 (defn- literal? [v] (map? v))
 
@@ -163,6 +202,9 @@
                         (term-value scope object))))
         quads))
 
+(defn- out-triple [{:keys [s p o]}]
+  {:s (iri-of s) :p (iri-of p) :o (if (literal? o) o (iri-of o))})
+
 ;; ── inputs ───────────────────────────────────────────────────────────────────
 
 (defn ontology-quads
@@ -193,165 +235,99 @@
 
 ;; ── ontology -> axioms and shapes ────────────────────────────────────────────
 
-(defn- index [triples]
-  (reduce (fn [m {:keys [s p o]}] (update-in m [s (iri-of p)] (fnil conj []) o))
-          {} triples))
-
-(defn- in-ns? [iri ns*] (and (string? iri) (str/starts-with? iri ns*)))
-
 (defn- classify-ontology-triple
-  "One of :axiom, :declaration, :shape, :annotation, or a refusal."
-  [shape-nodes {:keys [s p o]}]
-  (let [p* (iri-of p) o* (iri-of o)]
-    (cond
-      (contains? shape-nodes s) :shape
-      (contains? axiom-predicates p*) :axiom
-      (= rdf-type p*) (cond (contains? rule-classes o*) :axiom
-                            (contains? declaration-classes o*) :declaration
-                            (or (in-ns? o* owl) (in-ns? o* rdfs) (in-ns? o* sh))
-                            (refuse! :unsupported-owl-axiom {:subject s :type o*})
-                            :else :declaration)
-      (contains? annotation-predicates p*) :annotation
-      (or (in-ns? p* owl) (in-ns? p* rdfs) (in-ns? p* rdf))
-      (refuse! :unsupported-owl-axiom {:subject s :predicate p*})
-      (in-ns? p* sh)
-      (refuse! :unsupported-shacl-constraint {:subject s :constraint p*})
-      :else :annotation)))
-
-(defn- integer-literal [v shape constraint]
-  (if (and (literal? v)
-           (contains? #{(str xsd "integer") (str xsd "nonNegativeInteger")} (:datatype v))
-           (re-matches #"[0-9]+" (:literal v)))
-    #?(:cljs (js/parseInt (:literal v) 10) :clj (Long/parseLong (:literal v)))
-    (refuse! :invalid-shacl-operand {:shape shape :constraint constraint :value v})))
-
-(defn- single [values shape constraint]
-  (when (> (count values) 1)
-    (refuse! :invalid-shacl-operand {:shape shape :constraint constraint
-                                     :reason "more than one value"}))
-  (first values))
-
-(defn- compile-property-shape [idx node-shape ps]
-  (let [props (get idx ps {})
-        unknown (->> (keys props)
-                     (filter #(in-ns? % sh))
-                     (remove shacl-property-predicates))
-        _ (when (seq unknown)
-            (refuse! :unsupported-shacl-constraint
-                     {:shape node-shape :property-shape ps :constraint (first (sort unknown))}))
-        path (single (get props (str sh "path")) node-shape "sh:path")
-        _ (when-not (and (string? path) (not (str/starts-with? path "_:")))
-            (refuse! :unsupported-shacl-path {:shape node-shape :path path}))
-        cls (single (get props (str sh "class")) node-shape "sh:class")
-        dt (single (get props (str sh "datatype")) node-shape "sh:datatype")
-        mn (some-> (single (get props (str sh "minCount")) node-shape "sh:minCount")
-                   (integer-literal node-shape "sh:minCount"))
-        mx (some-> (single (get props (str sh "maxCount")) node-shape "sh:maxCount")
-                   (integer-literal node-shape "sh:maxCount"))]
-    (when (and (some? cls) (not (string? (iri-of cls))))
-      (refuse! :invalid-shacl-operand {:shape node-shape :constraint "sh:class" :value cls}))
-    (when (and (some? dt) (not (string? dt)))
-      (refuse! :invalid-shacl-operand {:shape node-shape :constraint "sh:datatype" :value dt}))
-    (when (and mn mx (> mn mx))
-      (refuse! :invalid-shacl-operand {:shape node-shape :reason "minCount > maxCount"}))
-    (when-not (or cls dt mn mx)
-      (refuse! :empty-property-shape {:shape node-shape :path path}))
-    (cond-> {:id ps :path (iri-of path)}
-      cls (assoc :class (iri-of cls))
-      dt (assoc :datatype dt)
-      mn (assoc :min-count mn)
-      mx (assoc :max-count mx))))
+  "One of :axiom, :list, :declaration, :shape, :annotation, or
+  [:refuse reason detail]. The triple has its IRIs as strings."
+  [vocabulary {:keys [shape-ids owned]} {:keys [s p o]}]
+  (cond
+    (contains? owned s) :shape
+    (and (contains? shape-ids s)
+         (or (in-ns? p sh) (and (= rdf-type p) (in-ns? o sh)))) :shape
+    (contains? list-predicates p) :list
+    (= rdf-type p) (cond (contains? not-owl2-rl o) [:refuse :not-owl2-rl {:subject s :type o}]
+                         (contains? vocabulary o) :axiom
+                         (contains? declaration-classes o) :declaration
+                         (or (in-ns? o owl) (in-ns? o rdfs) (in-ns? o sh))
+                         [:refuse :unsupported-owl-axiom {:subject s :type o}]
+                         :else :declaration)
+    (contains? vocabulary p) :axiom
+    (contains? annotation-predicates p) :annotation
+    (or (in-ns? p owl) (in-ns? p rdfs) (in-ns? p rdf))
+    [:refuse :unsupported-owl-axiom {:subject s :predicate p}]
+    (in-ns? p sh) [:refuse :unsupported-shacl-constraint {:subject s :constraint p}]
+    :else :annotation))
 
 (defn compile-ontology
-  "Ontology artifact -> {:axioms #{triple} :shapes [...] :counts {...}}, or a
-  refusal (thrown as ex-info carrying :mithril.reason/refusal)."
-  [artifact]
-  (let [triples (quads->triples "o" (ontology-quads artifact))
-        idx (index triples)
-        node-shapes (set (keep (fn [{:keys [s p o]}]
-                                 (when (and (= :rdf/type p) (= (str sh "NodeShape") o)) s))
-                               triples))
-        property-shapes (set (mapcat #(get-in idx [% (str sh "property")]) node-shapes))
-        shape-nodes (into node-shapes property-shapes)
-        classes (group-by #(classify-ontology-triple shape-nodes %) triples)
-        shapes (mapv (fn [ns*]
-                       (let [props (get idx ns*)
-                             unknown (->> (keys props)
-                                          (filter #(in-ns? % sh))
-                                          (remove shacl-node-predicates))]
-                         (when (seq unknown)
-                           (refuse! :unsupported-shacl-constraint
-                                    {:shape ns* :constraint (first (sort unknown))}))
-                         {:id ns*
-                          :targets (mapv iri-of (get props (str sh "targetClass") []))
-                          :properties (mapv #(compile-property-shape idx ns* %)
-                                            (sort (get props (str sh "property") [])))}))
-                     (sort node-shapes))]
-    {:axioms (set (get classes :axiom))
-     :shapes shapes
-     :counts {:ontology-triples (count triples)
-              :axioms (count (get classes :axiom))
-              :declarations (count (get classes :declaration))
-              :annotations (count (get classes :annotation))
-              :node-shapes (count shapes)
-              :untargeted-node-shapes (count (filter #(empty? (:targets %)) shapes))
-              :property-shapes (reduce + (map (comp count :properties) shapes))}}))
+  "Ontology artifact -> {:axioms #{triple} :shapes compiled-shapes :counts {...}},
+  or a refusal (thrown as ex-info carrying :mithril.reason/refusal).
+  `vocabulary` defaults to `(owl-vocabulary)`. rdf:first / rdf:rest outside
+  the shapes are list structure and travel with the axioms that use them;
+  the first refusal in term order is thrown, its detail's :all lists every
+  refused triple."
+  ([artifact] (compile-ontology artifact (owl-vocabulary)))
+  ([artifact vocabulary]
+   (let [triples (quads->triples "o" (ontology-quads artifact))
+         plain (mapv out-triple triples)
+         shapes (shacl/compile-shapes plain)
+         classes (mapv (fn [t pt] [t (classify-ontology-triple vocabulary shapes pt)])
+                       triples plain)
+         refusals (sort-by pr-str (keep (fn [[_ c]] (when (vector? c) c)) classes))
+         _ (when-let [[_ reason detail] (first refusals)]
+             (refuse! reason (assoc detail :all (mapv #(nth % 2) refusals))))
+         by (group-by second classes)
+         compiled (vals (:shapes shapes))
+         node-shapes (remove :path compiled)]
+     {:axioms (into (set (map first (get by :axiom))) (map first (get by :list)))
+      :shapes shapes
+      :vocabulary vocabulary
+      :counts {:ontology-triples (count triples)
+               :axioms (count (get by :axiom))
+               :declarations (count (get by :declaration))
+               :annotations (count (get by :annotation))
+               :shape-triples (count (get by :shape))
+               :node-shapes (count node-shapes)
+               :property-shapes (count (filter :path compiled))
+               :untargeted-node-shapes
+               (count (filter (fn [{:keys [targets]}]
+                                (and (every? empty? (vals (dissoc targets :implicit-class?)))
+                                     (not (:implicit-class? targets))))
+                              node-shapes))
+               :inactive-parameters (count (:inactive shapes))}})))
 
-;; ── SHACL over the entailed graph ────────────────────────────────────────────
+;; ── SHACL results as the violation list ─────────────────────────────────────
 
-(defn- has-type? [entailed node cls]
-  (contains? entailed (oak/triple node :rdf/type (get iri->term cls cls))))
-
-(defn- validate [entailed shapes]
-  (let [idx (index entailed)
-        checks (volatile! 0)
-        focus (volatile! #{})
-        violations
-        (vec
-         (for [{:keys [id targets properties]} shapes
-               target targets
-               node (sort (keep (fn [{:keys [s p o]}]
-                                  (when (and (= :rdf/type p) (= (get iri->term target target) o)) s))
-                                entailed))
-               {:keys [path class datatype min-count max-count] :as property} properties
-               :let [_ (vswap! focus conj node)
-                     values (get-in idx [node path] [])
-                     n (count values)
-                     _ (vswap! checks inc)]
-               v (concat
-                  (when (and min-count (< n min-count))
-                    [{:constraint "sh:minCount" :expected min-count :count n}])
-                  (when (and max-count (> n max-count))
-                    [{:constraint "sh:maxCount" :expected max-count :count n}])
-                  (for [value values
-                        :when (and class (or (literal? value)
-                                             (not (has-type? entailed value class))))]
-                    {:constraint "sh:class" :expected class :value (if (literal? value) value (iri-of value))})
-                  (for [value values
-                        :when (and datatype (not (and (literal? value)
-                                                      (= datatype (:datatype value)))))]
-                    {:constraint "sh:datatype" :expected datatype
-                     :value (if (literal? value) value (iri-of value))}))]
-           (assoc v :focus node :shape id :property-shape (:id property) :path path)))]
-    {:violations violations :checks @checks :focus-nodes (count @focus)}))
+(defn- violation
+  "A report result in the shape the CLI prints (focus / constraint / path /
+  expected / value / count / shape), plus the component and severity."
+  [{:keys [focus-node result-path value source-shape source-constraint-component
+           result-severity param expected count] :as r}]
+  (cond-> {:focus focus-node
+           :constraint (str "sh:" (subs param (clojure.core/count sh)))
+           :component source-constraint-component
+           :severity result-severity
+           :expected expected
+           :shape source-shape}
+    (some? result-path) (assoc :path result-path)
+    (contains? r :value) (assoc :value value)
+    (some? count) (assoc :count count)))
 
 ;; ── the entry ────────────────────────────────────────────────────────────────
-
-(defn- out-triple [{:keys [s p o]}]
-  {:s (iri-of s) :p (iri-of p) :o (if (literal? o) o (iri-of o))})
 
 (defn reason
   "ontology-artifact: `mithril.compiler/compile-ontology-text` output.
   data-triples: quads (as `parse-data` returns) or oak triples ({:s :p :o}).
-  opts: {:query-type <class IRI>} narrows :types to that class.
+  opts: {:query-type <class IRI>} narrows :types to that class;
+        {:vocabulary #{iri}} overrides the OWL capability set.
 
   Returns {:status :conforms|:violations|:refused
            :refusal {:reason kw :detail {...}}   ; only when refused
            :entailed [triple] :inferred [triple] :types [triple]
-           :violations [...] :rules [...] :counts {...}}"
+           :report {:conforms bool :results [...]} ; W3C-shaped, mithril.shacl/report
+           :violations [...] :inactive [...] :rules [...] :counts {...}}"
   [ontology-artifact data-triples opts]
   (try
-    (let [{:keys [axioms shapes counts]} (compile-ontology ontology-artifact)
+    (let [{:keys [axioms shapes counts]} (compile-ontology ontology-artifact
+                                                           (or (:vocabulary opts) (owl-vocabulary)))
           data (if (every? #(contains? % :s) data-triples)
                  (vec data-triples)
                  (quads->triples "d" data-triples))
@@ -369,21 +345,24 @@
                      (map #(assoc (out-triple %) :inferred? (not (contains? asserted %))))
                      (sort-by (juxt :s :o))
                      vec)
-          {:keys [violations checks focus-nodes]} (validate entailed shapes)]
-      {:status (if (empty? violations) :conforms :violations)
+          validation (shacl/validate shapes (map out-triple entailed))
+          violations (mapv violation (:results validation))]
+      {:status (if (:conforms validation) :conforms :violations)
        :rules rules
        :entailed (mapv out-triple (sort-by pr-str entailed))
        :inferred (mapv out-triple (sort-by pr-str inferred))
        :types types
+       :report (shacl/report validation)
        :violations violations
+       :inactive (:inactive shapes)
        :counts (merge counts
                       {:data-triples (count data)
                        :data-nodes (count data-nodes)
                        :entailed (count entailed)
                        :inferred (count inferred)
                        :types (count types)
-                       :focus-nodes focus-nodes
-                       :checks checks
+                       :focus-nodes (get-in validation [:counts :focus-nodes])
+                       :checks (get-in validation [:counts :checks])
                        :violations (count violations)})})
     (catch #?(:cljs :default :clj Exception) e
       (if-let [reason* (:mithril.reason/refusal (ex-data e))]

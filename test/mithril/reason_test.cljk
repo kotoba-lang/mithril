@@ -111,13 +111,19 @@
       (is (= :conforms (:status (reason/reason o (nq (str perf "<urn:x:p> <" dm2 "label> \"a\" .\n")) {})))))))
 
 (deftest unknown-constraints-and-axioms-refuse-by-name
-  (let [r (reason/reason (ontology "unknown-constraint.mith") (data "conforming.nq") {})]
+  (testing "sh:pattern -- refused before SHACL Core landed -- is now evaluated"
+    (let [o (ontology "unknown-constraint.mith")
+          performer (str "<urn:x:p> <" rdf-type "> <" dm2 "Performer> .\n")]
+      (is (= ["sh:pattern"] (constraints (reason/reason o (nq (str performer "<urn:x:p> <" dm2 "label> \"lower\" .\n")) {}))))
+      (is (= :conforms (:status (reason/reason o (nq (str performer "<urn:x:p> <" dm2 "label> \"Upper\" .\n")) {})))
+          "control: a label matching ^[A-Z]")))
+  (let [r (reason/reason (ontology "shacl-sparql.mith") (data "conforming.nq") {})]
     (is (= :refused (:status r)))
-    (is (= :unsupported-shacl-constraint (get-in r [:refusal :reason])))
-    (is (= "http://www.w3.org/ns/shacl#pattern" (get-in r [:refusal :detail :constraint]))))
-  (testing "control: the same shape without sh:pattern is evaluated"
-    (let [o (update-in (ontology "unknown-constraint.mith") [:rdf-dataset "@graph" 1 "property" 0]
-                       dissoc "sh:pattern")]
+    (is (= :unsupported-shacl-sparql (get-in r [:refusal :reason])))
+    (is (= "http://www.w3.org/ns/shacl#sparql" (get-in r [:refusal :detail :constraint]))))
+  (testing "control: the same shape without sh:sparql is evaluated"
+    (let [o (update-in (ontology "shacl-sparql.mith") [:rdf-dataset "@graph" 1 "property" 0]
+                       dissoc "sh:sparql")]
       (is (= :conforms (:status (reason/reason o (data "conforming.nq") {}))))))
   (let [r (reason/reason (ontology "unsupported-axiom.mith") (data "conforming.nq") {})]
     (is (= :unsupported-owl-axiom (get-in r [:refusal :reason])))

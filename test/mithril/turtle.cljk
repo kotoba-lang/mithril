@@ -1,0 +1,285 @@
+(ns mithril.turtle
+  "A Turtle 1.1 reader, test support for the W3C SHACL Core suite.
+
+  The W3C data-shapes test files are Turtle; nothing in the kotoba-lang
+  checkout parses Turtle (org-w3-turtle is a serializer only), so this reads
+  exactly what the suite needs and refuses the rest by name rather than
+  guessing:
+
+    @prefix / @base / PREFIX / BASE, IRIs (relative ones resolved against the
+    document base for the forms `<>`, `<#x>`, `<x>`, `<x/y>`), prefixed names,
+    `a`, blank node labels, `[]` / `[ ... ]` property lists, collections,
+    string literals in all four quote forms with ECHAR / UCHAR escapes,
+    language tags, `^^` datatypes, integer / decimal / double / boolean
+    shorthands, `;` and `,` lists, comments.
+
+  Output terms use the same shapes as `mithril.reason`: IRIs are strings,
+  blank nodes `_:<scope>-<label>`, literals `{:literal :datatype :language}`.
+  A parse error throws ex-info carrying `:turtle/error`."
+  (:require [clojure.string :as str]))
+
+(def ^:private rdf "http://www.w3.org/1999/02/22-rdf-syntax-ns#")
+(def ^:private xsd "http://www.w3.org/2001/XMLSchema#")
+
+(defn- fail! [st msg]
+  (throw (ex-info (str "turtle: " msg " at offset " (:pos @st))
+                  {:turtle/error msg :offset (:pos @st)})))
+
+(defn- peek-ch [st] (let [{:keys [text pos]} @st] (when (< pos (count text)) (nth text pos))))
+(defn- peek-at [st n] (let [{:keys [text pos]} @st] (when (< (+ pos n) (count text)) (nth text (+ pos n)))))
+(defn- advance! [st n] (swap! st update :pos + n))
+(defn- starts? [st s] (let [{:keys [text pos]} @st] (str/starts-with? (subs text pos) s)))
+
+(defn- skip-ws! [st]
+  (loop []
+    (let [c (peek-ch st)]
+      (cond
+        (nil? c) nil
+        (#{\space \tab \newline \return} c) (do (advance! st 1) (recur))
+        (= \# c) (do (loop [] (let [c (peek-ch st)]
+                                (when (and c (not= \newline c)) (advance! st 1) (recur))))
+                     (recur))
+        :else nil))))
+
+(defn- expect! [st s]
+  (skip-ws! st)
+  (if (starts? st s) (advance! st (count s)) (fail! st (str "expected " s))))
+
+(defn- resolve-iri [st iri]
+  (let [base (:base @st)]
+    (cond
+      (re-find #"^[A-Za-z][A-Za-z0-9+.\-]*:" iri) iri
+      (nil? base) (fail! st (str "relative IRI without a base: " iri))
+      (= "" iri) (str/replace base #"#.*$" "")
+      (str/starts-with? iri "#") (str (str/replace base #"#.*$" "") iri)
+      (str/starts-with? iri "/") (fail! st (str "unsupported relative IRI form: " iri))
+      (str/starts-with? iri "?") (fail! st (str "unsupported relative IRI form: " iri))
+      (str/includes? iri "..") (fail! st (str "unsupported relative IRI form: " iri))
+      :else (str (str/replace base #"[^/]*$" "") iri))))
+
+(defn- hex-char [st h]
+  (when-not (re-matches #"[0-9A-Fa-f]+" h) (fail! st "bad \\u escape"))
+  (let [n (js/parseInt h 16)] (.fromCodePoint js/String n)))
+
+(defn- read-iriref! [st]
+  (advance! st 1)
+  (loop [acc []]
+    (let [c (peek-ch st)]
+      (cond
+        (nil? c) (fail! st "unterminated IRI")
+        (= \> c) (do (advance! st 1) (resolve-iri st (apply str acc)))
+        (= \\ c) (let [k (peek-at st 1)]
+                   (case k
+                     \u (let [h (subs (:text @st) (+ 2 (:pos @st)) (+ 6 (:pos @st)))]
+                          (advance! st 6) (recur (conj acc (hex-char st h))))
+                     \U (let [h (subs (:text @st) (+ 2 (:pos @st)) (+ 10 (:pos @st)))]
+                          (advance! st 10) (recur (conj acc (hex-char st h))))
+                     (fail! st "bad IRI escape")))
+        (#{\space \newline \tab \< \" \{ \} \| \^ \`} c) (fail! st "illegal character in IRI")
+        :else (do (advance! st 1) (recur (conj acc c)))))))
+
+(def ^:private pn-char #"[A-Za-z0-9_\-\u00B7\u00C0-\uFFFF.:%\\]")
+
+(defn- read-pname-raw! [st]
+  ;; Reads a prefixed name token; handles '.' not being last and \-escapes.
+  (let [{:keys [text pos]} @st
+        n (count text)
+        end (loop [i pos]
+              (if (and (< i n) (re-matches pn-char (str (nth text i))))
+                (if (= \\ (nth text i)) (recur (+ i 2)) (recur (inc i)))
+                i))
+        ;; a trailing '.' ends the statement, not the name
+        end (loop [e end] (if (and (> e pos) (= \. (nth text (dec e)))) (recur (dec e)) e))
+        tok (subs text pos end)]
+    (swap! st assoc :pos end)
+    tok))
+
+(defn- read-pname! [st]
+  (let [tok (read-pname-raw! st)
+        i (.indexOf tok ":")]
+    (when (neg? i) (fail! st (str "expected a prefixed name, got " tok)))
+    (let [prefix (subs tok 0 i)
+          local (str/replace (subs tok (inc i)) #"\\(.)" "$1")
+          ns* (get (:prefixes @st) prefix)]
+      (when-not ns* (fail! st (str "undeclared prefix: " prefix)))
+      (str ns* local))))
+
+(defn- fresh-bnode! [st]
+  (let [n (:bnodes @st)]
+    (swap! st update :bnodes inc)
+    (str "_:" (:scope @st) "-genid" n)))
+
+(defn- read-escape! [st]
+  (let [k (peek-at st 1)]
+    (case k
+      \t (do (advance! st 2) "\t")
+      \b (do (advance! st 2) "\b")
+      \n (do (advance! st 2) "\n")
+      \r (do (advance! st 2) "\r")
+      \f (do (advance! st 2) "\f")
+      \" (do (advance! st 2) "\"")
+      \' (do (advance! st 2) "'")
+      \\ (do (advance! st 2) "\\")
+      \u (let [h (subs (:text @st) (+ 2 (:pos @st)) (+ 6 (:pos @st)))]
+           (advance! st 6) (hex-char st h))
+      \U (let [h (subs (:text @st) (+ 2 (:pos @st)) (+ 10 (:pos @st)))]
+           (advance! st 10) (hex-char st h))
+      (fail! st "bad string escape"))))
+
+(defn- read-string-lit! [st]
+  (let [q (peek-ch st)
+        long? (starts? st (str q q q))
+        delim (if long? (str q q q) (str q))]
+    (advance! st (count delim))
+    (loop [acc []]
+      (cond
+        (starts? st delim) (do (advance! st (count delim)) (apply str acc))
+        (nil? (peek-ch st)) (fail! st "unterminated string")
+        (= \\ (peek-ch st)) (recur (conj acc (read-escape! st)))
+        (and (not long?) (#{\newline \return} (peek-ch st))) (fail! st "newline in short string")
+        :else (let [c (peek-ch st)] (advance! st 1) (recur (conj acc c)))))))
+
+(declare read-object! read-predicate-object-list!)
+
+(defn- read-literal! [st]
+  (let [lex (read-string-lit! st)]
+    (cond
+      (= \@ (peek-ch st))
+      (let [m (re-find #"^@[A-Za-z]+(-[A-Za-z0-9]+)*" (subs (:text @st) (:pos @st)))]
+        (advance! st (count (first m)))
+        {:literal lex :datatype (str rdf "langString") :language (subs (first m) 1)})
+      (starts? st "^^")
+      (do (advance! st 2)
+          {:literal lex
+           :datatype (if (= \< (peek-ch st)) (read-iriref! st) (read-pname! st))})
+      :else {:literal lex :datatype (str xsd "string")})))
+
+(defn- read-number! [st]
+  (let [rest* (subs (:text @st) (:pos @st))
+        m (or (re-find #"^[+-]?([0-9]+\.[0-9]*|\.[0-9]+|[0-9]+)[eE][+-]?[0-9]+" rest*)
+              (re-find #"^[+-]?[0-9]*\.[0-9]+" rest*)
+              (re-find #"^[+-]?[0-9]+" rest*))
+        tok (if (vector? m) (first m) m)]
+    (when-not tok (fail! st "bad number"))
+    (advance! st (count tok))
+    {:literal tok
+     :datatype (cond (re-find #"[eE]" tok) (str xsd "double")
+                     (str/includes? tok ".") (str xsd "decimal")
+                     :else (str xsd "integer"))}))
+
+(defn- emit! [st s p o] (swap! st update :triples conj {:s s :p p :o o}))
+
+(defn- read-collection! [st]
+  (advance! st 1)
+  (loop [items []]
+    (skip-ws! st)
+    (if (= \) (peek-ch st))
+      (do (advance! st 1)
+          (if (empty? items)
+            (str rdf "nil")
+            (let [cells (vec (repeatedly (count items) #(fresh-bnode! st)))]
+              (doseq [[i cell] (map-indexed vector cells)]
+                (emit! st cell (str rdf "first") (nth items i))
+                (emit! st cell (str rdf "rest")
+                       (if (< (inc i) (count cells)) (nth cells (inc i)) (str rdf "nil"))))
+              (first cells))))
+      (recur (conj items (read-object! st))))))
+
+(defn- read-blank-property-list! [st]
+  (advance! st 1)
+  (skip-ws! st)
+  (let [node (fresh-bnode! st)]
+    (if (= \] (peek-ch st))
+      (do (advance! st 1) node)
+      (do (read-predicate-object-list! st node)
+          (expect! st "]")
+          node))))
+
+(defn- read-bnode-label! [st]
+  (advance! st 2)
+  (let [m (re-find #"^[A-Za-z0-9_][A-Za-z0-9_\-.]*" (subs (:text @st) (:pos @st)))
+        m (str/replace m #"\.+$" "")]
+    (advance! st (count m))
+    (str "_:" (:scope @st) "-" m)))
+
+(defn- read-object! [st]
+  (skip-ws! st)
+  (let [c (peek-ch st)]
+    (cond
+      (= \< c) (read-iriref! st)
+      (= \[ c) (read-blank-property-list! st)
+      (= \( c) (read-collection! st)
+      (and (= \_ c) (= \: (peek-at st 1))) (read-bnode-label! st)
+      (#{\" \'} c) (read-literal! st)
+      (or (re-matches #"[0-9+\-]" (str c)) (and (= \. c) (re-matches #"[0-9]" (str (peek-at st 1)))))
+      (read-number! st)
+      (and (starts? st "true") (not (re-matches pn-char (str (peek-at st 4)))))
+      (do (advance! st 4) {:literal "true" :datatype (str xsd "boolean")})
+      (and (starts? st "false") (not (re-matches pn-char (str (peek-at st 5)))))
+      (do (advance! st 5) {:literal "false" :datatype (str xsd "boolean")})
+      :else (read-pname! st))))
+
+(defn- read-verb! [st]
+  (skip-ws! st)
+  (if (and (= \a (peek-ch st)) (let [n (peek-at st 1)] (or (nil? n) (#{\space \tab \newline \return \< \[ \" \'} n))))
+    (do (advance! st 1) (str rdf "type"))
+    (let [v (read-object! st)]
+      (when-not (and (string? v) (not (str/starts-with? v "_:")))
+        (fail! st "predicate must be an IRI"))
+      v)))
+
+(defn- read-predicate-object-list! [st subject]
+  (loop []
+    (let [p (read-verb! st)]
+      (loop []
+        (emit! st subject p (read-object! st))
+        (skip-ws! st)
+        (when (= \, (peek-ch st)) (advance! st 1) (recur)))
+      (skip-ws! st)
+      (when (= \; (peek-ch st))
+        (loop [] (advance! st 1) (skip-ws! st) (when (= \; (peek-ch st)) (recur)))
+        (when-not (#{\. \]} (peek-ch st)) (recur))))))
+
+(defn- read-directive! [st sparql?]
+  (let [kw (re-find #"^(@prefix|@base|PREFIX|BASE|prefix|base)" (subs (:text @st) (:pos @st)))
+        kw (first kw)]
+    (advance! st (count kw))
+    (skip-ws! st)
+    (if (str/ends-with? (str/lower-case kw) "prefix")
+      (let [m (re-find #"^([A-Za-z][A-Za-z0-9_\-.]*)?:" (subs (:text @st) (:pos @st)))
+            _ (when-not m (fail! st "bad prefix declaration"))
+            prefix (or (second m) "")]
+        (advance! st (count (first m)))
+        (skip-ws! st)
+        (let [iri (read-iriref! st)]
+          (swap! st assoc-in [:prefixes prefix] iri)))
+      (swap! st assoc :base (read-iriref! st)))
+    (when-not sparql? (expect! st "."))))
+
+(defn parse
+  "Turtle text -> vector of {:s :p :o}. `base` resolves relative IRIs; `scope`
+  prefixes blank node labels."
+  [text {:keys [base scope] :or {scope "t"}}]
+  (let [st (atom {:text text :pos 0 :base base :prefixes {} :bnodes 0
+                  :scope scope :triples []})]
+    (loop []
+      (skip-ws! st)
+      (when (peek-ch st)
+        (cond
+          (starts? st "@prefix") (read-directive! st false)
+          (starts? st "@base") (read-directive! st false)
+          (re-find #"^(PREFIX|BASE|prefix|base)\s" (subs (:text @st) (:pos @st))) (read-directive! st true)
+          :else
+          (let [c (peek-ch st)
+                subject (cond
+                          (= \[ c) (read-blank-property-list! st)
+                          (= \( c) (read-collection! st)
+                          :else (read-object! st))]
+            (when (map? subject) (fail! st "literal in subject position"))
+            (skip-ws! st)
+            (if (and (= \. (peek-ch st)) (or (= \[ c) (= \( c)))
+              nil
+              (read-predicate-object-list! st subject))
+            (expect! st ".")))
+        (recur)))
+    (vec (distinct (:triples @st)))))
