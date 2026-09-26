@@ -110,12 +110,14 @@
        :data-graph-digest (get semantic "dataGraphDigest")
        :result (state-node/decode-canonical! (get semantic "resultNode"))})))
 
+(declare verify-history!)
+
 (defn put!
   "Store both verified blocks after checking the predecessor. `put-fn`
   must reject a CID/bytes mismatch, as the local Mithril block store does."
   [put-fn get-fn ontology-source data-path* data-source query-type parents]
   (when-let [parent (first parents)]
-    (read! get-fn parent))
+    (verify-history! get-fn parent))
   (let [{:keys [semantic evidence]}
         (blocks ontology-source data-path* data-source query-type parents)]
     (put-fn (:cid semantic) (:bytes semantic))

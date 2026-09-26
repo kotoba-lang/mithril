@@ -112,6 +112,22 @@
                                          (source "dm2-mini.mith") "data.nq"
                                          (source "conforming.nq") nil [])))))
 
+(deftest a-valid-immediate-parent-with-missing-ancestor-is-refused
+  (with-store
+    (fn [store]
+      (let [put #(local/put-block! store %1 %2)
+            get #(local/get-block store %)
+            ontology (source "dm2-mini.mith")
+            data (source "conforming.nq")
+            missing-id (:cid (ipld/node->block {"unwritten" true}))
+            {:keys [semantic evidence]} (evidence/blocks ontology "data.nq"
+                                                         data nil [missing-id])]
+        (put (:cid semantic) (:bytes semantic))
+        (put (:cid evidence) (:bytes evidence))
+        (is (= :missing-evidence
+               (refusal-reason #(evidence/put! put get ontology "data.nq" data nil
+                                                 [(:cid evidence)]))))))))
+
 (deftest owl-inconsistency-remains-a-measured-stored-outcome
   (with-store
     (fn [store]
