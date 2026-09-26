@@ -1,0 +1,156 @@
+(ns mithril.reason-ipld-test
+  (:require [cljs.test :refer [deftest is testing]]
+            [ipld.core :as ipld]
+            [mithril.checkpoint-ipld-fs :as local]
+            [mithril.compiler :as compiler]
+            [mithril.reason-ipld :as evidence]
+            [mithril.reason-ref-fs :as refs]))
+
+(def fs (js/require "node:fs"))
+(def os (js/require "node:os"))
+(def path (js/require "node:path"))
+
+(defn- source [name]
+  (.readFileSync fs (str "test/fixtures/reason/" name) "utf8"))
+
+(defn- refusal-reason [f]
+  (try (f) nil
+       (catch :default error (:reason (ex-data error)))))
+
+(defn- failure-data [f]
+  (try (f) nil
+       (catch :default error (ex-data error))))
+
+(defn- with-store [f]
+  (let [directory (.mkdtempSync fs (.join path (.tmpdir os) "mithril-reason-ipld-"))]
+    (try (f (local/open! directory))
+         (finally (.rmSync fs directory #js {:recursive true :force true})))))
+
+(deftest ontology-input-inference-and-shacl-output-replay-from-disk
+  (with-store
+    (fn [store]
+      (let [put #(local/put-block! store %1 %2)
+            get #(local/get-block store %)
+            ontology (source "dm2-mini.mith")
+            conforming (source "conforming.nq")
+            violating (source "violating.nq")
+            first-id (evidence/put! put get ontology "input.nq" conforming nil [])
+            second-id (evidence/put! put get ontology "input.nq" violating nil [first-id])
+            first-run (evidence/read! get first-id)
+            second-run (evidence/read! get second-id)
+            history (evidence/verify-history! get second-id)]
+        (is (= :conforms (get-in first-run [:result :status])))
+        (is (= :violations (get-in second-run [:result :status])))
+        (is (= [first-id] (:parents second-run)))
+        (is (= 1 (count (get-in second-run [:result :violations]))))
+        (is (= "sh:class" (get-in second-run [:result :violations 0 :constraint])))
+        (is (some #(= "https://example.org/dm2#Performer" (:o %))
+                  (get-in first-run [:result :types])))
+        (is (= 2 (:evidence-blocks history)))
+        (is (= 4 (:blocks history)))
+        (is (= (:result second-run) (:result history)))
+        (is (= first-id (evidence/put! put get ontology "same.nt" conforming nil []))
+            "The input filename/suffix alias is not part of evidence identity")
+        (is (= (:semantic-cid first-run)
+               (:semantic-cid (evidence/read! get first-id))))
+        (let [reopened (local/open! (:directory store))]
+          (is (= :violations (get-in (evidence/read! #(local/get-block reopened %)
+                                                    second-id)
+                                     [:result :status]))))))))
+
+(deftest missing-and-tampered-blocks-do-not-become-a-green-proof
+  (with-store
+    (fn [store]
+      (let [put #(local/put-block! store %1 %2)
+            get #(local/get-block store %)
+            id (evidence/put! put get (source "dm2-mini.mith") "data.nq"
+                              (source "conforming.nq") nil [])
+            semantic-id (:semantic-cid (evidence/read! get id))
+            semantic-file (.join path (:directory store) "blocks" semantic-id)]
+        (is (= :invalid-cid (refusal-reason #(evidence/read! get "wrong"))))
+        (is (= :missing-evidence (refusal-reason #(evidence/read! get (ipld/cid
+                                                       (.from js/Buffer "missing"))))))
+        (.writeFileSync fs semantic-file (.from js/Buffer "tampered"))
+        (is (= :ipld/cid-mismatch
+               (:type (failure-data #(evidence/read! get id))))
+            "A changed semantic block must refuse for the CID mismatch")))))
+
+(deftest a-content-addressed-but-false-result-is-replayed-and-refused
+  (with-store
+    (fn [store]
+      (let [put #(local/put-block! store %1 %2)
+            get #(local/get-block store %)
+            ontology (source "dm2-mini.mith")
+            data (source "conforming.nq")
+            {:keys [semantic evidence]} (evidence/blocks ontology "data.nq" data nil [])
+            false-semantic (ipld/node->block
+                            (assoc (ipld/get-node (fn [_] (:bytes semantic))
+                                                  (:cid semantic))
+                                   "dataGraphDigest" "sha256:false"))
+            false-evidence (ipld/node->block
+                            (assoc (ipld/get-node (fn [_] (:bytes evidence))
+                                                  (:cid evidence))
+                                   "semantic" (ipld/link (:cid false-semantic))))]
+        (put (:cid false-semantic) (:bytes false-semantic))
+        (put (:cid false-evidence) (:bytes false-evidence))
+        (is (= :semantic-replay-mismatch
+               (refusal-reason #(evidence/read! get (:cid false-evidence)))))))))
+
+(deftest empty-data-is-recorded-as-refusal-not-conformance
+  (with-store
+    (fn [store]
+      (let [put #(local/put-block! store %1 %2)
+            get #(local/get-block store %)
+            id (evidence/put! put get (source "dm2-mini.mith") "data.nq" "" nil [])
+            saved (evidence/read! get id)]
+        (is (= :refused (get-in saved [:result :status])))
+        (is (= :no-data-triples (get-in saved [:result :refusal :reason])))))))
+
+(deftest a-noop-writer-cannot-claim-persistence
+  (is (= :missing-evidence
+         (refusal-reason #(evidence/put! (fn [_ _] nil) (fn [_] nil)
+                                         (source "dm2-mini.mith") "data.nq"
+                                         (source "conforming.nq") nil [])))))
+
+(deftest form-and-jsonld-inputs-share-semantic-identity
+  (let [form (source "dm2-mini.mith")
+        jsonld (js/JSON.stringify (clj->js (:rdf-dataset
+                                            (compiler/compile-ontology-text "ontology.mith" form))))
+        nq (str "<urn:x:edr> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> "
+                "<https://example.org/dm2#System> .")
+        data-jsonld (js/JSON.stringify
+                     #js {"@id" "urn:x:edr"
+                          "@type" "https://example.org/dm2#System"})
+        a (evidence/blocks form "input.nq" nq nil [])
+        b (evidence/blocks jsonld "input.jsonld" data-jsonld nil [])]
+    (is (not= (get-in a [:evidence :cid]) (get-in b [:evidence :cid]))
+        "Exact source provenance remains distinct")
+    (is (= (get-in a [:semantic :cid]) (get-in b [:semantic :cid]))
+        "Equivalent RDF and typed results reuse a semantic block")))
+
+(deftest verified-local-refs-fork-and-advance-only-causally
+  (with-store
+    (fn [store]
+      (let [put #(local/put-block! store %1 %2)
+            get #(local/get-block store %)
+            ontology (source "dm2-mini.mith")
+            first-id (evidence/put! put get ontology "data.nq"
+                                    (source "conforming.nq") nil [])
+            unrelated (evidence/put! put get ontology "data.nq"
+                                     (source "violating.nq") nil [])
+            next-id (evidence/put! put get ontology "data.nq"
+                                   (source "violating.nq") nil [first-id])]
+        (is (= first-id (refs/create! store "main" first-id)))
+        (is (= first-id (refs/fork! store "main" "experiment")))
+        (is (= :conforms (get-in (refs/read! store "experiment") [:result :status])))
+        (is (= :noncausal-ref-advance
+               (refusal-reason #(refs/advance! store "main" first-id unrelated))))
+        (is (= first-id (:head (refs/read! store "main"))))
+        (is (= next-id (:head (refs/advance! store "main" first-id next-id))))
+        (is (= :ref-conflict
+               (refusal-reason #(refs/advance! store "main" first-id unrelated))))
+        (is (= :violations (get-in (refs/read! store "main") [:result :status])))
+        (is (= :conforms (get-in (refs/read! store "experiment") [:result :status])))
+        (is (= :ref-exists (refusal-reason #(refs/create! store "main" first-id))))
+        (is (= :invalid-ref-name
+               (refusal-reason #(refs/create! store "../escape" first-id))))))))

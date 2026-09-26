@@ -73,6 +73,29 @@ schema remains valid without a text decoder.
 ontologies the domain modules (checkpoint, decision, growth, state) accept:
 OWL 2 RL entailment first, then W3C SHACL Core over the entailed graph.
 
+`mithril.reason-ipld` can persist the exact Mithril ontology source, RDF data
+input, and the typed OWL/SHACL result as two CID-addressed DAG-CBOR blocks.
+The separate semantic-result CID is reusable when Form/JSON-LD and N-Quads/
+JSON-LD spellings produce the same canonical RDF graphs and result. The
+evidence CID retains exact source provenance and one parent link. `read!`
+rehashes both blocks and reruns compilation, entailment and validation;
+`verify-history!` checks the causal chain. With the private local store,
+`mithril.reason-ref-fs` offers verified create/fork/compare-and-swap advance
+under a one-filesystem lock. This is local immutable history and naming,
+**not** distributed ref convergence, crash-durable fsync or a reasoner cache.
+
+```clojure
+(require '[mithril.checkpoint-ipld-fs :as store]
+         '[mithril.reason-ipld :as evidence]
+         '[mithril.reason-ref-fs :as refs])
+(def db (store/open! "/absolute/private/mithril-reason-store"))
+(def get-block #(store/get-block db %))
+(def put-block #(store/put-block! db %1 %2))
+(def head (evidence/put! put-block get-block ontology-source "data.nq" data-source nil []))
+(refs/create! db "main" head)
+(refs/read! db "main") ; => checked CID, typed result, and verification counts
+```
+
 ```sh
 kbb --backend sci bin/mithril.cljk reason <ontology.mith> <data.(nq|nt|jsonld|json)> \
   [--query-type <class IRI>] [--json]
