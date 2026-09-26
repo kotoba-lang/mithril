@@ -112,6 +112,24 @@
                                          (source "dm2-mini.mith") "data.nq"
                                          (source "conforming.nq") nil [])))))
 
+(deftest owl-inconsistency-remains-a-measured-stored-outcome
+  (with-store
+    (fn [store]
+      (let [put #(local/put-block! store %1 %2)
+            get #(local/get-block store %)
+            data (str "<urn:x:a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> "
+                      "<https://example.org/dm2#Performer> .\n"
+                      "<urn:x:a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> "
+                      "<https://example.org/dm2#Location> .\n")
+            id (evidence/put! put get (source "unsupported-axiom.mith")
+                              "data.nq" data nil [])
+            saved (evidence/read! get id)]
+        (is (= :inconsistent (get-in saved [:result :status])))
+        (is (= :cax-dw (get-in saved [:result :inconsistencies 0 :rule])))
+        (is (= 1 (count (get-in saved [:result :inconsistencies]))))
+        (is (= :inconsistent (get-in (evidence/verify-history! get id)
+                                     [:result :status])))))))
+
 (deftest form-and-jsonld-inputs-share-semantic-identity
   (let [form (source "dm2-mini.mith")
         jsonld (js/JSON.stringify (clj->js (:rdf-dataset
