@@ -147,7 +147,7 @@
 (defn verify-history!
   "Verify every reachable block and recompute each recorded inference."
   [get-fn head]
-  (loop [id head seen #{} semantic-ids #{} head-result nil]
+  (loop [id head seen #{} semantic-ids #{} head-result nil head-output nil]
     (when (or (contains? seen id) (>= (count seen) 256))
       (refuse! :invalid-history))
     (let [saved (read! get-fn id)
@@ -155,8 +155,11 @@
           visited (conj seen id)
           semantic-ids* (conj semantic-ids (:semantic-cid saved))]
       (if parent
-        (recur parent visited semantic-ids* (or head-result (:result saved)))
+        (recur parent visited semantic-ids* (or head-result (:result saved))
+               (or head-output (select-keys saved [:output-dataset :output-graph-digest])))
         {:head head :evidence-blocks (count visited)
          :semantic-blocks (count semantic-ids*)
          :blocks (+ (count visited) (count semantic-ids*))
-         :result (or head-result (:result saved))}))))
+         :result (or head-result (:result saved))
+         :output-dataset (:output-dataset (or head-output saved))
+         :output-graph-digest (:output-graph-digest (or head-output saved))}))))

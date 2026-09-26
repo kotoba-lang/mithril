@@ -105,6 +105,30 @@ under a one-filesystem lock. This is local immutable history and naming,
 (select-keys (evidence/read! get-block head) [:output-dataset :output-graph-digest])
 ```
 
+Remote immutable blocks are opt-in through `mithril.reason-remote`. It accepts
+the existing `kotobase.blocks/client` transport, checks each fetched CID and
+canonical DAG-CBOR block, enforces block/count/total-byte limits, and replays
+the whole OWL/SHACL history after read-back. `publish!` returns the verified
+typed result and RDF output dataset/digest. `/ipld/` reads are public: pass
+`:public-read-consent? true` only for data approved for public disclosure;
+there is no private-by-default remote publication path here. The caller
+supplies fresh authorization to the block client. Neither immutable blocks
+nor this adapter implement a distributed mutable ref or CAS. A client with a
+network response-size limit is required where an untrusted server could send
+an oversized body, since the adapter's size limit applies after receipt.
+
+```clojure
+(require '[kotobase.blocks :as blocks]
+         '[mithril.reason-remote :as remote])
+(def client (blocks/client {:endpoint "https://kotobase.net"
+                            :authorization mint-fresh-pin-authorization}))
+(def verified (-> (remote/publish!
+                   {:client client :public-read-consent? true}
+                   ontology-source "data.nq" public-data-source nil [])
+                  (.then #(select-keys % [:head :result :output-dataset
+                                          :output-graph-digest]))))
+```
+
 ```sh
 kbb --backend sci bin/mithril.cljk reason <ontology.mith> <data.(nq|nt|jsonld|json)> \
   [--query-type <class IRI>] [--json]
