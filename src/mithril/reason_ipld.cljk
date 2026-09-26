@@ -6,14 +6,18 @@
   (:require [ipld.core :as ipld]
             [mithril.compiler :as compiler]
             [mithril.reason :as reason]
+            [mithril.reason-rdf :as reason-rdf]
             [mithril.state-node :as state-node]
             [multiformats.core :as multiformats]
             [rdf-canon.core :as rdf-canon]))
 
-(def semantic-format "https://mithril.fund/block/reason-result-ipld-v1")
+(def legacy-semantic-format "https://mithril.fund/block/reason-result-ipld-v1")
+(def semantic-format "https://mithril.fund/block/reason-result-ipld-v2")
 (def evidence-format "https://mithril.fund/block/reason-evidence-ipld-v1")
-(def semantic-keys
+(def legacy-semantic-keys
   #{"format" "ontologyGraphDigest" "dataGraphDigest" "queryType" "resultNode"})
+(def semantic-keys
+  (into legacy-semantic-keys #{"outputDataset" "outputGraphDigest"}))
 (def evidence-keys
   #{"format" "ontologySource" "dataSource" "dataFormat" "queryType"
     "semantic" "parents"})
@@ -39,19 +43,27 @@
     :jsonld "jsonld"
     (refuse! :invalid-data-format)))
 
-(defn- evaluate [ontology-source data-source format query-type]
+(defn- evaluate [ontology-source data-source format query-type version]
   (when-not (and (string? ontology-source) (string? data-source)
                  (or (nil? query-type) (string? query-type)))
     (refuse! :invalid-input))
   (let [artifact (compiler/compile-ontology-text "ontology.mith" ontology-source)
         quads (reason/parse-data (data-path format) data-source)
         result (reason/reason artifact quads (cond-> {}
-                                               query-type (assoc :query-type query-type)))]
-    {"format" semantic-format
-     "ontologyGraphDigest" (:graph-digest artifact)
-     "dataGraphDigest" (str "sha256:" (rdf-canon/canonical-hash quads))
-     "queryType" query-type
-     "resultNode" (state-node/encode-value result)}))
+                                               query-type (assoc :query-type query-type)))
+        ontology-digest (:graph-digest artifact)
+        data-digest (str "sha256:" (rdf-canon/canonical-hash quads))
+        legacy? (= version legacy-semantic-format)
+        output (when-not legacy?
+                 (reason-rdf/document result ontology-digest data-digest query-type))]
+    (cond-> {"format" version
+             "ontologyGraphDigest" ontology-digest
+             "dataGraphDigest" data-digest
+             "queryType" query-type
+             "resultNode" (state-node/encode-value
+                           (if legacy? (dissoc result :asserted) result))}
+      output (assoc "outputDataset" output
+                    "outputGraphDigest" (reason-rdf/graph-digest output)))))
 
 (defn blocks
   "Build semantic and provenance DAG-CBOR blocks. A single predecessor is
@@ -62,7 +74,7 @@
     (refuse! :invalid-parents))
   (let [format (data-format data-path*)
         semantic (ipld/node->block
-                  (evaluate ontology-source data-source format query-type))
+                  (evaluate ontology-source data-source format query-type semantic-format))
         evidence (ipld/node->block
                   {"format" evidence-format
                    "ontologySource" ontology-source
@@ -96,18 +108,25 @@
           semantic (ipld/get-node get-fn semantic-id)
           parents (mapv ipld/link-cid (get evidence "parents"))]
       (when-not semantic (refuse! :missing-semantic-result))
-      (when-not (and (map? semantic) (= semantic-keys (set (keys semantic)))
-                     (= semantic-format (get semantic "format")))
+      (when-not (and (map? semantic)
+                     (contains? #{semantic-format legacy-semantic-format}
+                                (get semantic "format"))
+                     (= (if (= legacy-semantic-format (get semantic "format"))
+                          legacy-semantic-keys semantic-keys)
+                        (set (keys semantic))))
         (refuse! :invalid-semantic-result))
       (when-not (= semantic
                    (evaluate (get evidence "ontologySource")
                              (get evidence "dataSource")
                              (get evidence "dataFormat")
-                             (get evidence "queryType")))
+                             (get evidence "queryType")
+                             (get semantic "format")))
         (refuse! :semantic-replay-mismatch))
       {:cid id :semantic-cid semantic-id :parents parents
        :ontology-graph-digest (get semantic "ontologyGraphDigest")
        :data-graph-digest (get semantic "dataGraphDigest")
+       :output-dataset (get semantic "outputDataset")
+       :output-graph-digest (get semantic "outputGraphDigest")
        :result (state-node/decode-canonical! (get semantic "resultNode"))})))
 
 (declare verify-history!)
