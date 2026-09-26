@@ -75,6 +75,14 @@ OWL 2 RL entailment first, then W3C SHACL Core over the entailed graph.
 
 `mithril.reason-ipld` can persist the exact Mithril ontology source, RDF data
 input, and the typed OWL/SHACL result as two CID-addressed DAG-CBOR blocks.
+The v2 semantic block also contains a versioned expanded JSON-LD RDF Dataset:
+separate named graphs for asserted premises, entailed closure, newly inferred
+facts, the SHACL validation report, and result metadata. `read!` returns this
+as `:output-dataset` with its canonical RDF `:output-graph-digest`; it replays
+and checks both on every read. V1 blocks remain readable without an output
+dataset. OWL datatype rule facts with a literal subject cannot be RDF triples;
+they remain in the typed result, and the metadata graph counts each omitted
+fact explicitly rather than silently treating the RDF projection as complete.
 The separate semantic-result CID is reusable when Form/JSON-LD and N-Quads/
 JSON-LD spellings produce the same canonical RDF graphs and result. The
 evidence CID retains exact source provenance and one parent link. `read!`
@@ -94,6 +102,7 @@ under a one-filesystem lock. This is local immutable history and naming,
 (def head (evidence/put! put-block get-block ontology-source "data.nq" data-source nil []))
 (refs/create! db "main" head)
 (refs/read! db "main") ; => checked CID, typed result, and verification counts
+(select-keys (evidence/read! get-block head) [:output-dataset :output-graph-digest])
 ```
 
 ```sh
@@ -114,7 +123,7 @@ kbb --backend sci bin/mithril.cljk reason <ontology.mith> <data.(nq|nt|jsonld|js
 ;;              :counts {:subclass-edges :subproperty-edges
 ;;                       :subclass-edges-total :subproperty-edges-total}}
 ;;     :report {:conforms bool :results [{…}]}              ; W3C validation report, below
-;;     :rules [...] :entailed [{:s :p :o}] :inferred [...]
+;;     :rules [...] :asserted [{:s :p :o}] :entailed [{:s :p :o}] :inferred [...]
 ;;     :types [{:s :p :o :inferred?}]
 ;;     :violations [{:focus :constraint :component :severity :path :expected :value :count :shape}]
 ;;     :inactive [{:shape :parameter :reason}]              ; parameters that activated nothing
